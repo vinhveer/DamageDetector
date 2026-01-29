@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs / temp
+*.log
+*.tmp
+*.swp
+.ipynb_checkpoints/
+
+# Model artifacts / large files
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+
+# Outputs
+results*/
+output*/
+runs/
+wandb/
+checkpoints/*.pth
+checkpoints/*.pt
+
+# Prevent accidentally committing embedded repos
+**/.git/
+
