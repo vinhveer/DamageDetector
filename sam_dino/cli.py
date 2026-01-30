@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_root))
 
-    from ground_truth_editor.predict_sam_dino import SamDinoParams, SamDinoRunner
+    from sam_dino.runner import SamDinoParams, SamDinoRunner
 
     params = SamDinoParams(**params_dict)
     runner = SamDinoRunner()

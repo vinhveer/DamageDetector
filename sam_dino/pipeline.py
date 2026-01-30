@@ -164,7 +164,7 @@ def filter_small_components(mask01: np.ndarray, min_area: int) -> np.ndarray:
 
 
 def load_checkpoint_state_dict(checkpoint_path: str) -> dict:
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if isinstance(ckpt, dict) and "state_dict" in ckpt and isinstance(ckpt["state_dict"], dict):
         return ckpt["state_dict"]
     if isinstance(ckpt, dict):
@@ -277,7 +277,7 @@ def apply_delta_to_sam(
     scaling_factor: float,
     rank: int,
 ) -> None:
-    delta_state = torch.load(delta_ckpt_path, map_location="cpu")
+    delta_state = torch.load(delta_ckpt_path, map_location="cpu", weights_only=False)
     if not isinstance(delta_state, dict):
         raise TypeError(f"Unsupported delta checkpoint format: {type(delta_state)} ({delta_ckpt_path})")
 
