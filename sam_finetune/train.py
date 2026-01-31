@@ -6,7 +6,7 @@ import torch
 import torch.backends.cudnn as cudnn
 from importlib import import_module
 from segment_anything import sam_model_registry
-from trainer import trainer_khanhha
+from trainer import trainer_generic
 
 
 parser = argparse.ArgumentParser()
@@ -14,9 +14,9 @@ parser.add_argument('--root_path', type=str, help='root dir for training data')
 parser.add_argument('--val_path', type=str, help='root dir for validation data')
 parser.add_argument('--output', type=str, default='./output/training')
 parser.add_argument('--dataset', type=str,
-                    default='khanhha', help='experiment_name')
+                    default='generic', help='experiment_name')
 parser.add_argument('--list_dir', type=str,
-                    default='./lists/lists_khanhha', help='list dir')
+                    default='./lists/lists_khanhha', help='list dir') # Unused for generic
 parser.add_argument('--num_classes', type=int,
                     default=1, help='output channel of network')
 parser.add_argument('--max_iterations', type=int,
@@ -41,7 +41,7 @@ parser.add_argument('--vit_name', type=str,
 parser.add_argument('--ckpt', type=str, default='checkpoints/sam_vit_h_4b8939.pth',
                     help='Pretrained checkpoint')
 parser.add_argument('--delta_ckpt', type=str, default=None, help='Finetuned delta checkpoint')
-parser.add_argument('--delta_type', type=str, default='choose from "adapter" or "lora" or "both"')
+parser.add_argument('--delta_type', type=str, default='adapter', help='choose from "adapter" or "lora" or "both"')
 parser.add_argument('--middle_dim', type=int, default=32, help='Middle dim of adapter')
 parser.add_argument('--scaling_factor', type=float, default=0.1, help='Scaling_factor of adapter')
 parser.add_argument('--rank', type=int, default=4, help='Rank for LoRA adaptation')
@@ -53,7 +53,7 @@ parser.add_argument('--dice_param', type=float, default=0.8)
 parser.add_argument('--lr_exp', type=float, default=0.9, help='The learning rate decay expotential')
 parser.add_argument('--tf32', action='store_true', help='If activated, use tf32 to accelerate the training process')
 parser.add_argument('--use_amp', action='store_true', help='If activated, adopt mixed precision for acceleration, but may cause NaN')
-parser.add_argument('--save_interval', type=int, default=5, help='Save and validation intervals')
+parser.add_argument('--save_interval', type=int, default=1, help='Save and validation intervals')
 
 args = parser.parse_args()
 
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     torch.cuda.manual_seed(args.seed)
     dataset_name = args.dataset
     dataset_config = {
-        'khanhha': {
+        'generic': {
             'root_path': args.root_path,
             'list_dir': args.list_dir,
             'num_classes': args.num_classes,
@@ -107,8 +107,9 @@ if __name__ == "__main__":
     # register model
     sam, img_embedding_size = sam_model_registry[args.vit_name](image_size=args.img_size,
                                                                 num_classes=args.num_classes,
-                                                                checkpoint=args.ckpt, pixel_mean=[0, 0, 0],
-                                                                pixel_std=[1, 1, 1])
+                                                                checkpoint=args.ckpt, 
+                                                                pixel_mean=[0.485, 0.456, 0.406],
+                                                                pixel_std=[0.229, 0.224, 0.225])
 
     if args.delta_type == 'adapter':
         pkg = import_module('delta.sam_adapter_image_encoder')
@@ -144,5 +145,5 @@ if __name__ == "__main__":
     total_params_train = sum(p.numel() for p in net.parameters() if p.requires_grad)
     print(f"Total number of trainable parameters:{total_params_train}")
 
-    trainer = {'khanhha': trainer_khanhha}
+    trainer = {'generic': trainer_generic}
     trainer[dataset_name](args, net, snapshot_path, multimask_output, low_res)

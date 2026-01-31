@@ -28,7 +28,7 @@ class SamDinoParams:
     sam_min_component_area: int = 0
     sam_dilate_iters: int = 0
     seed: int = 1337
-    device: str = "cuda"  # auto|cpu|mps|cuda
+    device: str = "auto"  # auto|cpu|mps|cuda
     output_dir: str = "results_sam_dino"
 
 
@@ -60,10 +60,6 @@ class SamDinoRunner:
         return None
 
     def _ensure_import_paths(self) -> None:
-        # Since we are now in the 'sam_dino' package which is at repo root level (or close),
-        # we still want to ensure 'sam_finetune' and root are in path if needed.
-        # But if this is installed as a package, relative imports should work.
-        # For now, keep the hack to add repo root if run as script or sub-package in weird environment.
         here = Path(__file__).resolve()
         repo_root = here.parents[1]
         if str(repo_root) not in sys.path:
@@ -72,8 +68,7 @@ class SamDinoRunner:
     def _load_gdino_state_dict(self, checkpoint_path: str) -> dict:
         import torch
 
-        # FIXED: weights_only=False for backward compatibility with older checkpoints
-        raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        raw = torch.load(checkpoint_path, map_location="cpu")
         if isinstance(raw, dict):
             if isinstance(raw.get("state_dict"), dict):
                 state = raw["state_dict"]

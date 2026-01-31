@@ -65,6 +65,7 @@ def _predict_tiled(
     for yy in range(0, h_pad - tile_size + 1, step):
         for xx in range(0, w_pad - tile_size + 1, step):
             if stop_checker is not None and stop_checker():
+                print("Inference: Stop checker triggered!")
                 raise StopRequested("Stopped")
             patch = img_pad[:, yy : yy + tile_size, xx : xx + tile_size]
             patches.append(patch)

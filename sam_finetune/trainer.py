@@ -23,9 +23,19 @@ def calc_loss(outputs, high_res_label_batch, ce_loss, dice_loss, dice_weight:flo
     loss = (1 - dice_weight) * loss_ce + dice_weight * loss_dice
     return loss, loss_ce, loss_dice
 
+    return loss, loss_ce, loss_dice
 
-def trainer_khanhha(args, model, snapshot_path, multimask_output, low_res): 
-    from datasets.dataset_khanhha import Khanhha_dataset, RandomGenerator
+
+def worker_init_fn(worker_id):
+    # Retrieve seed from where? Simple workaround: use a global or pass it?
+    # Actually, args is not available here. 
+    # Usually we just set random seed based on worker_id + some constant
+    random.seed(3407 + worker_id)
+
+def trainer_generic(args, model, snapshot_path, multimask_output, low_res): 
+    # from datasets.dataset_khanhha import Khanhha_dataset, RandomGenerator
+    from datasets.dataset_generic import GenericDataset, RandomGenerator
+
     logging.basicConfig(filename=snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
@@ -35,20 +45,21 @@ def trainer_khanhha(args, model, snapshot_path, multimask_output, low_res):
     batch_size = args.batch_size * args.n_gpu
     # max_iterations = args.max_iterations
 
-    db_val = Khanhha_dataset(base_dir=args.val_path, list_dir=args.list_dir, split="val_vol")
+    # Use GenericDataset. args.val_path and args.root_path should clearly point to folders.
+    # We ignore list_dir if using GenericDataset unless we want to keep that logic.
+    # The new GenericDataset scans folders.
+    
+    db_val = GenericDataset(base_dir=args.val_path, split="val_vol", output_size=[args.img_size, args.img_size])
 
-    db_train = Khanhha_dataset(base_dir=args.root_path, list_dir=args.list_dir, split="train",
-                               transform=transforms.Compose(
-                                   [RandomGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res])])) # In fact, it's high_res
+    db_train = GenericDataset(base_dir=args.root_path, split="train",
+                               transform=RandomGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res]))
+    
     print("The length of train set is: {}".format(len(db_train)))
 
-    def worker_init_fn(worker_id):
-        random.seed(args.seed + worker_id)
-
-    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True,
+    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True,
                              worker_init_fn=worker_init_fn)
 
-    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=0)
+    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=2)
                     
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
@@ -65,8 +76,10 @@ def trainer_khanhha(args, model, snapshot_path, multimask_output, low_res):
         optimizer = optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=b_lr, momentum=0.9, weight_decay=0.0001)  # Even pass the model.parameters(), the `requires_grad=False` layers will not update
     
     if args.use_amp: # Using amp may cause unstable gradients during training
-        scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp)    
+        # scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp) 
+        scaler = torch.amp.GradScaler('cuda', enabled=args.use_amp)   
     iter_num = 0
+
     max_epoch = args.max_epochs
     stop_epoch = args.stop_epoch
     max_iterations = args.max_epochs * len(trainloader)  

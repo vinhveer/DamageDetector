@@ -40,7 +40,11 @@ def select_device_str(preference: str, *, torch) -> Literal["cpu", "mps", "cuda"
     if pref != "auto":
         raise ValueError("device must be auto/cpu/mps/cuda")
 
-    # auto: priority cpu -> mps -> cuda
+    # auto: priority cuda -> mps -> cpu
+    if has_cuda:
+        return "cuda"
+    if has_mps:
+        return "mps"
     return "cpu"
 
 
