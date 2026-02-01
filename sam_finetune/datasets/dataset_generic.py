@@ -123,7 +123,7 @@ class RandomGenerator(object):
         return sample
 
 class GenericDataset(Dataset):
-    def __init__(self, base_dir, split="train", transform=None, img_exts=None, mask_exts=None, output_size=None, cache_data=False):
+    def __init__(self, base_dir, split="train", transform=None, img_exts=None, mask_exts=None, output_size=None, cache_data=True):
         self.transform = transform  
         self.split = split
         self.data_dir = base_dir
