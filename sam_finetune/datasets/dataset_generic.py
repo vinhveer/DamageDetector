@@ -8,34 +8,75 @@ from torch.utils.data import Dataset
 from PIL import Image
 import glob
 import cv2
+import albumentations as A
 
 def random_rot_flip(image, label):
-    k = np.random.randint(0, 4)
-    image = np.rot90(image, k)
-    label = np.rot90(label, k)
-    axis = np.random.randint(0, 2)
-    image = np.flip(image, axis=axis).copy()
-    label = np.flip(label, axis=axis).copy()
-    return image, label
+    # Deprecated: Handled by Albumentations
+    pass
 
 def random_rotate(image, label):
-    angle = np.random.randint(-20, 20)
-    image = ndimage.rotate(image, angle, order=0, reshape=False)
-    label = ndimage.rotate(label, angle, order=0, reshape=False)
-    return image, label
+    # Deprecated: Handled by Albumentations
+    pass
 
 class RandomGenerator(object):
     def __init__(self, output_size, low_res):
         self.output_size = output_size
         self.low_res = low_res
+        # Define Albumentations pipeline
+        # Define Albumentations pipeline (Heavy Augmentation)
+        self.transform = A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.RandomRotate90(p=0.5),
+            
+            # Geometric Augmentations
+            A.RandomResizedCrop(size=(output_size[0], output_size[1]), scale=(0.8, 1.0), ratio=(0.9, 1.1), p=0.3),
+            A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=30, p=0.5),
+            A.OneOf([
+                A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
+                A.GridDistortion(p=0.5),
+                A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
+            ], p=0.3),
+            
+            # Color/Noise Augmentations
+            A.OneOf([
+                A.CLAHE(clip_limit=2),
+                A.RandomBrightnessContrast(),
+                A.RandomGamma(),            
+            ], p=0.5),
+            
+            A.OneOf([
+                A.GaussNoise(),
+                A.MotionBlur(blur_limit=3),
+            ], p=0.3),
+            
+            A.HueSaturationValue(p=0.3),
+            
+            # Environmental / Occlusion
+            A.RandomShadow(num_shadows_lower=1, num_shadows_upper=3, shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.3),
+            A.CoarseDropout(max_holes=8, max_height=32, max_width=32, min_holes=1, min_height=8, min_width=8, fill_value=0, mask_fill_value=0, p=0.3),
+        ])
 
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
 
-        if random.random() > 0.5:
-            image, label = random_rot_flip(image, label)
-        elif random.random() > 0.5:
-            image, label = random_rotate(image, label)
+        # Apply Albumentations
+        # Convert float image (0-1) to uint8 (0-255) for optimal Albumentations support
+        if image.dtype == np.float32 or image.dtype == np.float64:
+            image_uint8 = (image * 255).astype(np.uint8)
+        else:
+            image_uint8 = image
+
+        # Ensure mask is uint8 (required by some transforms like ElasticTransform)
+        label_uint8 = label.astype(np.uint8)
+        
+        augmented = self.transform(image=image_uint8, mask=label_uint8)
+        image_aug = augmented['image']
+        label_aug = augmented['mask']
+        
+        # Convert back to float 0-1
+        image = image_aug.astype(np.float32) / 255.0
+        label = label_aug # Keep as is (0,1 or 0,255 depending on input, but mask is usually binary)
         
         if len(image.shape) == 3:
             x, y, c = image.shape
@@ -129,8 +170,8 @@ class GenericDataset(Dataset):
         image = Image.open(filepath_image).convert("RGB") # Ensure RGB
         label = Image.open(filepath_label).convert("L")   # Ensure Grayscale
 
-        image = np.array(image) / 255.0  
-        label = np.array(label) / 255.0    
+        image = (np.array(image) / 255.0).astype(np.float32)
+        label = (np.array(label) / 255.0).astype(np.float32)
 
         sample = {'image': image, 'label': label}
 

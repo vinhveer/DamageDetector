@@ -56,7 +56,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     
     print("The length of train set is: {}".format(len(db_train)))
 
-    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True,
+    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True,
                              worker_init_fn=worker_init_fn)
 
     valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=4)
@@ -87,7 +87,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
 
     iterator = tqdm(range(max_epoch), ncols=70)
     best_performance = 0.0
-    patience = 10
+    patience = max_epoch
     patience_counter = 0
     for epoch_num in iterator:
         model.train()

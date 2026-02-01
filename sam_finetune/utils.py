@@ -67,7 +67,7 @@ class DiceLoss(nn.Module):
 
     def _dice_loss(self, score, target):
         target = target.float()
-        smooth = 1e-5
+        smooth = 1.0
         intersect = torch.sum(score * target) 
         y_sum = torch.sum(target * target)
         z_sum = torch.sum(score * score)

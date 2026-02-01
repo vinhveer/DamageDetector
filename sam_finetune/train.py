@@ -49,7 +49,7 @@ parser.add_argument('--warmup', action='store_true', help='If activated, warp up
 parser.add_argument('--warmup_period', type=int, default=300,
                     help='Warp up iterations, only valid whrn warmup is activated')
 parser.add_argument('--AdamW', action='store_true', help='If activated, use AdamW to finetune SAM model')
-parser.add_argument('--dice_param', type=float, default=0.8)
+parser.add_argument('--dice_param', type=float, default=0.5)
 parser.add_argument('--lr_exp', type=float, default=0.9, help='The learning rate decay expotential')
 parser.add_argument('--tf32', action='store_true', help='If activated, use tf32 to accelerate the training process')
 parser.add_argument('--use_amp', action='store_true', help='If activated, adopt mixed precision for acceleration, but may cause NaN')
