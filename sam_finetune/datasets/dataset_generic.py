@@ -123,11 +123,12 @@ class RandomGenerator(object):
         return sample
 
 class GenericDataset(Dataset):
-    def __init__(self, base_dir, split="train", transform=None, img_exts=None, mask_exts=None, output_size=None):
+    def __init__(self, base_dir, split="train", transform=None, img_exts=None, mask_exts=None, output_size=None, cache_data=True):
         self.transform = transform  
         self.split = split
         self.data_dir = base_dir
         self.output_size = output_size # Tuple (h, w) or list
+        self.cache_data = cache_data
         
         self.img_dir = os.path.join(base_dir, "images")
         self.mask_dir = os.path.join(base_dir, "masks")
@@ -146,32 +147,80 @@ class GenericDataset(Dataset):
         self.sample_list.sort() # Ensure deterministic order
         print(f"GenericDataset ({split}): Found {len(self.sample_list)} images in {self.img_dir}")
 
+        self.cached_images = {}
+        self.cached_masks = {}
+
+        if self.cache_data:
+            print(f"GenericDataset ({split}): Caching data into RAM... This may take a while.")
+            from concurrent.futures import ThreadPoolExecutor
+            from tqdm import tqdm
+            
+            def load_single_item(idx):
+                img_name = self.sample_list[idx]
+                filepath_image = os.path.join(self.img_dir, img_name)
+                base_name = os.path.splitext(img_name)[0]
+                
+                # Find mask path
+                mask_path = None
+                for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
+                    candidate = os.path.join(self.mask_dir, base_name + ext)
+                    if os.path.exists(candidate):
+                        mask_path = candidate
+                        break
+                
+                if mask_path:
+                    # Load and convert immediately to save space/time later
+                    img = Image.open(filepath_image).convert("RGB")
+                    dataset_mask = Image.open(mask_path).convert("L")
+                    
+                    # Store as numpy/bytes or keep as PIL? PIL is compact.
+                    # Or convert to array now? Converting to array may take more RAM but faster access.
+                    # Given 256GB RAM, let's store as numpy uint8 (compact visually).
+                    return idx, np.array(img), np.array(dataset_mask)
+                return idx, None, None
+
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                results = list(tqdm(executor.map(load_single_item, range(len(self.sample_list))), total=len(self.sample_list)))
+            
+            for idx, img, mask in results:
+                if img is not None:
+                    self.cached_images[idx] = img
+                    self.cached_masks[idx] = mask
+            
+            print(f"GenericDataset ({split}): Cached {len(self.cached_images)} items into RAM.")
+
     def __len__(self):
         return len(self.sample_list)
 
     def __getitem__(self, idx):
-        img_name = self.sample_list[idx]
-        filepath_image = os.path.join(self.img_dir, img_name)
-        
-        base_name = os.path.splitext(img_name)[0]
-        
-        mask_name = None
-        for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
-            candidate = os.path.join(self.mask_dir, base_name + ext)
-            if os.path.exists(candidate):
-                mask_name = base_name + ext
-                filepath_label = candidate
-                break
-        
-        if mask_name is None:
-             raise FileNotFoundError(f"No corresponding mask found for image {img_name} in {self.mask_dir}")
-
-        # Load
-        image = Image.open(filepath_image).convert("RGB") # Ensure RGB
-        label = Image.open(filepath_label).convert("L")   # Ensure Grayscale
-
-        image = (np.array(image) / 255.0).astype(np.float32)
-        label = (np.array(label) / 255.0).astype(np.float32)
+        if self.cache_data and idx in self.cached_images:
+            image_arr = self.cached_images[idx]
+            label_arr = self.cached_masks[idx]
+            # Norm
+            image = (image_arr / 255.0).astype(np.float32)
+            label = (label_arr / 255.0).astype(np.float32)
+        else:
+            # Fallback to disk load (or if cache disabled)
+            img_name = self.sample_list[idx]
+            filepath_image = os.path.join(self.img_dir, img_name)
+            
+            base_name = os.path.splitext(img_name)[0]
+            mask_name = None
+            for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
+                candidate = os.path.join(self.mask_dir, base_name + ext)
+                if os.path.exists(candidate):
+                    mask_name = base_name + ext
+                    filepath_label = candidate
+                    break
+            
+            if mask_name is None:
+                 raise FileNotFoundError(f"No corresponding mask found for image {img_name} in {self.mask_dir}")
+    
+            image = Image.open(filepath_image).convert("RGB")
+            label = Image.open(filepath_label).convert("L")
+    
+            image = (np.array(image) / 255.0).astype(np.float32)
+            label = (np.array(label) / 255.0).astype(np.float32)
 
         sample = {'image': image, 'label': label}
 
