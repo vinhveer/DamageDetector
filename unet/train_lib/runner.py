@@ -277,12 +277,13 @@ def run_training(args):
             image_filenames=train_names,
             mask_prefix=args.mask_prefix,
             mask_index=train_mask_index,
-            image_transform=image_transform,
-            mask_transform=mask_transform,
+            image_transform=None,
+            mask_transform=None,
             augment=not args.no_augment,
             patch_size=None,
             output_size=args.input_size,
             verbose=True,
+            cache_data=False
         )
         val_full = CrackDataset(
             image_dir=val_images_path,
@@ -290,12 +291,13 @@ def run_training(args):
             image_filenames=val_names,
             mask_prefix=args.mask_prefix,
             mask_index=val_mask_index,
-            image_transform=image_transform,
-            mask_transform=mask_transform,
+            image_transform=None,
+            mask_transform=None,
             augment=False,
             patch_size=None,
             output_size=args.input_size,
             verbose=True,
+            cache_data=False
         )
         train_dataset = train_full
         val_dataset = val_full
@@ -331,12 +333,13 @@ def run_training(args):
             image_filenames=train_names,
             mask_prefix=args.mask_prefix,
             mask_index=train_mask_index,
-            image_transform=image_transform,
-            mask_transform=mask_transform,
+            image_transform=None, # Deprecated/Handled internally
+            mask_transform=None,
             augment=not args.no_augment,
             patch_size=None,
             output_size=args.input_size,
             verbose=True,
+            cache_data=False # Enable RAM Cache
         )
         val_full = CrackDataset(
             image_dir=val_images_path,
@@ -344,12 +347,13 @@ def run_training(args):
             image_filenames=val_names,
             mask_prefix=args.mask_prefix,
             mask_index=val_mask_index,
-            image_transform=image_transform,
-            mask_transform=mask_transform,
+            image_transform=None,
+            mask_transform=None,
             augment=False,
             patch_size=None,
             output_size=args.input_size,
             verbose=True,
+            cache_data=False # Enable RAM Cache
         )
         train_dataset = train_full
         val_dataset = val_full

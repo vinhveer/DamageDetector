@@ -1,16 +1,16 @@
-train_images: "C:/Users/chungtt/Desktop/Unet/CSF-50k/CSF-50k/training/images"
-train_masks:  "C:/Users/chungtt/Desktop/Unet/CSF-50k/CSF-50k/training/masks"
-val_images:   "C:/Users/chungtt/Desktop/Unet/CSF-50k/CSF-50k/validation/images"
-val_masks:    "C:/Users/chungtt/Desktop/Unet/CSF-50k/CSF-50k/validation/masks"
+train_images: "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CRACK500/crack500/train/images"
+train_masks:  "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CRACK500/crack500/train/masks"
+val_images:   "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CRACK500/crack500/val/images"
+val_masks:    "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CRACK500/crack500/val/masks"
 mask_prefix: "auto"
 output_dir: "output_results"
-preprocess: "patch"
-input_size: 256
-patches_per_image: 2
-max_patch_tries: 2
-val_stride: 256
+preprocess: "letterbox" # Activates New CrackDataset + Albumentations
+input_size: 512
+patches_per_image: 1 # Ignored (only for patch mode)
+max_patch_tries: 1    # Ignored
+val_stride: 0         # Ignored
 batch_size: 8
-epochs: 80
+epochs: 100
 seed: 42    
 no_augment: false
 cache_dir: null
@@ -19,8 +19,8 @@ no_visualize: true
 no_loss_curve: true
 visualize_every: 0
 pos_weight: 5.0
-bce_weight: 0.4
-dice_weight: 0.6
+bce_weight: 0.5
+dice_weight: 0.5
 metric_threshold: 0.5
 metric_thresholds: ""
 scheduler_metric: "loss"
@@ -28,7 +28,8 @@ learning_rate: 0.0005
 weight_decay: 0.00001
 scheduler_factor: 0.5
 scheduler_patience: 10
-early_stop_patience: 15
-num_workers: 0
-persistent_workers: false
+early_stop_patience: 100 # Run full epochs
+num_workers: 16
+persistent_workers: true # Keep workers alive
 pin_memory: true
+prefetch_factor: 2
