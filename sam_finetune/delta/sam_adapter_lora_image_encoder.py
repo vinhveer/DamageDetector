@@ -116,6 +116,8 @@ class LoRA_Adapter_Sam(nn.Module):
         # lets freeze first
         for param in sam_model.image_encoder.parameters():
             param.requires_grad = False
+        for param in sam_model.prompt_encoder.parameters():
+            param.requires_grad = False
 
         # Here, we do the surgery
         for t_layer_i, blk in enumerate(sam_model.image_encoder.blocks):
@@ -282,6 +284,6 @@ class LoRA_Adapter_Sam(nn.Module):
         for w_B in self.w_Bs:
             nn.init.zeros_(w_B.weight)
 
-    def forward(self, batched_input, multimask_output, image_size):
-        return self.sam(batched_input, multimask_output, image_size)
+    def forward(self, batched_input, multimask_output, image_size, boxes=None, points=None):
+        return self.sam(batched_input, multimask_output, image_size, boxes=boxes, points=points)
 

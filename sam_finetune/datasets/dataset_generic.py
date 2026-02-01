@@ -7,6 +7,7 @@ from scipy.ndimage.interpolation import zoom
 from torch.utils.data import Dataset
 from PIL import Image
 import glob
+import cv2
 
 def random_rot_flip(image, label):
     k = np.random.randint(0, 4)
@@ -197,6 +198,56 @@ class GenericDataset(Dataset):
         if isinstance(label, torch.Tensor):
              label = label > 0.5
 
-        sample = {'image': image, 'label': label, 'case_name': base_name}
+        # --- Prompt Engineering (Box & Point Generation) ---
+        # Convert label back to numpy for processing
+        if isinstance(label, torch.Tensor):
+            mask_np = label.numpy().astype(np.uint8)
+        else:
+            mask_np = label.astype(np.uint8)
+
+        # Find bounding box
+        coords = np.argwhere(mask_np > 0)
+        if len(coords) > 0:
+            y_min, x_min = coords.min(axis=0)
+            y_max, x_max = coords.max(axis=0)
+            # Add some jitter/padding safely
+            h, w = mask_np.shape
+            x_min = max(0, x_min - np.random.randint(0, 10))
+            y_min = max(0, y_min - np.random.randint(0, 10))
+            x_max = min(w, x_max + np.random.randint(0, 10))
+            y_max = min(h, y_max + np.random.randint(0, 10))
+            box = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
+
+            # Point prompt: 1 positive (center of random crack part) + 1 random negative
+            # Positive point
+            pos_indices = np.argwhere(mask_np > 0)
+            pos_pt = pos_indices[np.random.randint(len(pos_indices))] # [y, x]
+            pos_pt = pos_pt[::-1] # [x, y]
+
+        else:
+            # Empty mask: Box is full image, no pos point
+            h, w = mask_np.shape
+            box = np.array([0, 0, w, h], dtype=np.float32)
+            pos_pt = np.array([w//2, h//2]) # Dummy center
+
+        # Negative point (background)
+        neg_indices = np.argwhere(mask_np == 0)
+        if len(neg_indices) > 0:
+            neg_pt = neg_indices[np.random.randint(len(neg_indices))]
+            neg_pt = neg_pt[::-1] # [x, y]
+        else:
+            neg_pt = np.array([0, 0])
+
+        point_coords = np.array([pos_pt, neg_pt], dtype=np.float32)
+        point_labels = np.array([1, 0], dtype=np.float32) # 1=pos, 0=neg
+
+        sample = {
+            'image': image, 
+            'label': label, 
+            'box': torch.from_numpy(box),
+            'point_coords': torch.from_numpy(point_coords),
+            'point_labels': torch.from_numpy(point_labels),
+            'case_name': base_name
+        }
         return sample
 

@@ -48,18 +48,18 @@ class Sam(nn.Module):
     def device(self) -> Any:
         return self.pixel_mean.device
 
-    def forward(self, batched_input, multimask_output, image_size): 
+    def forward(self, batched_input, multimask_output, image_size, boxes=None, points=None): 
         if isinstance(batched_input, list): 
             outputs = self.forward_test(batched_input, multimask_output)
         else:
-            outputs = self.forward_train(batched_input, multimask_output, image_size)
+            outputs = self.forward_train(batched_input, multimask_output, image_size, boxes, points)
         return outputs
 
-    def forward_train(self, batched_input, multimask_output, image_size):
+    def forward_train(self, batched_input, multimask_output, image_size, boxes=None, points=None):
         input_images = self.preprocess(batched_input)
         image_embeddings = self.image_encoder(input_images)
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
-            points=None, boxes=None, masks=None
+            points=points, boxes=boxes, masks=None
         )
         output_masks, iou_predictions = self.mask_decoder(
             image_embeddings=image_embeddings,

@@ -86,6 +86,9 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     logging.info("{} iterations per epoch. {} max iterations ".format(len(trainloader), max_iterations))
 
     iterator = tqdm(range(max_epoch), ncols=70)
+    best_performance = 0.0
+    patience = 10
+    patience_counter = 0
     for epoch_num in iterator:
         model.train()
         for i_batch, sampled_batch in enumerate(trainloader):
@@ -94,18 +97,28 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             image_batch, label_batch = sampled_batch['image'], sampled_batch['label']  # [b, c, h, w], [b, h, w] tensor 
             image_batch, label_batch = image_batch.cuda(), label_batch.cuda()# For crack segmentation, low resolution label is not recommended
 
+            # Extract Prompts
+            if 'box' in sampled_batch:
+                box_batch = sampled_batch['box'].cuda()
+                point_coords_batch = sampled_batch['point_coords'].cuda()
+                point_labels_batch = sampled_batch['point_labels'].cuda()
+                points_batch = (point_coords_batch, point_labels_batch)
+            else:
+                box_batch = None
+                points_batch = None
+
             assert image_batch.max() <= 1, f'image_batch max: {image_batch.max()}'
 
             if args.use_amp:
                 with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=args.use_amp):
-                    outputs = model(image_batch, multimask_output, args.img_size)
+                    outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)
                     loss, loss_ce, loss_dice = calc_loss(outputs, label_batch, ce_loss, dice_loss, args.dice_param)
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
                 
             else:
-                outputs = model(image_batch, multimask_output, args.img_size)  
+                outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)  
                 loss, loss_ce, loss_dice = calc_loss(outputs, label_batch, ce_loss, dice_loss, args.dice_param)
                 loss.backward()
                 optimizer.step()
@@ -147,6 +160,24 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             with open(snapshot_path + '/val.csv', 'a', newline='') as f:
                 writercsv = csv.writer(f)
                 writercsv.writerow([epoch_num, metric_list[0], metric_list[1],metric_list[2], metric_list[3]])
+
+            performance = metric_list[3]
+            if performance > best_performance:
+                best_performance = performance
+                patience_counter = 0
+                save_best_path = os.path.join(snapshot_path, 'best_model.pth')
+                try:
+                    model.save_delta_parameters(save_best_path)
+                except:
+                    model.module.save_delta_parameters(save_best_path)
+                logging.info(f"New best IoU: {best_performance}. Saved best model to {save_best_path}")
+            else:
+                patience_counter += 1
+                logging.info(f"No improvement. Patience: {patience_counter}/{patience}")
+            
+            if patience_counter >= patience:
+                logging.info("Early stopping triggered")
+                break
 
 
         save_interval = args.save_interval 
