@@ -124,7 +124,7 @@ def calculate_metric_percase(pred, gt):
 
 
 def test_single_volume(image, label, net, classes, multimask_output, patch_size=[448, 448], input_size=[224, 224],
-                       test_save_path=None, case=None, z_spacing=1):
+                       test_save_path=None, case=None, z_spacing=1, boxes=None, points=None):
     image, label = image.cpu().detach().numpy(), label.squeeze(0).cpu().detach().numpy() # image: 1,c,h,w label: h,w
     if len(image.shape) == 4:
         prediction = np.zeros_like(label)
@@ -134,7 +134,7 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
         inputs = torch.from_numpy(image).float().cuda() 
         net.eval()
         with torch.no_grad():
-            outputs = net(inputs, multimask_output, patch_size[0]) # inputs 1,c,h,w
+            outputs = net(inputs, multimask_output, patch_size[0], boxes=boxes, points=points) # inputs 1,c,h,w
             output_masks = outputs['masks']  # 1,2,h,w
             out = torch.argmax(torch.softmax(output_masks, dim=1), dim=1).squeeze(0) # h,w
             prediction = out.cpu().detach().numpy()# h,w  

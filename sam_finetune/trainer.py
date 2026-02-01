@@ -147,8 +147,19 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             metric_list = 0.0
             for i_batch, sampled_batch in tqdm(enumerate(valloader)):
                 image, label, case_name = sampled_batch['image'], sampled_batch['label'], sampled_batch['case_name'][0] # tensor
+                
+                # Extract Prompts for Validation
+                if 'box' in sampled_batch:
+                    val_box = sampled_batch['box'].cuda()
+                    val_pt_coords = sampled_batch['point_coords'].cuda()
+                    val_pt_labels = sampled_batch['point_labels'].cuda()
+                    val_points = (val_pt_coords, val_pt_labels)
+                else:
+                    val_box = None
+                    val_points = None
+
                 metric_i = test_single_volume(image, label, model, classes=args.num_classes, multimask_output=multimask_output,
-                                    patch_size=[args.img_size, args.img_size],test_save_path=None)
+                                    patch_size=[args.img_size, args.img_size],test_save_path=None, boxes=val_box, points=val_points)
                 metric_list += np.array(metric_i)
                 logging.info('idx %d case %s mean_pr %f mean_re %f mean_f1 %f mean_iou %f' % (
                                 i_batch, case_name, metric_i[0], metric_i[1],metric_i[2], metric_i[3]))
