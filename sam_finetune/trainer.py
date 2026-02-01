@@ -56,10 +56,10 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     
     print("The length of train set is: {}".format(len(db_train)))
 
-    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True,
+    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True,
                              worker_init_fn=worker_init_fn)
 
-    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=2)
+    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=4)
                     
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
