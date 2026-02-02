@@ -1,0 +1,32 @@
+train_images: "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CSF-50k/CSF-50k/training/images"
+train_masks:  "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CSF-50k/CSF-50k/training/masks"
+val_images:   "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CSF-50k/CSF-50k/validation/images"
+val_masks:    "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CSF-50k/CSF-50k/validation/masks"
+mask_prefix: "auto"
+output_dir: "output_results_p4000"
+preprocess: "letterbox" 
+input_size: 256
+batch_size: 4 # Nhỏ gọn, ăn ~4GB VRAM
+epochs: 100
+seed: 42    
+no_augment: false
+cache_dir: null
+cache_rebuild: false
+no_visualize: true
+no_loss_curve: true
+visualize_every: 0
+pos_weight: 5.0
+bce_weight: 0.5
+dice_weight: 0.5
+metric_threshold: 0.5
+metric_thresholds: ""
+scheduler_metric: "loss"
+learning_rate: 0.0005
+weight_decay: 0.00001
+scheduler_factor: 0.5
+scheduler_patience: 10
+early_stop_patience: 100
+num_workers: 16 # Tận dụng CPU mạnh
+persistent_workers: true
+pin_memory: true
+prefetch_factor: 2

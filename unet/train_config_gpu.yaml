@@ -5,12 +5,12 @@ val_masks:    "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets
 mask_prefix: "auto"
 output_dir: "output_results"
 preprocess: "letterbox" # Activates New CrackDataset + Albumentations
-input_size: 512
+input_size: 256
 patches_per_image: 1 # Ignored (only for patch mode)
 max_patch_tries: 1    # Ignored
 val_stride: 0         # Ignored
-batch_size: 8
-epochs: 100
+batch_size: 32 # Tăng lên 32 để tận dụng 24GB VRAM
+epochs: 120
 seed: 42    
 no_augment: false
 cache_dir: null
@@ -28,8 +28,8 @@ learning_rate: 0.0005
 weight_decay: 0.00001
 scheduler_factor: 0.5
 scheduler_patience: 10
-early_stop_patience: 100 # Run full epochs
-num_workers: 16
-persistent_workers: true # Keep workers alive
+early_stop_patience: 100
+num_workers: 32 # Max 32 workers
+persistent_workers: true
 pin_memory: true
 prefetch_factor: 2
