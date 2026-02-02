@@ -6,7 +6,7 @@ mask_prefix: "auto"
 output_dir: "output_results_p4000"
 preprocess: "letterbox" 
 input_size: 256
-batch_size: 4 # Nhỏ gọn, ăn ~4GB VRAM
+batch_size: 8 # Tăng lên 8 cho P4000 (8GB VRAM)
 epochs: 100
 seed: 42    
 no_augment: false
@@ -26,7 +26,7 @@ weight_decay: 0.00001
 scheduler_factor: 0.5
 scheduler_patience: 10
 early_stop_patience: 100
-num_workers: 16 # Tận dụng CPU mạnh
+num_workers: 16 # Tận dụng CPU 36 nhân
 persistent_workers: true
 pin_memory: true
 prefetch_factor: 2

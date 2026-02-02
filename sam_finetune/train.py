@@ -22,9 +22,9 @@ parser.add_argument('--num_classes', type=int,
 parser.add_argument('--max_iterations', type=int,
                     default=30000, help='maximum iterations number to train')
 parser.add_argument('--max_epochs', type=int,
-                    default=200, help='maximum epoch number to train')
+                    default=150, help='maximum epoch number to train')
 parser.add_argument('--stop_epoch', type=int,
-                    default=160, help='maximum epoch number to train')
+                    default=150, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int,
                     default=12, help='batch_size per gpu')
 parser.add_argument('--n_gpu', type=int, default=1, help='total gpu')
@@ -49,11 +49,12 @@ parser.add_argument('--warmup', action='store_true', help='If activated, warp up
 parser.add_argument('--warmup_period', type=int, default=300,
                     help='Warp up iterations, only valid whrn warmup is activated')
 parser.add_argument('--AdamW', action='store_true', help='If activated, use AdamW to finetune SAM model')
-parser.add_argument('--dice_param', type=float, default=0.5)
+parser.add_argument('--dice_param', type=float, default=0.7)
 parser.add_argument('--lr_exp', type=float, default=0.9, help='The learning rate decay expotential')
 parser.add_argument('--tf32', action='store_true', help='If activated, use tf32 to accelerate the training process')
 parser.add_argument('--use_amp', action='store_true', help='If activated, adopt mixed precision for acceleration, but may cause NaN')
 parser.add_argument('--save_interval', type=int, default=1, help='Save and validation intervals')
+parser.add_argument('--num_workers', type=int, default=8, help='number of dataloader workers')
 
 args = parser.parse_args()
 

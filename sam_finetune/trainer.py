@@ -56,25 +56,53 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     
     print("The length of train set is: {}".format(len(db_train)))
 
-    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=32, pin_memory=True,
-                             worker_init_fn=worker_init_fn, persistent_workers=True, prefetch_factor=2)
+    loader_kwargs = {
+        'batch_size': batch_size,
+        'shuffle': True,
+        'num_workers': args.num_workers,
+        'pin_memory': True,
+        'worker_init_fn': worker_init_fn
+    }
+    val_kwargs = {
+        'batch_size': 1,
+        'shuffle': False,
+        'num_workers': max(1, args.num_workers // 2) if args.num_workers > 0 else 0,
+        'pin_memory': True
+    }
+    
+    if args.num_workers > 0:
+        loader_kwargs['persistent_workers'] = True
+        loader_kwargs['prefetch_factor'] = 2
+        
+        # Adjust val accordingly
+        if val_kwargs['num_workers'] > 0:
+            val_kwargs['persistent_workers'] = True
+            val_kwargs['prefetch_factor'] = 2
 
-    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=16, persistent_workers=True, prefetch_factor=2)
+    trainloader = DataLoader(db_train, **loader_kwargs)
+    valloader = DataLoader(db_val, **val_kwargs)
                     
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
 
-    ce_loss = CrossEntropyLoss()
+    # Weight balancing: Favor 'Crack' (class 1) over 'Background' (class 0)
+    class_weights = torch.tensor([1.0, 3.0]).cuda()
+    ce_loss = CrossEntropyLoss(weight=class_weights)
     dice_loss = DiceLoss(num_classes + 1)
     if args.warmup:
         b_lr = base_lr / args.warmup_period
     else:
         b_lr = base_lr
+    from torch.optim.lr_scheduler import ReduceLROnPlateau # Import locally
+    
     if args.AdamW:
         optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=b_lr, betas=(0.9, 0.999), weight_decay=0.01)
     else:
-        optimizer = optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=b_lr, momentum=0.9, weight_decay=0.0001)  # Even pass the model.parameters(), the `requires_grad=False` layers will not update
-    
+        optimizer = optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=b_lr, momentum=0.9, weight_decay=0.0001)
+
+    # Smart Scheduler: Reduce LR if IoU stops improving
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10, verbose=True)
+
     if args.use_amp: # Using amp may cause unstable gradients during training
         # scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp) 
         scaler = torch.amp.GradScaler('cuda', enabled=args.use_amp)   
@@ -127,14 +155,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = lr_
             else:
-                if args.warmup:
-                    shift_iter = iter_num - args.warmup_period
-                    assert shift_iter >= 0, f'Shift iter is {shift_iter}, smaller than zero'
-                else:
-                    shift_iter = iter_num
-                lr_ = base_lr * (1.0 - shift_iter / max_iterations) ** args.lr_exp  # learning rate adjustment depends on the max iterations
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr_
+                # Handled by ReduceLROnPlateau at epoch end
+                lr_ = optimizer.param_groups[0]['lr']
 
             iter_num = iter_num + 1
 
@@ -189,6 +211,9 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             if patience_counter >= patience:
                 logging.info("Early stopping triggered")
                 break
+            
+            # Step the scheduler based on IoU
+            scheduler.step(performance)
 
 
         save_interval = args.save_interval 
