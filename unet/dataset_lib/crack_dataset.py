@@ -68,7 +68,7 @@ class CrackDataset(Dataset):
         valid_images = []
         for img in self.images:
             base_name = os.path.splitext(img)[0]
-            mask_path = find_mask_path(mask_dir, base_name, mask_prefix=self.mask_prefix, mask_index=self._mask_index)
+            mask_path = find_mask_path(mask_dir, base_name, self.mask_prefix, mask_index=self._mask_index)
             if mask_path is not None:
                 valid_images.append(img)
         self.images = valid_images
@@ -161,7 +161,7 @@ class CrackDataset(Dataset):
             img_name = self.images[idx]
             img_path = os.path.join(self.image_dir, img_name)
             base = os.path.splitext(img_name)[0]
-            mask_path = find_mask_path(self.mask_dir, base, self.mask_prefix, self._mask_index)
+            mask_path = find_mask_path(self.mask_dir, base, self.mask_prefix, mask_index=self._mask_index)
             
             image = np.array(Image.open(img_path).convert("RGB"))
             mask = np.array(Image.open(mask_path).convert("L"))
