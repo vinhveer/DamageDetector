@@ -1,32 +1,55 @@
-train_images: "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CSF-50k/CSF-50k/training/images"
-train_masks:  "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CSF-50k/CSF-50k/training/masks"
-val_images:   "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CSF-50k/CSF-50k/validation/images"
-val_masks:    "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CSF-50k/CSF-50k/validation/masks"
+train_images: "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/crack500/dataset/train/images"
+train_masks:  "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/crack500/dataset/train/masks"
+val_images:   "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/crack500/dataset/val/images"
+val_masks:    "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/crack500/dataset/val/masks"
 mask_prefix: "auto"
 output_dir: "output_results_p4000"
+
+# --- Preprocessing ---
 preprocess: "letterbox" 
-input_size: 256
-batch_size: 8 # Tăng lên 8 cho P4000 (8GB VRAM)
+input_size: 512 # SOTA Standard for cracks
+
+# --- SOTA Model Config (8GB VRAM Optimized) ---
+encoder_name: "efficientnet-b0" # Lightweight SOTA backbone
+encoder_weights: "imagenet"
+
+# --- Training Strategy ---
+batch_size: 8       # Fits in 8GB VRAM with AMP
+grad_accum_steps: 2 # 8 * 2 = 16 (Effective Batch Size)
 epochs: 100
 seed: 42    
+
+# --- Augmentation & Caching ---
 no_augment: false
 cache_dir: null
 cache_rebuild: false
+
+# --- Visualization ---
 no_visualize: true
 no_loss_curve: true
 visualize_every: 0
-pos_weight: 5.0
+
+# --- Loss Function ---
+pos_weight: 5.0 # Balanced for crack detection
 bce_weight: 0.5
 dice_weight: 0.5
+
+# --- Metrics ---
 metric_threshold: 0.5
 metric_thresholds: ""
-scheduler_metric: "loss"
-learning_rate: 0.0005
-weight_decay: 0.00001
-scheduler_factor: 0.5
-scheduler_patience: 10
+scheduler_metric: "loss" # Ignored by Cosine
+
+# --- Optimizer (AdamW) ---
+learning_rate: 0.0001
+weight_decay: 0.01 
+
+# --- Scheduler (CosineAnnealingWarmRestarts) ---
+scheduler_t0: 10
+scheduler_tmult: 2
+
+# --- Hardware Optimization ---
 early_stop_patience: 100
-num_workers: 16 # Tận dụng CPU 36 nhân
+num_workers: 8 # Balanced for System RAM
 persistent_workers: true
 pin_memory: true
 prefetch_factor: 2

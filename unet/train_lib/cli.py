@@ -54,6 +54,11 @@ DEFAULT_CONFIG = {
     "prefetch_factor": 2,
     "persistent_workers": True,
     "pin_memory": None,
+    "grad_accum_steps": 1,
+    "encoder_name": "efficientnet-b4",
+    "encoder_weights": "imagenet",
+    "scheduler_t0": 10,
+    "scheduler_tmult": 2,
 }
 
 REQUIRED_KEYS = ["train_images", "train_masks", "val_images", "val_masks"]

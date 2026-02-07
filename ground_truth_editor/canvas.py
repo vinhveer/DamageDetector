@@ -55,6 +55,8 @@ class ImageCanvas(QWidget):
         self._roi_dragging = False
         self._roi_start: QPoint | None = None
         self._roi_end: QPoint | None = None
+        
+        self._highlight_box: QRectF | None = None
 
         self._overlay_timer = QTimer(self)
         self._overlay_timer.setSingleShot(True)
@@ -140,6 +142,10 @@ class ImageCanvas(QWidget):
         self.roiSelected.emit(roi_box)
         self.update()
 
+    def set_highlight_box(self, box: QRectF | None) -> None:
+        self._highlight_box = box
+        self.update()
+
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(30, 30, 30))
@@ -166,6 +172,28 @@ class ImageCanvas(QWidget):
             self._draw_roi_rect(painter, target)
         elif self._render_mode == "overlay" and self._editable:
             self._draw_brush_cursor(painter, target)
+            
+        if self._highlight_box is not None:
+            self._draw_highlight_box(painter, target)
+
+    def _draw_highlight_box(self, painter: QPainter, target: QRectF) -> None:
+        if self._image.isNull():
+             return
+        
+        # _highlight_box is in image coordinates (x, y, w, h)
+        # Convert to widget coords
+        # Top-left
+        tl = self._image_to_widget(self._highlight_box.topLeft(), target)
+        # Bottom-right
+        br = self._image_to_widget(self._highlight_box.bottomRight(), target)
+        
+        rect = QRectF(tl, br).normalized()
+        
+        # Draw box
+        pen = QPen(QColor(0, 255, 255), 3, Qt.PenStyle.SolidLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(rect)
 
     def _draw_roi_rect(self, painter: QPainter, target: QRectF) -> None:
         if self._roi_start is None or self._roi_end is None or self._image.isNull():

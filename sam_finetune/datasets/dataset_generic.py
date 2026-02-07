@@ -2,8 +2,7 @@ import os
 import random
 import numpy as np
 import torch
-from scipy import ndimage
-from scipy.ndimage.interpolation import zoom
+
 from torch.utils.data import Dataset
 from PIL import Image
 import glob
@@ -30,8 +29,19 @@ class RandomGenerator(object):
             A.RandomRotate90(p=0.5),
             
             # Geometric Augmentations
-            A.RandomResizedCrop(size=(output_size[0], output_size[1]), scale=(0.8, 1.0), ratio=(0.9, 1.1), p=0.3),
-            A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=30, p=0.5),
+            # Safe Logic: Pad -> RandomCrop
+            A.PadIfNeeded(min_height=output_size[1], min_width=output_size[0], border_mode=0, value=0, mask_value=0),
+            
+            # NOTE: SAM originally uses RandomResizedCrop (scale/aspect ratio change).
+            # If we want exact pixel learning like we did for UNet, we use RandomCrop.
+            # But SAM benefits from scale variance. 
+            # However, to fix the crash "crop > image size", we MUST Pad first.
+            # If we still want scale variance, we can keep RandomResizedCrop BUT after Padding it's safer?
+            # Actually RandomResizedCrop on Padded image is safe.
+            # BUT user asked "Sửa luôn cho bên sam finetune" implying adopt the RandomCrop strategy.
+            # Let's switch to RandomCrop for consistency and safety.
+            A.RandomCrop(height=output_size[1], width=output_size[0], p=1.0),
+            A.Affine(scale=(0.9, 1.1), translate_percent=0.0625, rotate=30, p=0.5),
             A.OneOf([
                 A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
                 A.GridDistortion(p=0.5),
@@ -54,8 +64,8 @@ class RandomGenerator(object):
             
             # Environmental / Occlusion
             A.RandomShadow(num_shadows_lower=1, num_shadows_upper=3, shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.3),
-            A.CoarseDropout(max_holes=8, max_height=32, max_width=32, min_holes=1, min_height=8, min_width=8, fill_value=0, mask_fill_value=0, p=0.3),
-        ])
+            A.CoarseDropout(num_holes_limit=(1, 8), hole_height_range=(8, 32), hole_width_range=(8, 32), min_holes=None, min_height=None, min_width=None, fill_value=0, mask_fill_value=0, p=0.3),
+        ], is_check_shapes=False)
 
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
@@ -92,11 +102,10 @@ class RandomGenerator(object):
 
         # Skip resize if already correct (rare with float scale, but good practice)
         if new_w != y or new_h != x:
-            # Zoom is still useful for resizing but we control the factors to keep aspect ratio
-            # Warning: zoom takes factors, not sizes.
-            # Factor = new / old
-            image = zoom(image, (new_h / x, new_w / y, 1) if c > 1 else (new_h / x, new_w / y), order=3)
-            label = zoom(label, (new_h / x, new_w / y), order=0)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            if c == 1 and len(image.shape) == 2:
+                image = image[:, :, None]
+            label = cv2.resize(label, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
         # Create padded buffers
         final_image = np.zeros((target_h, target_w, c), dtype=np.float32)
@@ -249,8 +258,10 @@ class GenericDataset(Dataset):
              new_h = int(x * scale)
 
              if new_w != y or new_h != x:
-                image = zoom(image, (new_h / x, new_w / y, 1) if c > 1 else (new_h / x, new_w / y), order=3)
-                label = zoom(label, (new_h / x, new_w / y), order=0)
+                image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                if c == 1 and len(image.shape) == 2:
+                    image = image[:, :, None]
+                label = cv2.resize(label, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
              final_image = np.zeros((target_h, target_w, c), dtype=np.float32)
              final_label = np.zeros((target_h, target_w), dtype=np.float32)

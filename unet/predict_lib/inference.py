@@ -37,7 +37,7 @@ def _predict_tiled(
     pad_bottom = max(0, padded_h - h)
     pad_right = max(0, padded_w - w)
 
-    img_pad = F.pad(img_tensor, (0, pad_right, 0, pad_bottom), mode="reflect")
+    img_pad = F.pad(img_tensor, (0, pad_right, 0, pad_bottom), mode="replicate")
     h_pad = h + pad_bottom
     w_pad = w + pad_right
 
@@ -62,8 +62,15 @@ def _predict_tiled(
         patches.clear()
         coords.clear()
 
-    for yy in range(0, h_pad - tile_size + 1, step):
-        for xx in range(0, w_pad - tile_size + 1, step):
+    y_steps = range(0, h_pad - tile_size + 1, step)
+    x_steps = range(0, w_pad - tile_size + 1, step)
+    total_tiles = len(y_steps) * len(x_steps)
+    processed_tiles = 0
+
+    print(f"DEBUG: Processing {total_tiles} tiles on {device}...")
+
+    for yy in y_steps:
+        for xx in x_steps:
             if stop_checker is not None and stop_checker():
                 print("Inference: Stop checker triggered!")
                 raise StopRequested("Stopped")
@@ -72,7 +79,13 @@ def _predict_tiled(
             coords.append((yy, xx))
             if len(patches) >= batch_size:
                 _flush()
+                processed_tiles += len(patches)
+                # Print progress every batch or so
+                print(f"UNet: processed {processed_tiles}/{total_tiles} tiles...")
+                
     _flush()
+    if processed_tiles < total_tiles:
+         print(f"UNet: finished remaining {total_tiles - processed_tiles} tiles.")
 
     pred = pred_sum / np.maximum(weight, 1e-8)
     return pred[:h, :w]

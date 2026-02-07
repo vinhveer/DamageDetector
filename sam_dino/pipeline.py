@@ -277,11 +277,38 @@ def apply_delta_to_sam(
     scaling_factor: float,
     rank: int,
 ) -> None:
-    delta_state = torch.load(delta_ckpt_path, map_location="cpu", weights_only=False)
+    try:
+        delta_state = torch.load(delta_ckpt_path, map_location="cpu", weights_only=True)
+    except Exception:
+        delta_state = torch.load(delta_ckpt_path, map_location="cpu", weights_only=False)
     if not isinstance(delta_state, dict):
         raise TypeError(f"Unsupported delta checkpoint format: {type(delta_state)} ({delta_ckpt_path})")
 
+    def _infer_delta_type_from_state(state: dict) -> str:
+        keys = [str(k) for k in state.keys()]
+        has_lora_suffix = any(k.startswith("w_a_") and k.endswith("_l") for k in keys) or any(
+            k.startswith("w_b_") and k.endswith("_l") for k in keys
+        )
+        if has_lora_suffix:
+            return "both"
+
+        has_adapter_markers = any(k.startswith(("w_c_", "w_d_")) for k in keys) or any(k.endswith("_bia") for k in keys)
+        if has_adapter_markers:
+            return "adapter"
+
+        has_lora_markers = any(k.startswith("w_a_") for k in keys) and any(k.startswith("w_b_") for k in keys)
+        if has_lora_markers:
+            return "lora"
+        return "none"
+
     dt = delta_type.lower().strip()
+    inferred = _infer_delta_type_from_state(delta_state)
+    if inferred in {"adapter", "lora", "both"} and inferred != dt:
+        print(
+            f"WARN: delta_type={dt} but checkpoint looks like {inferred}. Auto-using {inferred}.",
+            flush=True,
+        )
+        dt = inferred
     if dt == "adapter":
         ckpt_middle_dim = None
         for i in range(1000):
@@ -408,13 +435,14 @@ def process_one_image_text_box_sam_fullimage(
     if len(dets) == 0:
         cv2.imwrite(overlay_path, bgr)
         cv2.imwrite(mask_path, np.zeros((h_img, w_img), dtype=np.uint8))
-        return 0, 0, overlay_path, mask_path
+        return 0, 0, overlay_path, mask_path, []
 
     predictor.set_image(rgb)
 
     rng = np.random.default_rng(seed)
     disp = bgr.copy()
     merged = np.zeros((h_img, w_img), dtype=np.uint8)
+    final_dets = []
 
     for det in dets:
         if stop_checker is not None and stop_checker():
@@ -471,13 +499,28 @@ def process_one_image_text_box_sam_fullimage(
         color = rng.integers(0, 255, (3,), dtype=np.uint8)
         disp = overlay_mask(disp, chosen, color=color, alpha=overlay_alpha)
 
+        # Encode mask to png bytes for lightweight transport
+        success, png_bytes = cv2.imencode(".png", chosen * 255)
+        mask_b64 = None
+        if success:
+             import base64
+             mask_b64 = base64.b64encode(png_bytes.tobytes()).decode('ascii')
+
+        final_dets.append({
+            "label": str(label),
+            "score": float(score),
+            "box": [float(x1), float(y1), float(x2), float(y2)],
+            "mask_b64": mask_b64,
+            "model_name": "SamDino"
+        })
+
     if stop_checker is not None and stop_checker():
         raise StopRequested("Stopped")
 
     cv2.imwrite(overlay_path, disp)
     cv2.imwrite(mask_path, merged * 255)
     masks_saved = 1 if int(np.count_nonzero(merged)) > 0 else 0
-    return len(dets), masks_saved, overlay_path, mask_path
+    return len(dets), masks_saved, overlay_path, mask_path, final_dets
 
 
 def process_one_image_text_box_sam_isolate(

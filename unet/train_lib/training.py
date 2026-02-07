@@ -38,16 +38,24 @@ def _iter_prefetch(loader, device):
         yield batch
 
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir):
+import csv
+import logging
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, csv_path=None, grad_accum_steps=1):
     # Ensure the output directory exists.
     os.makedirs(output_dir, exist_ok=True)
 
-    use_prefetch = device.type == "cuda"
-    non_blocking = device.type == "cuda"
+    use_cuda = device.type == "cuda"
+    use_prefetch = use_cuda
+    non_blocking = use_cuda
+    
+    # Initialize AMP Scaler
+    scaler = torch.amp.GradScaler('cuda', enabled=use_cuda)
+
     disable_visuals = bool(getattr(train_model, "_disable_visuals", False))
     disable_loss_curve = bool(getattr(train_model, "_disable_loss_curve", False))
     best_val_loss = float('inf')
-    best_val_dice = -1.0
+    best_val_score = -1.0 # Tracks IoU or Dice
     train_losses = []
     val_losses = []
     # Early stopping parameters.
@@ -61,7 +69,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         train_steps = 0
 
         train_iter = _iter_prefetch(train_loader, device) if use_prefetch else train_loader
-        for batch in tqdm(train_iter, desc=f'Epoch {epoch+1}/{num_epochs} [Train]'):
+        optimizer.zero_grad()
+        
+        for i, batch in enumerate(tqdm(train_iter, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')):
             if batch is None:
                 continue
             images, masks = batch
@@ -69,16 +79,21 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 images = images.to(device, non_blocking=non_blocking)
                 masks = masks.to(device, non_blocking=non_blocking)
 
-            # Forward pass
-            outputs = model(images)
-            loss = criterion(outputs, masks)
+            # Forward pass with AMP
+            with torch.amp.autocast('cuda', enabled=use_cuda):
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+                loss = loss / grad_accum_steps
 
-            # Backprop + optimization
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # Backward pass with Scaler
+            scaler.scale(loss).backward()
+            
+            if (i + 1) % grad_accum_steps == 0 or (i + 1) == len(train_loader):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-            train_loss += loss.item()
+            train_loss += loss.item() * grad_accum_steps
             train_steps += 1
 
         if train_steps == 0:
@@ -109,8 +124,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                     images = images.to(device, non_blocking=non_blocking)
                     masks = masks.to(device, non_blocking=non_blocking)
 
-                outputs = model(images)
-                loss = criterion(outputs, masks)
+                # AMp for validation too
+                with torch.amp.autocast('cuda', enabled=use_cuda):
+                    outputs = model(images)
+                    loss = criterion(outputs, masks)
 
                 val_loss += loss.item()
                 val_steps += 1
@@ -126,7 +143,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                         val_thr_report[t]["iou"] += iou_score_from_prob(prob, masks, thr=t_val)
 
         if val_steps == 0:
-            print("Warning: no valid validation batches (all samples failed to load).")
+            logging.warning("Warning: no valid validation batches (all samples failed to load).")
             avg_val_loss = float("inf")
             avg_val_dice = 0.0
             avg_val_iou = 0.0
@@ -136,10 +153,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             avg_val_iou = val_iou_sum / val_steps
         val_losses.append(avg_val_loss)
 
-        print(f'Epoch {epoch+1}/{num_epochs}:')
-        print(f'Train Loss: {avg_train_loss:.4f}')
+        logging.info(f'Epoch {epoch+1}/{num_epochs}:')
+        logging.info(f'Train Loss: {avg_train_loss:.4f}')
         thr = getattr(train_model, "_metric_threshold", 0.5)
-        print(f'Val Loss: {avg_val_loss:.4f} | Val Dice@{thr}: {avg_val_dice:.4f} | Val IoU@{thr}: {avg_val_iou:.4f}')
+        logging.info(f'Val Loss: {avg_val_loss:.4f} | Val Dice@{thr}: {avg_val_dice:.4f} | Val IoU@{thr}: {avg_val_iou:.4f}')
         if val_steps > 0 and val_thr_report:
             items = []
             for t in sorted(val_thr_report.keys()):
@@ -148,26 +165,49 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 items.append(f"{t}:D{d:.3f}/I{j:.3f}")
             print("Val metrics sweep (thr:Dice/IoU): " + " | ".join(items))
 
-        # Step the learning-rate scheduler.
+        # Step the learning-rate scheduler SAFELY
         sched_metric = getattr(train_model, "_scheduler_metric", "loss")
-        scheduler.step(avg_val_dice if sched_metric == "dice" else avg_val_loss)
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f'Current learning rate: {current_lr:.7f}')
+        metric_val = avg_val_dice if sched_metric == "dice" else avg_val_loss
+        
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(metric_val)
+        else:
+            # CosineAnnealing / StepLR / etc
+            scheduler.step()
 
-        # Save the best model (by validation Dice, not loss).
-        # For thin cracks, loss can decrease by over-predicting (fatter masks) while Dice/IoU worsens.
-        if val_steps > 0 and avg_val_dice > best_val_dice:
-            best_val_dice = avg_val_dice
-            best_val_loss = avg_val_loss  # tracked for reference/logging only
-            counter = 0  # Reset early-stopping counter
+        current_lr = optimizer.param_groups[0]['lr']
+        logging.info(f'Current learning rate: {current_lr:.7f}')
+
+        # CSV Logging
+        if csv_path:
+             with open(csv_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([epoch+1, avg_train_loss, avg_val_loss, avg_val_dice, avg_val_iou, current_lr])
+
+        # Save last model
+        last_model_path = os.path.join(output_dir, 'last_model.pth')
+        torch.save(model.state_dict(), last_model_path)
+        
+        # Save epoch model (if configured)
+        save_all = getattr(train_model, "_save_all_epochs", True) 
+        if save_all:
+             epoch_model_path = os.path.join(output_dir, f'epoch_{epoch+1}.pth')
+             torch.save(model.state_dict(), epoch_model_path)
+
+        # Save the best model (using IoU as primary)
+        current_perf = avg_val_iou 
+        if val_steps > 0 and current_perf > best_val_score:
+            best_val_score = current_perf
+            best_val_loss = avg_val_loss  
+            counter = 0 
             model_path = os.path.join(output_dir, 'best_model.pth')
             torch.save(model.state_dict(), model_path)
-            print(f'Best model (Val Dice) saved to {model_path}!')
+            logging.info(f'New best IoU: {current_perf:.4f}. Saved best model to {model_path}!')
         else:
             counter += 1
-            print(f'Val Dice did not improve. Early stopping counter: {counter}/{patience}')
+            logging.info(f'Val IoU did not improve. Patience: {counter}/{patience}')
             if counter >= patience:
-                print(f'Early stopping! No Val Dice improvement for {patience} consecutive epochs.')
+                logging.info(f'Early stopping triggered! No improvement for {patience} epochs.')
                 break
 
         # Visualize a few predictions.

@@ -48,7 +48,7 @@ parser.add_argument('--rank', type=int, default=4, help='Rank for LoRA adaptatio
 parser.add_argument('--warmup', action='store_true', help='If activated, warp up the learning from a lower lr to the base_lr')
 parser.add_argument('--warmup_period', type=int, default=300,
                     help='Warp up iterations, only valid whrn warmup is activated')
-parser.add_argument('--AdamW', action='store_true', help='If activated, use AdamW to finetune SAM model')
+parser.add_argument('--AdamW', action='store_true', default=True, help='If activated, use AdamW to finetune SAM model')
 parser.add_argument('--dice_param', type=float, default=0.7)
 parser.add_argument('--lr_exp', type=float, default=0.9, help='The learning rate decay expotential')
 parser.add_argument('--tf32', action='store_true', help='If activated, use tf32 to accelerate the training process')

@@ -4,13 +4,15 @@ val_images:   "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets
 val_masks:    "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/CRACK500/crack500/val/masks"
 mask_prefix: "auto"
 output_dir: "output_results"
-preprocess: "letterbox" # Activates New CrackDataset + Albumentations
-input_size: 256
-patches_per_image: 1 # Ignored (only for patch mode)
-max_patch_tries: 1    # Ignored
-val_stride: 0         # Ignored
-batch_size: 32 # Tăng lên 32 để tận dụng 24GB VRAM
-epochs: 120
+preprocess: "letterbox" # Giữ letterbox nhưng với size 512
+input_size: 512 # Tăng lên 512 để bắt chi tiết vết nứt nhỏ
+
+# --- SOTA Model Config ---
+encoder_name: "efficientnet-b4" # Backbone mạnh mẽ hơn ResNet
+encoder_weights: "imagenet"
+
+batch_size: 16 # Giảm batch size vì input 512x512 + efficientnet-b4 tốn VRAM
+epochs: 100
 seed: 42    
 no_augment: false
 cache_dir: null
@@ -23,13 +25,17 @@ bce_weight: 0.5
 dice_weight: 0.5
 metric_threshold: 0.5
 metric_thresholds: ""
-scheduler_metric: "loss"
-learning_rate: 0.0005
-weight_decay: 0.00001
-scheduler_factor: 0.5
-scheduler_patience: 10
+scheduler_metric: "loss" # Ignored by CosineAnnealingWarmRestarts
+
+learning_rate: 0.0001 # Giảm LR vì dùng pretrained model
+weight_decay: 0.01 # AdamW standard
+
+# --- Cosine Scheduler Params ---
+scheduler_t0: 10
+scheduler_tmult: 2
+
 early_stop_patience: 100
-num_workers: 32 # Max 32 workers
+num_workers: 16
 persistent_workers: true
 pin_memory: true
 prefetch_factor: 2

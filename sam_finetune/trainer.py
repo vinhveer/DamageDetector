@@ -17,12 +17,20 @@ from utils import test_single_volume
 import csv
 
 def calc_loss(outputs, high_res_label_batch, ce_loss, dice_loss, dice_weight:float=0.8):
-    masks = outputs['masks']  
-    loss_ce = ce_loss(masks, high_res_label_batch[:].long())  
+    masks = outputs['masks']
+    
+    # Fix for Focal Loss/Cross Entropy needing 2 channels (Background, Foreground)
+    # SAM output is (B, 1, H, W) -> logits for foreground
+    # We construct (B, 2, H, W) -> [logits_background, logits_foreground]
+    # Where logits_background = -logits_foreground
+    if masks.shape[1] == 1:
+        loss_masks = torch.cat([-masks, masks], dim=1)
+    else:
+        loss_masks = masks
+
+    loss_ce = ce_loss(loss_masks, high_res_label_batch[:].long())
     loss_dice = dice_loss(masks, high_res_label_batch, softmax=True)
     loss = (1 - dice_weight) * loss_ce + dice_weight * loss_dice
-    return loss, loss_ce, loss_dice
-
     return loss, loss_ce, loss_dice
 
 
@@ -86,26 +94,49 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         model = nn.DataParallel(model)
 
     # Weight balancing: Favor 'Crack' (class 1) over 'Background' (class 0)
-    class_weights = torch.tensor([1.0, 3.0]).cuda()
-    ce_loss = CrossEntropyLoss(weight=class_weights)
+    # Use Focal Loss for hard example mining (Better than weighted CE)
+    # alpha=0.25: Down-weight background (class 0)
+    # gamma=2: Focus on hard examples
+    # FIX: Focal Loss expects 2 classes (Background, Foreground), even if model output is binary 1-channel
+    ce_loss = Focal_loss(alpha=0.25, gamma=2, num_classes=2)
     dice_loss = DiceLoss(num_classes + 1)
     if args.warmup:
         b_lr = base_lr / args.warmup_period
     else:
         b_lr = base_lr
-    from torch.optim.lr_scheduler import ReduceLROnPlateau # Import locally
+    from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR # Import locally
     
-    if args.AdamW:
-        optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=b_lr, betas=(0.9, 0.999), weight_decay=0.01)
-    else:
-        optimizer = optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=b_lr, momentum=0.9, weight_decay=0.0001)
+    # Differential Learning Rates: Fast LoRA, Slow Decoder
+    lora_params = []
+    decoder_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'mask_decoder' in name:
+            decoder_params.append(param)
+        else:
+            lora_params.append(param)
 
-    # Smart Scheduler: Reduce LR if IoU stops improving
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10, verbose=True)
+    if args.AdamW:
+        optimizer = optim.AdamW([
+            {'params': lora_params, 'lr': b_lr},
+            {'params': decoder_params, 'lr': b_lr * 0.1}
+        ], betas=(0.9, 0.999), weight_decay=0.01)
+    else:
+        optimizer = optim.SGD([
+            {'params': lora_params, 'lr': b_lr},
+            {'params': decoder_params, 'lr': b_lr * 0.1}
+        ], momentum=0.9, weight_decay=0.0001)
+
+    print(f"Detected {len(lora_params)} param tensors for LoRA (LR: {b_lr})")
+    print(f"Detected {len(decoder_params)} param tensors for Decoder (LR: {b_lr * 0.1})")
+
+    # Cosine Scheduler: Smooth decay for better convergence
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.max_epochs, eta_min=1e-6)
 
     if args.use_amp: # Using amp may cause unstable gradients during training
-        # scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp) 
-        scaler = torch.amp.GradScaler('cuda', enabled=args.use_amp)   
+        scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp) 
+        # scaler = torch.amp.GradScaler('cuda', enabled=args.use_amp)   
     iter_num = 0
 
     max_epoch = args.max_epochs
@@ -142,6 +173,11 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)
                     loss, loss_ce, loss_dice = calc_loss(outputs, label_batch, ce_loss, dice_loss, args.dice_param)
                 scaler.scale(loss).backward()
+                
+                # Gradient Clipping for stability
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
                 scaler.step(optimizer)
                 scaler.update()
                 
@@ -149,11 +185,20 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)  
                 loss, loss_ce, loss_dice = calc_loss(outputs, label_batch, ce_loss, dice_loss, args.dice_param)
                 loss.backward()
+                
+                # Gradient Clipping for stability
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
                 optimizer.step()
             if args.warmup and iter_num < args.warmup_period:
-                lr_ = base_lr * ((iter_num + 1) / args.warmup_period)
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr_
+                warmup_factor = (iter_num + 1) / args.warmup_period
+                # Update LoRA group
+                optimizer.param_groups[0]['lr'] = base_lr * warmup_factor
+                # Update Decoder group (if exists) with 0.1 ratio
+                if len(optimizer.param_groups) > 1:
+                    optimizer.param_groups[1]['lr'] = (base_lr * 0.1) * warmup_factor
+                
+                lr_ = optimizer.param_groups[0]['lr']
             else:
                 # Handled by ReduceLROnPlateau at epoch end
                 lr_ = optimizer.param_groups[0]['lr']
@@ -212,8 +257,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 logging.info("Early stopping triggered")
                 break
             
-            # Step the scheduler based on IoU
-            scheduler.step(performance)
+        # Step the scheduler each epoch, independent of validation
+        scheduler.step()
 
 
         save_interval = args.save_interval 

@@ -1,5 +1,7 @@
 import csv
+import logging
 import os
+import sys
 from datetime import datetime
 
 import torch
@@ -9,7 +11,6 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from PIL import Image
 
-from unet.unet_model import UNet
 from dataset_lib import (
     CrackDataset,
     LetterboxResize,
@@ -23,130 +24,19 @@ from .losses import dice_loss
 from .training import train_model
 
 
-def _cache_root(args):
-    if not args.cache_dir:
-        return None
-    if args.preprocess not in ("letterbox", "stretch"):
-        print("Cache disabled: only supported for --preprocess letterbox/stretch.")
-        return None
-    if not args.no_augment:
-        print("Cache disabled: requires --no-augment to keep data identical.")
-        return None
-    return os.path.join(args.cache_dir, f"{args.preprocess}_{args.input_size}")
-
-
-def _cache_transforms(preprocess, input_size):
-    if preprocess == "letterbox":
-        image_tf = LetterboxResize(input_size, fill=(0, 0, 0), interpolation=Image.BILINEAR)
-        mask_tf = LetterboxResize(input_size, fill=0, interpolation=Image.NEAREST)
-        return image_tf, mask_tf
-    if preprocess == "stretch":
-        image_tf = transforms.Resize(
-            (input_size, input_size),
-            interpolation=InterpolationMode.BILINEAR,
-            antialias=True,
-        )
-        mask_tf = transforms.Resize(
-            (input_size, input_size),
-            interpolation=InterpolationMode.NEAREST,
-            antialias=False,
-        )
-        return image_tf, mask_tf
-    raise ValueError(f"Cache preprocess not supported: {preprocess}")
-
-
-def _prepare_cache_split(
-    split_name,
-    image_dir,
-    mask_dir,
-    image_filenames,
-    mask_prefix,
-    mask_index,
-    cache_root,
-    preprocess,
-    input_size,
-    rebuild,
-):
-    image_tf, mask_tf = _cache_transforms(preprocess, input_size)
-    split_root = os.path.join(cache_root, split_name)
-    images_out = os.path.join(split_root, "images")
-    masks_out = os.path.join(split_root, "masks")
-    os.makedirs(images_out, exist_ok=True)
-    os.makedirs(masks_out, exist_ok=True)
-
-    manifest_path = os.path.join(split_root, "manifest.csv")
-    cached_names = []
-    created = 0
-    reused = 0
-    skipped = 0
-
-    with open(manifest_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["image_src", "mask_src", "image_cache", "mask_cache"])
-
-        for img_name in image_filenames:
-            base_name = os.path.splitext(img_name)[0]
-            mask_path = find_mask_path(
-                mask_dir,
-                base_name,
-                mask_prefix=mask_prefix,
-                mask_index=mask_index,
-            )
-            if mask_path is None:
-                skipped += 1
-                continue
-
-            image_src = os.path.join(image_dir, img_name)
-            mask_src = mask_path
-            image_cache_name = f"{base_name}.png"
-            mask_stem = os.path.splitext(os.path.basename(mask_path))[0]
-            mask_cache_name = f"{mask_stem}.png"
-            image_cache = os.path.join(images_out, image_cache_name)
-            mask_cache = os.path.join(masks_out, mask_cache_name)
-
-            need_write = rebuild or not (os.path.exists(image_cache) and os.path.exists(mask_cache))
-            if need_write:
-                try:
-                    with Image.open(image_src) as img:
-                        img = img.convert("RGB")
-                        img = image_tf(img)
-                        img.save(image_cache)
-                    with Image.open(mask_src) as m:
-                        m = m.convert("L")
-                        m = mask_tf(m)
-                        m.save(mask_cache)
-                    created += 1
-                except Exception as exc:
-                    print(f"Cache warning: failed to process {img_name}: {exc}")
-                    skipped += 1
-                    continue
-            else:
-                reused += 1
-
-            cached_names.append(image_cache_name)
-            writer.writerow(
-                [
-                    os.path.abspath(image_src),
-                    os.path.abspath(mask_src),
-                    os.path.abspath(image_cache),
-                    os.path.abspath(mask_cache),
-                ]
-            )
-
-    print(
-        f"Cache {split_name}: {len(cached_names)} pair(s) "
-        f"(created={created}, reused={reused}, skipped={skipped}) -> {split_root}"
-    )
-    return images_out, masks_out, cached_names
-
-
 def run_training(args):
     # Select device.
-    device = torch.device("cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        torch.backends.cudnn.benchmark = True
+    else:
+        device = torch.device("cpu")
+    
     print(f'Using device: {device}')
 
     # Output directory.
     output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
     if output_dir:
         base = os.path.basename(os.path.normpath(output_dir))
         if base == "output_results":
@@ -184,43 +74,9 @@ def run_training(args):
             f"No valid image-mask pairs found under: {val_images_path} and {val_masks_path}"
         )
 
-    cache_root = _cache_root(args)
-    cache_enabled = cache_root is not None
-    if cache_enabled:
-        os.makedirs(cache_root, exist_ok=True)
-        train_images_path, train_masks_path, train_names = _prepare_cache_split(
-            "train",
-            train_images_path,
-            train_masks_path,
-            train_names,
-            args.mask_prefix,
-            train_mask_index,
-            cache_root,
-            args.preprocess,
-            args.input_size,
-            args.cache_rebuild,
-        )
-        val_images_path, val_masks_path, val_names = _prepare_cache_split(
-            "val",
-            val_images_path,
-            val_masks_path,
-            val_names,
-            args.mask_prefix,
-            val_mask_index,
-            cache_root,
-            args.preprocess,
-            args.input_size,
-            args.cache_rebuild,
-        )
-        train_mask_index = build_mask_index(train_masks_path)
-        val_mask_index = build_mask_index(val_masks_path)
-        if not train_names:
-            raise RuntimeError(f"No cached train pairs found under: {train_images_path} and {train_masks_path}")
-        if not val_names:
-            raise RuntimeError(f"No cached val pairs found under: {val_images_path} and {val_masks_path}")
-
     # Preprocessing / datasets
     if args.preprocess == "patch":
+
         image_transform = transforms.Compose([transforms.ToTensor()])
         mask_transform = transforms.Compose([transforms.ToTensor()])
 
@@ -253,37 +109,22 @@ def run_training(args):
             verbose=True,
         )
 
-    elif args.preprocess == "letterbox":
-        # Keep aspect ratio: resize to fit, then pad to square.
-        if cache_enabled:
-            image_transform = transforms.Compose([transforms.ToTensor()])
-            mask_transform = transforms.Compose([transforms.ToTensor()])
-        else:
-            image_transform = transforms.Compose(
-                [
-                    LetterboxResize(args.input_size, fill=(0, 0, 0), interpolation=Image.BILINEAR),
-                    transforms.ToTensor(),
-                ]
-            )
-            mask_transform = transforms.Compose(
-                [
-                    LetterboxResize(args.input_size, fill=0, interpolation=Image.NEAREST),
-                    transforms.ToTensor(),
-                ]
-            )
+    elif args.preprocess in ["letterbox", "resize"]:
+        # New Standard Behaviour: Delegate generic preprocessing to CrackDataset (Albumentations)
+        # This handles both "letterbox" (pad) and "resize" (stretch) modes via the 'preprocess_mode' arg.
+        
         train_full = CrackDataset(
             image_dir=train_images_path,
             mask_dir=train_masks_path,
             image_filenames=train_names,
             mask_prefix=args.mask_prefix,
             mask_index=train_mask_index,
-            image_transform=None,
-            mask_transform=None,
             augment=not args.no_augment,
             patch_size=None,
             output_size=args.input_size,
             verbose=True,
-            cache_data=False
+            cache_data=False,
+            preprocess_mode=args.preprocess # Pass the mode!
         )
         val_full = CrackDataset(
             image_dir=val_images_path,
@@ -291,55 +132,30 @@ def run_training(args):
             image_filenames=val_names,
             mask_prefix=args.mask_prefix,
             mask_index=val_mask_index,
-            image_transform=None,
-            mask_transform=None,
             augment=False,
             patch_size=None,
             output_size=args.input_size,
             verbose=True,
-            cache_data=False
+            cache_data=False,
+            preprocess_mode=args.preprocess # Pass the mode!
         )
         train_dataset = train_full
         val_dataset = val_full
     else:
-        # Legacy behaviour: stretch to square (kept for comparison).
-        if cache_enabled:
-            image_transform = transforms.Compose([transforms.ToTensor()])
-            mask_transform = transforms.Compose([transforms.ToTensor()])
-        else:
-            image_transform = transforms.Compose(
-                [
-                    transforms.Resize(
-                        (args.input_size, args.input_size),
-                        interpolation=InterpolationMode.BILINEAR,
-                        antialias=True,
-                    ),
-                    transforms.ToTensor(),
-                ]
-            )
-            mask_transform = transforms.Compose(
-                [
-                    transforms.Resize(
-                        (args.input_size, args.input_size),
-                        interpolation=InterpolationMode.NEAREST,
-                        antialias=False,
-                    ),
-                    transforms.ToTensor(),
-                ]
-            )
+        # Legacy options or fallback
+        print(f"Warning: Unknown preprocess mode '{args.preprocess}', falling back to old 'resize' behaviour.")
         train_full = CrackDataset(
             image_dir=train_images_path,
             mask_dir=train_masks_path,
             image_filenames=train_names,
             mask_prefix=args.mask_prefix,
             mask_index=train_mask_index,
-            image_transform=None, # Deprecated/Handled internally
-            mask_transform=None,
             augment=not args.no_augment,
             patch_size=None,
             output_size=args.input_size,
             verbose=True,
-            cache_data=False # Enable RAM Cache
+            cache_data=False,
+            preprocess_mode="resize"
         )
         val_full = CrackDataset(
             image_dir=val_images_path,
@@ -347,13 +163,12 @@ def run_training(args):
             image_filenames=val_names,
             mask_prefix=args.mask_prefix,
             mask_index=val_mask_index,
-            image_transform=None,
-            mask_transform=None,
             augment=False,
             patch_size=None,
             output_size=args.input_size,
             verbose=True,
-            cache_data=False # Enable RAM Cache
+            cache_data=False,
+            preprocess_mode="resize"
         )
         train_dataset = train_full
         val_dataset = val_full
@@ -389,8 +204,23 @@ def run_training(args):
         train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
         val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
 
-    # Model.
-    model = UNet(in_channels=3, out_channels=1).to(device)
+    # Model: Using Segmentation Models Pytorch (SMP) for SOTA backbones
+    import segmentation_models_pytorch as smp
+
+    # Default to a strong backbone if not specified
+    encoder_name = getattr(args, "encoder_name", "efficientnet-b4")
+    encoder_weights = getattr(args, "encoder_weights", "imagenet")
+    classes = 1
+    activation = None # We use BCEWithLogitsLoss, so no activation at output
+
+    print(f"Model: Unet++ (smp) | Encoder: {encoder_name} | Weights: {encoder_weights}")
+    model = smp.UnetPlusPlus(
+        encoder_name=encoder_name, 
+        encoder_weights=encoder_weights, 
+        in_channels=3, 
+        classes=classes, 
+        activation=activation
+    ).to(device)
 
     # Loss + optimizer.
     pos_weight = torch.tensor([float(args.pos_weight)], device=device)
@@ -399,30 +229,29 @@ def run_training(args):
     def criterion(pred, target):
         return float(args.bce_weight) * bce(pred, target) + float(args.dice_weight) * dice_loss(pred, target)
 
-    optimizer = torch.optim.Adam(
+    # Optimizer: AdamW is generally better than Adam for SOTA models
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(args.learning_rate),
         weight_decay=float(args.weight_decay),
     )
 
-    # LR scheduler.
-    sched_mode = "max" if args.scheduler_metric == "dice" else "min"
-    try:
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode=sched_mode,
-            factor=float(args.scheduler_factor),
-            patience=int(args.scheduler_patience),
-            verbose=True,
-        )
-    except TypeError:
-        # Newer PyTorch versions removed the 'verbose' argument.
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode=sched_mode,
-            factor=float(args.scheduler_factor),
-            patience=int(args.scheduler_patience),
-        )
+    # LR scheduler: CosineAnnealingWarmRestarts (SGDR) is SOTA standard
+    # T_0: Number of epochs for the first restart.
+    # T_mult: Factor to increase T_i after a restart.
+    T_0 = int(getattr(args, "scheduler_t0", 10))
+    T_mult = int(getattr(args, "scheduler_tmult", 2))
+    
+    print(f"Scheduler: CosineAnnealingWarmRestarts (T_0={T_0}, T_mult={T_mult})")
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=T_0,
+        T_mult=T_mult,
+        eta_min=float(args.learning_rate) * 0.01,
+        verbose=False
+    )
+    
+    # Allow fallback to ReduceLROnPlateau if explicitly requested (not implemented here to keep clean SOTA flow)
 
     if args.preprocess == "patch":
         print(
@@ -447,7 +276,27 @@ def run_training(args):
     else:
         train_model._metric_thresholds = []
 
-    # Train.
+    # Logging Setup
+    logging.basicConfig(
+        filename=os.path.join(output_dir, "log.txt"),
+        level=logging.INFO,
+        format='[%(asctime)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        force=True
+    )
+    # Add console handler if not present (to avoid double log)
+    if not any(isinstance(h, logging.StreamHandler) for h in logging.getLogger().handlers):
+        logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    
+    logging.info(f"Training started. Output dir: {output_dir}")
+    logging.info(f"Config: {vars(args)}")
+
+    # CSV Writer Init
+    csv_path = os.path.join(output_dir, "val_metrics.csv")
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch", "train_loss", "val_loss", "val_dice", "val_iou", "lr"])
+
     train_model(
         model=model,
         train_loader=train_loader,
@@ -457,5 +306,8 @@ def run_training(args):
         scheduler=scheduler,  # Pass the scheduler
         num_epochs=args.epochs,
         device=device,
-        output_dir=output_dir
+        output_dir=output_dir,
+
+        csv_path=csv_path, # Pass CSV path
+        grad_accum_steps=getattr(args, "grad_accum_steps", 1)
     )

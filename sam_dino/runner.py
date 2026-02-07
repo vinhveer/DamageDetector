@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -28,7 +30,7 @@ class SamDinoParams:
     sam_min_component_area: int = 0
     sam_dilate_iters: int = 0
     seed: int = 1337
-    device: str = "cuda"  # auto|cpu|mps|cuda
+    device: str = "cpu"  # auto|cpu|mps|cuda
     output_dir: str = "results_sam_dino"
 
 
@@ -72,8 +74,15 @@ class SamDinoRunner:
     def _load_gdino_state_dict(self, checkpoint_path: str) -> dict:
         import torch
 
-        # FIXED: weights_only=False for backward compatibility with older checkpoints
-        raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if checkpoint_path.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            return load_file(checkpoint_path)
+
+        # Prefer weights_only=True (faster/safer). Fall back to weights_only=False for legacy checkpoints.
+        try:
+            raw = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        except Exception:
+            raw = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         if isinstance(raw, dict):
             if isinstance(raw.get("state_dict"), dict):
                 state = raw["state_dict"]
@@ -114,11 +123,40 @@ class SamDinoRunner:
     def _ensure_models(self, params: SamDinoParams, *, log_fn=None) -> tuple[Any, Any, Any, str]:
         self._ensure_import_paths()
         import torch
+        import scipy
+        import scipy.signal
+        import scipy.spatial
+        import transformers
+        import transformers.models.grounding_dino.image_processing_grounding_dino
 
         from device_utils import select_device_str
         from sam_dino.pipeline import apply_delta_to_sam, load_sam_model, resolve_best_delta_checkpoint
         from segment_anything import SamPredictor  # type: ignore
         from transformers import AutoProcessor, GroundingDinoConfig, GroundingDinoForObjectDetection  # type: ignore
+        import faulthandler
+
+        def _dump_on_hang(label: str, seconds: float) -> threading.Event:
+            """
+            If a HF/torch call hangs (sometimes happens on Windows due to AV / file locks),
+            dump stack traces so the UI shows where it is stuck.
+            """
+            stop = threading.Event()
+
+            def _arm() -> None:
+                if stop.wait(seconds):
+                    return
+                try:
+                    if log_fn is not None:
+                        log_fn(f"WARN: '{label}' still running after {int(seconds)}s. Dumping stack traces...")
+                except Exception:
+                    pass
+                try:
+                    faulthandler.dump_traceback(all_threads=True)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_arm, name=f"hang-dump:{label}", daemon=True).start()
+            return stop
 
         device = select_device_str(params.device, torch=torch)
         if str(params.device or "").strip().lower() == "cuda" and device != "cuda" and log_fn is not None:
@@ -194,10 +232,30 @@ class SamDinoRunner:
         ckpt_is_explicit_file = ckpt_lower.endswith((".pth", ".pt", ".safetensors", ".bin"))
         use_hf_id = (not ckpt_is_dir) and (not ckpt_is_file) and (not ckpt_is_explicit_file)
 
+        # AUTO-DETECT: If user picked a standard model file inside a valid HF folder, switch to folder mode.
+        if ckpt_is_file and not use_hf_id:
+            parent_dir = os.path.dirname(ckpt_path)
+            # If parent has config.json, assume it's a model folder
+            if os.path.isfile(os.path.join(parent_dir, "config.json")):
+                 base = os.path.basename(ckpt_path).lower()
+                 # Only switch if it's a standard weight file to avoid confusion with custom checkpoints
+                 if base in ["model.safetensors", "pytorch_model.bin", "tf_model.h5"]:
+                     if log_fn is not None:
+                         log_fn(f"Detected valid HF model folder ({parent_dir}). Using folder mode instead of single file.")
+                     ckpt_path = parent_dir
+                     ckpt_is_dir = True
+                     ckpt_is_file = False
+                     use_hf_id = False
+
         if use_hf_id or ckpt_is_dir:
             cfg_id = ckpt_path
         else:
-            cfg_id = self._resolve_gdino_config_id(params)
+            # Check if config.json exists in file's directory
+            parent_dir = os.path.dirname(ckpt_path)
+            if os.path.isfile(os.path.join(parent_dir, "config.json")):
+                cfg_id = parent_dir
+            else:
+                cfg_id = self._resolve_gdino_config_id(params)
 
         need_gdino = (
             self._gdino is None
@@ -208,28 +266,156 @@ class SamDinoRunner:
         )
         if need_gdino:
             if log_fn is not None:
-                if use_hf_id:
-                    log_fn("Loading GroundingDINO from HuggingFace...")
+                if ckpt_is_dir:
+                    log_fn("Loading GroundingDINO from local folder...")
+                elif use_hf_id:
+                    log_fn("Loading GroundingDINO (offline/cache)...")
                 else:
-                    log_fn("Loading GroundingDINO (config from HuggingFace, weights from .pth)...")
+                    log_fn("Loading GroundingDINO (offline config/cache + local .pth weights)...")
 
-            if ckpt_is_dir:
-                processor = AutoProcessor.from_pretrained(ckpt_path)
-                gdino = GroundingDinoForObjectDetection.from_pretrained(ckpt_path)
-            elif use_hf_id:
-                processor = AutoProcessor.from_pretrained(ckpt_path)
-                gdino = GroundingDinoForObjectDetection.from_pretrained(ckpt_path)
-            else:
-                if not ckpt_is_file:
-                    raise FileNotFoundError(f"GroundingDINO checkpoint not found: {ckpt_path}")
-                state_dict = self._load_gdino_state_dict(ckpt_path)
-                processor = AutoProcessor.from_pretrained(cfg_id)
-                config = GroundingDinoConfig.from_pretrained(cfg_id)
-                gdino = GroundingDinoForObjectDetection(config)
-                missing, unexpected = gdino.load_state_dict(state_dict, strict=False)
-                if log_fn is not None and (missing or unexpected):
-                    log_fn(f"WARN: GroundingDINO missing={len(missing)} unexpected={len(unexpected)} keys.")
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+            os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+            tick_stop = threading.Event()
+
+            def _tick() -> None:
+                if log_fn is None:
+                    return
+                t0 = time.time()
+                while not tick_stop.wait(8.0):
+                    elapsed = int(time.time() - t0)
+                    log_fn(f"Still loading GroundingDINO... ({elapsed}s)")
+
+            t = None
+            if log_fn is not None:
+                t = threading.Thread(target=_tick, name="gdino-load-tick", daemon=True)
+                t.start()
+
+            try:
+                if log_fn is not None:
+                    log_fn(f"GroundingDINO: device={device}")
+                    log_fn(f"GroundingDINO: checkpoint={ckpt_path}")
+                    log_fn(f"GroundingDINO: config={cfg_id}")
+                    if ckpt_is_file:
+                        try:
+                            sz = os.path.getsize(ckpt_path) / (1024 * 1024)
+                            log_fn(f"GroundingDINO: weights_size={sz:.1f} MB")
+                        except Exception:
+                            pass
+
+                if ckpt_is_dir:
+                    if log_fn is not None:
+                        log_fn("Step: load processor (AutoProcessor.from_pretrained folder)...")
+                    t0 = time.time()
+                    hang = _dump_on_hang("AutoProcessor.from_pretrained(folder)", 30.0)
+                    processor = AutoProcessor.from_pretrained(ckpt_path, local_files_only=True)
+                    hang.set()
+                    if log_fn is not None:
+                        log_fn(f"Loaded processor ({time.time() - t0:.1f}s)")
+
+                    if log_fn is not None:
+                        log_fn("Step: load model weights (from_pretrained folder)...")
+                    t0 = time.time()
+                    use_safetensors = os.path.isfile(os.path.join(ckpt_path, "model.safetensors"))
+                    hang = _dump_on_hang("GroundingDinoForObjectDetection.from_pretrained(folder)", 60.0)
+                    try:
+                        gdino = GroundingDinoForObjectDetection.from_pretrained(
+                            ckpt_path,
+                            local_files_only=True,
+                            use_safetensors=use_safetensors,
+                        )
+                    except TypeError:
+                        gdino = GroundingDinoForObjectDetection.from_pretrained(ckpt_path, local_files_only=True)
+                    hang.set()
+                    if log_fn is not None:
+                        log_fn(f"Loaded model from folder ({time.time() - t0:.1f}s)")
+                elif use_hf_id:
+                    if log_fn is not None:
+                        log_fn("Step: load processor (AutoProcessor.from_pretrained cache)...")
+                    t0 = time.time()
+                    hang = _dump_on_hang("AutoProcessor.from_pretrained(cache)", 30.0)
+                    processor = AutoProcessor.from_pretrained(ckpt_path, local_files_only=True)
+                    hang.set()
+                    if log_fn is not None:
+                        log_fn(f"Loaded processor ({time.time() - t0:.1f}s)")
+
+                    if log_fn is not None:
+                        log_fn("Step: load model weights (from_pretrained cache)...")
+                    t0 = time.time()
+                    hang = _dump_on_hang("GroundingDinoForObjectDetection.from_pretrained(cache)", 60.0)
+                    try:
+                        gdino = GroundingDinoForObjectDetection.from_pretrained(
+                            ckpt_path,
+                            local_files_only=True,
+                        )
+                    except TypeError:
+                        gdino = GroundingDinoForObjectDetection.from_pretrained(ckpt_path, local_files_only=True)
+                    hang.set()
+                    if log_fn is not None:
+                        log_fn(f"Loaded model from cache ({time.time() - t0:.1f}s)")
+                else:
+                    if not ckpt_is_file:
+                        raise FileNotFoundError(f"GroundingDINO checkpoint not found: {ckpt_path}")
+                    if log_fn is not None:
+                        log_fn("Step: load .pth state_dict (torch.load)...")
+                    t0 = time.time()
+                    state_dict = self._load_gdino_state_dict(ckpt_path)
+                    if log_fn is not None:
+                        log_fn(f"Loaded .pth state_dict ({time.time() - t0:.1f}s)")
+
+                    if log_fn is not None:
+                        log_fn("Step: load processor (AutoProcessor.from_pretrained)...")
+                    t0 = time.time()
+                    hang = _dump_on_hang("AutoProcessor.from_pretrained(config_id)", 30.0)
+                    processor = AutoProcessor.from_pretrained(cfg_id, local_files_only=True)
+                    hang.set()
+                    if log_fn is not None:
+                        log_fn(f"Loaded processor ({time.time() - t0:.1f}s)")
+
+                    if log_fn is not None:
+                        log_fn("Step: load config (GroundingDinoConfig.from_pretrained)...")
+                    t0 = time.time()
+                    config = GroundingDinoConfig.from_pretrained(cfg_id, local_files_only=True)
+                    if log_fn is not None:
+                        log_fn(f"Loaded config ({time.time() - t0:.1f}s)")
+
+                    if log_fn is not None:
+                        log_fn("Step: build model (GroundingDinoForObjectDetection(config))...")
+                    t0 = time.time()
+                    gdino = GroundingDinoForObjectDetection(config)
+                    if log_fn is not None:
+                        log_fn(f"Built model ({time.time() - t0:.1f}s)")
+
+                    if log_fn is not None:
+                        log_fn("Step: apply weights (load_state_dict)...")
+                    t0 = time.time()
+                    missing, unexpected = gdino.load_state_dict(state_dict, strict=False)
+                    if log_fn is not None:
+                        log_fn(f"Applied weights ({time.time() - t0:.1f}s)")
+                    if log_fn is not None and (missing or unexpected):
+                        log_fn(f"WARN: GroundingDINO missing={len(missing)} unexpected={len(unexpected)} keys.")
+            except Exception as e:
+                hint = (
+                    "Cannot load GroundingDINO config/processor locally.\n\n"
+                    "This app runs in offline mode (no internet), so HuggingFace downloads won't work.\n\n"
+                    "Fix options:\n"
+                    "1) Set DINO 'Checkpoint' to a local HF model folder (contains config.json + preprocessor_config.json + tokenizer files).\n"
+                    "2) Or keep a .pth checkpoint, but set DINO 'Config ID' to a local HF model folder or cached model id.\n"
+                    "3) Or pre-download the HuggingFace repo on another machine, then copy it here.\n\n"
+                    f"ckpt={ckpt_path}\nconfig={cfg_id}"
+                )
+                raise RuntimeError(f"{e}\n\n{hint}") from e
+            finally:
+                tick_stop.set()
+
+            if log_fn is not None:
+                log_fn("Step: move model to device (gdino.to)...")
+            t0 = time.time()
             gdino.to(device)
+            if log_fn is not None:
+                log_fn(f"Moved model to device ({time.time() - t0:.1f}s)")
             gdino.eval()
             self._processor = processor
             self._gdino = gdino
@@ -256,7 +442,7 @@ class SamDinoRunner:
         base = safe_basename(image_path)
         if log_fn is not None:
             log_fn("Running detection + SAM masks...")
-        n_dets, n_masks, overlay_path, mask_path = process_one_image_text_box_sam_fullimage(
+        n_dets, n_masks, overlay_path, mask_path, detections = process_one_image_text_box_sam_fullimage(
             image_path=image_path,
             out_dir=params.output_dir,
             predictor=predictor,
@@ -283,6 +469,8 @@ class SamDinoRunner:
             "output_dir": params.output_dir,
             "dets": int(n_dets),
             "masks_saved": int(n_masks),
+            "detections": detections,
+            "image_path": str(image_path),
         }
 
     def run_isolate(

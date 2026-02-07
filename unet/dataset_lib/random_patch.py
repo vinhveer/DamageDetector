@@ -8,15 +8,14 @@ from collections import OrderedDict
 from torch.utils.data import Dataset
 
 from .utils import _normalize_patch_size, _pad_to_min_size, build_mask_index, find_mask_path
+import albumentations as A
+
 
 
 class RandomPatchDataset(Dataset):
     """
     Training dataset: each item is a random crop patch from an image.
-
-    - __len__ = num_images * patches_per_image
-    - __getitem__ maps an index to an image, then samples a random patch.
-    - Tries K times to find a patch containing crack pixels; falls back to random.
+    Uses Albumentations for fast augmentation and cropping.
     """
 
     def __init__(
@@ -91,6 +90,53 @@ class RandomPatchDataset(Dataset):
         if self.verbose:
             print(f"RandomPatchDataset: {len(self.images)} image(s), patches_per_image={self.patches_per_image}")
 
+        # --- Albumentations Setup ---
+        patch_h, patch_w = self.patch_size
+        
+        # 1. Base crop (Random Crop)
+        self.crop_transform = A.Compose([
+            A.PadIfNeeded(min_height=patch_h, min_width=patch_w, border_mode=0, value=0, mask_value=0),
+            A.RandomCrop(height=patch_h, width=patch_w)
+        ])
+
+        # 2. Augmentations (Only if augment=True)
+        # 2. Augmentations (Only if augment=True)
+        if self.augment:
+            # Matches SAM GenericDataset
+            self.aug_transform = A.Compose([
+                # Safe Logic: Pad -> RandomCrop
+                A.PadIfNeeded(min_height=patch_h, min_width=patch_w, border_mode=0, value=0, mask_value=0),
+                A.RandomCrop(height=patch_h, width=patch_w, p=1.0),
+                
+                A.Affine(scale=(0.9, 1.1), translate_percent=0.0625, rotate=30, p=0.5),
+                A.OneOf([
+                    A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05), # Removed alpha_affine
+                    A.GridDistortion(p=0.5),
+                    A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
+                ], p=0.3),
+                
+                # Color/Noise Augmentations
+                A.OneOf([
+                    A.CLAHE(clip_limit=2),
+                    A.RandomBrightnessContrast(),
+                    A.RandomGamma(),            
+                ], p=0.5),
+                
+                A.OneOf([
+                    A.GaussNoise(),
+                    A.MotionBlur(blur_limit=3),
+                ], p=0.3),
+                
+                A.HueSaturationValue(p=0.3),
+                
+                # Environmental / Occlusion
+                A.RandomShadow(num_shadows_limit=(1, 3), shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.3),
+                A.CoarseDropout(num_holes_limit=(1, 8), hole_height_range=(8, 32), hole_width_range=(8, 32), min_holes=None, min_height=None, min_width=None, fill_value=0, mask_fill_value=0, p=0.3),
+            ], is_check_shapes=False)
+        else:
+            self.aug_transform = None
+
+
     def __len__(self):
         return len(self.images) * self.patches_per_image
 
@@ -122,16 +168,8 @@ class RandomPatchDataset(Dataset):
                 self._cache.popitem(last=False)
         return image, mask
 
-    def _random_patch(self, image: Image.Image, mask: Image.Image):
-        patch_w, patch_h = self.patch_size
-        image = _pad_to_min_size(image, patch_w, patch_h, fill=(0, 0, 0))
-        mask = _pad_to_min_size(mask, patch_w, patch_h, fill=0)
+    # _random_patch removed in favor of Albumentations RandomCrop
 
-        w, h = image.size
-        left = 0 if w == patch_w else random.randint(0, w - patch_w)
-        top = 0 if h == patch_h else random.randint(0, h - patch_h)
-        box = (left, top, left + patch_w, top + patch_h)
-        return image.crop(box), mask.crop(box)
 
     def __getitem__(self, idx):
         img_idx = int(idx) // self.patches_per_image
@@ -139,55 +177,47 @@ class RandomPatchDataset(Dataset):
         img_name = self.images[img_idx]
 
         try:
-            image, mask = self._load_pair(img_name)
+            image_pil, mask_pil = self._load_pair(img_name)
+            
+            # Convert PIL to Numpy for Albumentations
+            image_np = np.array(image_pil)
+            mask_np = np.array(mask_pil)
 
-            # 1) Sample patch first (try to get crack patch).
-            best = None
+            # 1. Random Crop (Try K times to find crack)
+            best_sample = None
+            
             for _ in range(max(1, self.max_patch_tries)):
-                img_p, mask_p = self._random_patch(image, mask)
-                best = (img_p, mask_p)
-                if mask_p.getbbox() is not None:
+                cropped = self.crop_transform(image=image_np, mask=mask_np)
+                if np.count_nonzero(cropped['mask']) > 0:
+                    best_sample = cropped
                     break
+                best_sample = cropped # Fallback to last try
+            
+            if best_sample is None:
+                return None
 
-            image, mask = best
+            image_np = best_sample['image']
+            mask_np = best_sample['mask']
 
-            # 2) Augment on patch (cheaper than full image).
-            if self.augment:
-                if random.random() < self.p_rotate:
-                    rot = random.choice([Image.ROTATE_90, Image.ROTATE_180, Image.ROTATE_270])
-                    image = image.transpose(rot)
-                    mask = mask.transpose(rot)
+            # 2. Augment
+            if self.aug_transform is not None:
+                augmented = self.aug_transform(image=image_np, mask=mask_np)
+                image_np = augmented['image']
+                mask_np = augmented['mask']
 
-                if random.random() < self.p_hflip:
-                    image = image.transpose(Image.FLIP_LEFT_RIGHT)
-                    mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
+            # 3. To Tensor
+            # Image: [H, W, C] -> [C, H, W], float32 [0, 1]
+            image = (image_np.astype(np.float32) / 255.0)
+            image = torch.from_numpy(image).permute(2, 0, 1)
 
-                if random.random() < self.p_vflip:
-                    image = image.transpose(Image.FLIP_TOP_BOTTOM)
-                    mask = mask.transpose(Image.FLIP_TOP_BOTTOM)
+            # Mask: [H, W] -> [1, H, W], float32 [0, 1]
+            mask = (mask_np > 127).astype(np.float32)
+            mask = torch.from_numpy(mask).unsqueeze(0)
 
-                if random.random() < self.p_brightness:
-                    enhancer = ImageEnhance.Brightness(image)
-                    image = enhancer.enhance(random.uniform(0.8, 1.2))
-
-                if random.random() < self.p_contrast:
-                    enhancer = ImageEnhance.Contrast(image)
-                    image = enhancer.enhance(random.uniform(0.8, 1.2))
-
-            if self.image_transform is not None:
-                image = self.image_transform(image)
-            else:
-                image = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
-
-            if self.mask_transform is not None:
-                mask = self.mask_transform(mask)
-            else:
-                mask = torch.from_numpy(np.array(mask)).unsqueeze(0).float() / 255.0
-
-            mask = (mask > 0.5).float()
             return image, mask
+
         except Exception as e:
             if self.verbose:
-                print(f"RandomPatchDataset error at idx={idx} ({img_name}): {e}")
-            # Skip bad samples (collate_fn should drop None).
+                 print(f"RandomPatchDataset error at idx={idx} ({img_name}): {e}")
             return None
+
