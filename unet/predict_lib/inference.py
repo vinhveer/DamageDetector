@@ -26,7 +26,11 @@ def _predict_tiled(
     if overlap < 0 or overlap >= tile_size:
         raise ValueError("overlap must be in [0, tile_size)")
 
-    img_tensor = transforms.ToTensor()(img)  # (C, H, W)
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    img_tensor = transform(img)  # (C, H, W)
     _, h, w = img_tensor.shape
     step = tile_size - overlap
 

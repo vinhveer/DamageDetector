@@ -21,72 +21,135 @@ class RandomGenerator(object):
     def __init__(self, output_size, low_res):
         self.output_size = output_size
         self.low_res = low_res
-        # Define Albumentations pipeline
-        # Define Albumentations pipeline (Heavy Augmentation)
+        
+        # Define Albumentations pipeline (Heavy Augmentation WITHOUT CROP)
         self.transform = A.Compose([
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
             
-            # Geometric Augmentations
-            # Safe Logic: Pad -> RandomCrop
-            A.PadIfNeeded(min_height=output_size[1], min_width=output_size[0], border_mode=0, value=0, mask_value=0),
+            # Geometric Augmentations (Affine) - Aligned with UNet
+            A.Affine(scale=(0.8, 1.2), translate_percent=(0.1, 0.1), rotate=(-45, 45), p=0.5),
             
-            # NOTE: SAM originally uses RandomResizedCrop (scale/aspect ratio change).
-            # If we want exact pixel learning like we did for UNet, we use RandomCrop.
-            # But SAM benefits from scale variance. 
-            # However, to fix the crash "crop > image size", we MUST Pad first.
-            # If we still want scale variance, we can keep RandomResizedCrop BUT after Padding it's safer?
-            # Actually RandomResizedCrop on Padded image is safe.
-            # BUT user asked "Sửa luôn cho bên sam finetune" implying adopt the RandomCrop strategy.
-            # Let's switch to RandomCrop for consistency and safety.
-            A.RandomCrop(height=output_size[1], width=output_size[0], p=1.0),
-            A.Affine(scale=(0.9, 1.1), translate_percent=0.0625, rotate=30, p=0.5),
             A.OneOf([
-                A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03),
-                A.GridDistortion(p=0.5),
-                A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
-            ], p=0.3),
+                A.GridDistortion(num_steps=5, distort_limit=0.3, p=1.0),
+                A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=1.0),
+                A.ElasticTransform(alpha=1, sigma=50, p=1.0)
+            ], p=0.5),
             
             # Color/Noise Augmentations
             A.OneOf([
-                A.CLAHE(clip_limit=2),
-                A.RandomBrightnessContrast(),
-                A.RandomGamma(),            
+                A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1.0),
+                A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
+                A.RandomGamma(gamma_limit=(80, 120), p=1.0),            
             ], p=0.5),
             
+            # Weather Effects (Outdoor Robustness)
             A.OneOf([
-                A.GaussNoise(),
-                A.MotionBlur(blur_limit=3),
+                A.RandomRain(brightness_coefficient=0.9, drop_width=1, blur_value=3, p=1.0),
+                A.RandomSnow(brightness_coeff=2.5, snow_point_lower=0.3, snow_point_upper=0.5, p=1.0),
+                A.RandomFog(fog_coef_lower=0.3, fog_coef_upper=0.5, alpha_coef=0.08, p=1.0),
+            ], p=0.4),
+
+            A.OneOf([
+                A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+                A.Blur(blur_limit=3, p=1.0),
+                A.MotionBlur(blur_limit=3, p=1.0),
             ], p=0.3),
             
-            A.HueSaturationValue(p=0.3),
+            A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
             
             # Environmental / Occlusion
             A.RandomShadow(num_shadows_lower=1, num_shadows_upper=3, shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.3),
-            A.CoarseDropout(num_holes_limit=(1, 8), hole_height_range=(8, 32), hole_width_range=(8, 32), min_holes=None, min_height=None, min_width=None, fill_value=0, mask_fill_value=0, p=0.3),
+            A.CoarseDropout(max_holes=10, max_height=32, max_width=32, min_holes=1, min_height=8, min_width=8, fill_value=0, mask_fill_value=0, p=0.3),
         ], is_check_shapes=False)
 
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
-
-        # Apply Albumentations
-        # Convert float image (0-1) to uint8 (0-255) for optimal Albumentations support
-        if image.dtype == np.float32 or image.dtype == np.float64:
-            image_uint8 = (image * 255).astype(np.uint8)
-        else:
-            image_uint8 = image
-
-        # Ensure mask is uint8 (required by some transforms like ElasticTransform)
-        label_uint8 = label.astype(np.uint8)
         
+        # Ensure numpy
+        if isinstance(image, torch.Tensor):
+            image = image.numpy()
+        if isinstance(label, torch.Tensor):
+            label = label.numpy()
+            
+        # --- Smart Crop Implementation ---
+        # Ensure image has 3 dimensions (H, W, C)
+        if len(image.shape) == 2:
+             image = image[:, :, None]
+             
+        # Normalize label to binary 0/1 for finding indices
+        if label.max() > 1:
+             label = label / 255.0
+
+        h, w, c = image.shape
+        th, tw = self.output_size[1], self.output_size[0]
+
+        # 1. Pad if image is smaller than target
+        if w < tw or h < th:
+            pad_w = max(0, tw - w)
+            pad_h = max(0, th - h)
+            # Pad image (H, W, C)
+            image = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
+            # Pad label (H, W) or (H, W, 1)? Usually label is (H, W)
+            if len(label.shape) == 2:
+                 label = np.pad(label, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
+            else:
+                 label = np.pad(label, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
+            h, w = label.shape[:2] # Update shape
+
+        # 2. Find cracks
+        # Use a small threshold to find crack pixels (assuming label is float or binary)
+        y_inds, x_inds = np.where(label > 0)
+
+        if len(y_inds) > 0:
+            # Smart Crop: Center on a random crack pixel
+            idx = random.randint(0, len(y_inds) - 1)
+            cy, cx = y_inds[idx], x_inds[idx]
+
+            # Determine crop coordinates (try to center the crack)
+            y1 = max(0, cy - th // 2)
+            x1 = max(0, cx - tw // 2)
+
+            # Adjust if out of bounds (Shift back if near right/bottom edge)
+            y1 = min(y1, h - th)
+            x1 = min(x1, w - tw)
+            
+            # Final safety clip (shouldn't happen due to logic above but safe)
+            y1 = int(max(0, y1))
+            x1 = int(max(0, x1))
+        else:
+            # Fallback for images without cracks (rare): Random Crop
+            y1 = random.randint(0, max(0, h - th))
+            x1 = random.randint(0, max(0, w - tw))
+
+        # Perform the Crop
+        image = image[y1:y1+th, x1:x1+tw, :]
+        if len(label.shape) == 2:
+            label = label[y1:y1+th, x1:x1+tw]
+        else:
+            label = label[y1:y1+th, x1:x1+tw, :]
+            
+        # Convert to uint8 for Albumentations
+        if image.dtype == np.float32 or image.dtype == np.float64:
+             if image.max() <= 1.0:
+                 image_uint8 = (image * 255).astype(np.uint8)
+             else:
+                 image_uint8 = image.astype(np.uint8)
+        else:
+             image_uint8 = image.astype(np.uint8)
+             
+        label_uint8 = (label > 0).astype(np.uint8)
+        
+        # Apply Albumentations (No Crop, only distortions)
         augmented = self.transform(image=image_uint8, mask=label_uint8)
         image_aug = augmented['image']
         label_aug = augmented['mask']
         
-        # Convert back to float 0-1
+        # Convert back
         image = image_aug.astype(np.float32) / 255.0
-        label = label_aug # Keep as is (0,1 or 0,255 depending on input, but mask is usually binary)
+        label = label_aug.astype(np.float32)
+
         
         if len(image.shape) == 3:
             x, y, c = image.shape
@@ -131,6 +194,80 @@ class RandomGenerator(object):
 
         return sample
 
+class ValGenerator(object):
+    def __init__(self, output_size, low_res):
+        self.output_size = output_size
+        self.low_res = low_res
+
+    def __call__(self, sample):
+        image, label = sample['image'], sample['label']
+        
+        # Ensure numpy
+        if isinstance(image, torch.Tensor):
+            image = image.numpy()
+        if isinstance(label, torch.Tensor):
+            label = label.numpy()
+            
+        # --- Smart Crop Implementation (Deterministic for Val) ---
+        if len(image.shape) == 2:
+             image = image[:, :, None]
+        if label.max() > 1:
+             label = label / 255.0
+
+        h, w, c = image.shape
+        th, tw = self.output_size[1], self.output_size[0]
+
+        # Pad
+        if w < tw or h < th:
+            pad_w = max(0, tw - w)
+            pad_h = max(0, th - h)
+            image = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
+            if len(label.shape) == 2:
+                 label = np.pad(label, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
+            else:
+                 label = np.pad(label, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
+            h, w = label.shape[:2]
+
+        # Find cracks
+        y_inds, x_inds = np.where(label > 0)
+
+        if len(y_inds) > 0:
+            # Deterministic Center: Median
+            cy = int(np.median(y_inds))
+            cx = int(np.median(x_inds))
+
+            y1 = max(0, cy - th // 2)
+            x1 = max(0, cx - tw // 2)
+            y1 = min(y1, h - th)
+            x1 = min(x1, w - tw)
+            y1 = int(max(0, y1))
+            x1 = int(max(0, x1))
+        else:
+            # Center Crop fallback
+            y1 = (h - th) // 2
+            x1 = (w - tw) // 2
+            y1 = max(0, y1)
+            x1 = max(0, x1)
+
+        # Crop
+        image = image[y1:y1+th, x1:x1+tw, :]
+        if len(label.shape) == 2:
+            label = label[y1:y1+th, x1:x1+tw]
+        else:
+            label = label[y1:y1+th, x1:x1+tw, :]
+            
+        # Convert back
+        if image.dtype == np.uint8:
+             image = image.astype(np.float32) / 255.0
+        label = label.astype(np.float32)
+
+        # Clip just in case
+        image = np.clip(image, 0, 1)
+
+        image = torch.from_numpy(image)
+        label = torch.from_numpy(label)
+        sample = {'image': image, 'label': label > 0.5}
+        return sample
 class GenericDataset(Dataset):
     def __init__(self, base_dir, split="train", transform=None, img_exts=None, mask_exts=None, output_size=None, cache_data=False):
         self.transform = transform  
@@ -216,10 +353,18 @@ class GenericDataset(Dataset):
             base_name = os.path.splitext(img_name)[0]
             mask_name = None
             for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
+                # Try exact name match
                 candidate = os.path.join(self.mask_dir, base_name + ext)
                 if os.path.exists(candidate):
                     mask_name = base_name + ext
                     filepath_label = candidate
+                    break
+                
+                # Try generic _mask suffix (common in crack datasets)
+                candidate_mask = os.path.join(self.mask_dir, base_name + "_mask" + ext)
+                if os.path.exists(candidate_mask):
+                    mask_name = base_name + "_mask" + ext
+                    filepath_label = candidate_mask
                     break
             
             if mask_name is None:
@@ -313,16 +458,34 @@ class GenericDataset(Dataset):
             y_max, x_max = coords.max(axis=0)
             # Add some jitter/padding safely
             h, w = mask_np.shape
-            x_min = max(0, x_min - np.random.randint(0, 10))
-            y_min = max(0, y_min - np.random.randint(0, 10))
-            x_max = min(w, x_max + np.random.randint(0, 10))
-            y_max = min(h, y_max + np.random.randint(0, 10))
+            if self.split == 'train':
+                pad_x1 = np.random.randint(0, 10)
+                pad_y1 = np.random.randint(0, 10)
+                pad_x2 = np.random.randint(0, 10)
+                pad_y2 = np.random.randint(0, 10)
+            else:
+                # Deterministic padding for Val/Test
+                pad_x1 = 5
+                pad_y1 = 5
+                pad_x2 = 5
+                pad_y2 = 5
+
+            x_min = max(0, x_min - pad_x1)
+            y_min = max(0, y_min - pad_y1)
+            x_max = min(w, x_max + pad_x2)
+            y_max = min(h, y_max + pad_y2)
             box = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
 
             # Point prompt: 1 positive (center of random crack part) + 1 random negative
             # Positive point
             pos_indices = np.argwhere(mask_np > 0)
-            pos_pt = pos_indices[np.random.randint(len(pos_indices))] # [y, x]
+            if self.split == 'train':
+                pos_pt = pos_indices[np.random.randint(len(pos_indices))] # [y, x]
+            else:
+                # Deterministic point (Median/Center)
+                # Sort indices to ensure deterministic order then pick middle
+                # argwhere returns sorted order usually logic wise (row major), but safe to just pick middle
+                pos_pt = pos_indices[len(pos_indices) // 2]
             pos_pt = pos_pt[::-1] # [x, y]
 
         else:
@@ -334,7 +497,11 @@ class GenericDataset(Dataset):
         # Negative point (background)
         neg_indices = np.argwhere(mask_np == 0)
         if len(neg_indices) > 0:
-            neg_pt = neg_indices[np.random.randint(len(neg_indices))]
+            if self.split == 'train':
+                neg_pt = neg_indices[np.random.randint(len(neg_indices))]
+            else:
+                # Deterministic negative point
+                neg_pt = neg_indices[len(neg_indices) // 2]
             neg_pt = neg_pt[::-1] # [x, y]
         else:
             neg_pt = np.array([0, 0])

@@ -40,7 +40,7 @@ class UnetRunner:
         import torch
 
         from device_utils import select_device_str
-        from unet.unet_model import UNet
+        import segmentation_models_pytorch as smp
 
         if not os.path.isfile(params.model_path):
             raise FileNotFoundError(f"Model not found: {params.model_path}")
@@ -52,9 +52,22 @@ class UnetRunner:
 
         if log_fn is not None:
             log_fn(f"Loading UNet weights... ({params.model_path})")
-        m = UNet(in_channels=3, out_channels=1)
-        state = torch.load(params.model_path, map_location=device)
-        m.load_state_dict(state)
+        
+        # Initialize SMP UNet (Standard for trained model)
+        # Assuming efficientnet-b0 as per config. 
+        # TODO: Detect encoder from filename or config if changed.
+        try:
+             # Match training: UnetPlusPlus (smp.UnetPlusPlus)
+             m = smp.UnetPlusPlus(encoder_name="efficientnet-b0", encoder_weights=None, in_channels=3, classes=1)
+             state = torch.load(params.model_path, map_location=device, weights_only=False)
+             m.load_state_dict(state)
+        except Exception as e:
+             # Fallback or Report
+             if log_fn: log_fn(f"Error loading efficientnet-b0: {e}. Trying simple load if it is a full model...")
+             # Maybe state is not a dict? Or different encoder?
+             # Let's try to assume it IS efficientnet-b0 first.
+             raise e
+
         m = m.to(device)
         m.eval()
         self._model = m

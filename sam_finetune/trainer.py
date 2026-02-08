@@ -42,7 +42,7 @@ def worker_init_fn(worker_id):
 
 def trainer_generic(args, model, snapshot_path, multimask_output, low_res): 
     # from datasets.dataset_khanhha import Khanhha_dataset, RandomGenerator
-    from datasets.dataset_generic import GenericDataset, RandomGenerator
+    from datasets.dataset_generic import GenericDataset, RandomGenerator, ValGenerator
 
     logging.basicConfig(filename=snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
@@ -57,7 +57,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     # We ignore list_dir if using GenericDataset unless we want to keep that logic.
     # The new GenericDataset scans folders.
     
-    db_val = GenericDataset(base_dir=args.val_path, split="val_vol", output_size=[args.img_size, args.img_size])
+    db_val = GenericDataset(base_dir=args.val_path, split="val_vol", 
+                            transform=ValGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res]))
 
     db_train = GenericDataset(base_dir=args.root_path, split="train",
                                transform=RandomGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res]))

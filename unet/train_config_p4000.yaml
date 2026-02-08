@@ -6,8 +6,9 @@ mask_prefix: "auto"
 output_dir: "output_results_p4000"
 
 # --- Preprocessing ---
-preprocess: "letterbox" 
+preprocess: "random_crop" 
 input_size: 512 # SOTA Standard for cracks
+patches_per_image: 8 # Cover more area per epoch!
 
 # --- SOTA Model Config (8GB VRAM Optimized) ---
 encoder_name: "efficientnet-b0" # Lightweight SOTA backbone
@@ -16,13 +17,15 @@ encoder_weights: "imagenet"
 # --- Training Strategy ---
 batch_size: 8       # Fits in 8GB VRAM with AMP
 grad_accum_steps: 2 # 8 * 2 = 16 (Effective Batch Size)
-epochs: 100
+epochs: 500
 seed: 42    
 
 # --- Augmentation & Caching ---
-no_augment: false
-cache_dir: null
-cache_rebuild: false
+aug_prob: 0.5 
+cache_data: false # Too large for RAM
+rotate_limit: 10
+brightness_limit: 0.2
+contrast_limit: 0.2
 
 # --- Visualization ---
 no_visualize: true
@@ -30,9 +33,9 @@ no_loss_curve: true
 visualize_every: 0
 
 # --- Loss Function ---
-pos_weight: 5.0 # Balanced for crack detection
-bce_weight: 0.5
-dice_weight: 0.5
+pos_weight: 1.0 # Dice Loss handles imbalance well enough
+bce_weight: 0.25
+dice_weight: 0.75
 
 # --- Metrics ---
 metric_threshold: 0.5
@@ -40,7 +43,7 @@ metric_thresholds: ""
 scheduler_metric: "loss" # Ignored by Cosine
 
 # --- Optimizer (AdamW) ---
-learning_rate: 0.0001
+learning_rate: 0.001 # Aggressive LR for fast convergence
 weight_decay: 0.01 
 
 # --- Scheduler (CosineAnnealingWarmRestarts) ---

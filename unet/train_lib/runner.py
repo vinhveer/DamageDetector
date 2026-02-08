@@ -109,7 +109,7 @@ def run_training(args):
             verbose=True,
         )
 
-    elif args.preprocess in ["letterbox", "resize"]:
+    elif args.preprocess in ["letterbox", "resize", "random_crop"]:
         # New Standard Behaviour: Delegate generic preprocessing to CrackDataset (Albumentations)
         # This handles both "letterbox" (pad) and "resize" (stretch) modes via the 'preprocess_mode' arg.
         
@@ -137,7 +137,8 @@ def run_training(args):
             output_size=args.input_size,
             verbose=True,
             cache_data=False,
-            preprocess_mode=args.preprocess # Pass the mode!
+            preprocess_mode=args.preprocess, # Pass the mode!
+            patches_per_image=getattr(args, "patches_per_image", 1)
         )
         train_dataset = train_full
         val_dataset = val_full
