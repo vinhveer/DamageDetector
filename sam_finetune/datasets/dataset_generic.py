@@ -108,13 +108,15 @@ class RandomGenerator(object):
         if w < tw or h < th:
             pad_w = max(0, tw - w)
             pad_h = max(0, th - h)
-            # Pad image (H, W, C)
-            image = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
-            # Pad label (H, W) or (H, W, 1)? Usually label is (H, W)
-            if len(label.shape) == 2:
-                 label = np.pad(label, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
-            else:
-                 label = np.pad(label, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
+            
+            # Pad image (Use Zero Padding to avoid reflecting cracks!)
+            # Reflection can duplicate a crack at the border, but the mask remains 0 (background),
+            # confusing the model. Zero padding is safer for thin structures like cracks.
+            image = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+            
+            # Pad label (Keep explicit 0 for background/ignore)
+            label = cv2.copyMakeBorder(label, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+            
             h, w = label.shape[:2] # Update shape
 
         # 2. Find cracks
@@ -227,6 +229,25 @@ class ValGenerator(object):
         if isinstance(label, torch.Tensor):
             label = label.numpy()
             
+        # --- Size Consistency Check ---
+        # Fixes crash if mask dimensions != image dimensions.
+        if image.shape[:2] != label.shape[:2]:
+            h_img, w_img = image.shape[:2]
+            h_lbl, w_lbl = label.shape[:2]
+            
+            # Create a blank mask matching image size
+            new_label = np.zeros((h_img, w_img), dtype=label.dtype)
+            
+            # Determine copy region (min of both dimensions)
+            # This effectively crops if larger, or pads with 0 if smaller (implicit in zeros init)
+            h_copy = min(h_img, h_lbl)
+            w_copy = min(w_img, w_lbl)
+            
+            # Paste existing label into new buffer (Top-Left alignment)
+            new_label[:h_copy, :w_copy] = label[:h_copy, :w_copy]
+            
+            label = new_label
+
         # --- Smart Crop Implementation (Deterministic for Val) ---
         if len(image.shape) == 2:
              image = image[:, :, None]
@@ -237,14 +258,14 @@ class ValGenerator(object):
         th, tw = self.output_size[1], self.output_size[0]
 
         # Pad
+        # Pad
         if w < tw or h < th:
             pad_w = max(0, tw - w)
             pad_h = max(0, th - h)
-            image = np.pad(image, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
-            if len(label.shape) == 2:
-                 label = np.pad(label, ((0, pad_h), (0, pad_w)), mode='constant', constant_values=0)
-            else:
-                 label = np.pad(label, ((0, pad_h), (0, pad_w), (0, 0)), mode='constant', constant_values=0)
+            
+            image = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+            label = cv2.copyMakeBorder(label, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+            
             h, w = label.shape[:2]
 
         # Find cracks
