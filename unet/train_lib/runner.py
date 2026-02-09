@@ -214,13 +214,14 @@ def run_training(args):
     classes = 1
     activation = None # We use BCEWithLogitsLoss, so no activation at output
 
-    print(f"Model: Unet++ (smp) | Encoder: {encoder_name} | Weights: {encoder_weights}")
-    model = smp.UnetPlusPlus(
+    print(f"Model: Unet (smp) | Encoder: {encoder_name} | Weights: {encoder_weights} | Attention: SCSE")
+    model = smp.Unet(
         encoder_name=encoder_name, 
         encoder_weights=encoder_weights, 
         in_channels=3, 
         classes=classes, 
-        activation=activation
+        activation=activation,
+        decoder_attention_type="scse" # <--- SOTA Attention for Cracks
     ).to(device)
 
     # Loss + optimizer.
@@ -308,6 +309,7 @@ def run_training(args):
         num_epochs=args.epochs,
         device=device,
         output_dir=output_dir,
+        use_amp=True, # Enable FP16 Mixed Precision for speed & memory savings
 
         csv_path=csv_path, # Pass CSV path
         grad_accum_steps=getattr(args, "grad_accum_steps", 1)

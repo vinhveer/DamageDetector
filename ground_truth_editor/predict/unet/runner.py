@@ -57,15 +57,19 @@ class UnetRunner:
         # Assuming efficientnet-b0 as per config. 
         # TODO: Detect encoder from filename or config if changed.
         try:
-             # Match training: UnetPlusPlus (smp.UnetPlusPlus)
-             m = smp.UnetPlusPlus(encoder_name="efficientnet-b0", encoder_weights=None, in_channels=3, classes=1)
+             # Match training: smp.Unet with ConvNeXt-Tiny + SCSE
+             m = smp.Unet(
+                 encoder_name="tu-convnext_tiny",
+                 encoder_weights=None, 
+                 in_channels=3, 
+                 classes=1,
+                 decoder_attention_type="scse"
+             )
              state = torch.load(params.model_path, map_location=device, weights_only=False)
              m.load_state_dict(state)
         except Exception as e:
              # Fallback or Report
-             if log_fn: log_fn(f"Error loading efficientnet-b0: {e}. Trying simple load if it is a full model...")
-             # Maybe state is not a dict? Or different encoder?
-             # Let's try to assume it IS efficientnet-b0 first.
+             if log_fn: log_fn(f"Error loading model: {e}. Ensure architecture matches training config (Unet+ConvNeXt).")
              raise e
 
         m = m.to(device)

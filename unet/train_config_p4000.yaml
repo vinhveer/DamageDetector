@@ -6,23 +6,23 @@ mask_prefix: "auto"
 output_dir: "output_results_p4000"
 
 # --- Preprocessing ---
-preprocess: "random_crop" 
-input_size: 512 # SOTA Standard for cracks
-patches_per_image: 8 # Cover more area per epoch!
+preprocess: "letterbox" 
+input_size: 512 # Optimal for ConvNeXt Tiny speed/memory
+patches_per_image: 1 
 
 # --- SOTA Model Config (8GB VRAM Optimized) ---
-encoder_name: "efficientnet-b0" # Lightweight SOTA backbone
+encoder_name: "tu-convnext_tiny" 
 encoder_weights: "imagenet"
 
 # --- Training Strategy ---
-batch_size: 8       # Fits in 8GB VRAM with AMP
-grad_accum_steps: 2 # 8 * 2 = 16 (Effective Batch Size)
-epochs: 500
+batch_size: 8       
+grad_accum_steps: 2 
+epochs: 100
 seed: 42    
 
 # --- Augmentation & Caching ---
 aug_prob: 0.5 
-cache_data: false # Too large for RAM
+cache_data: false 
 rotate_limit: 10
 brightness_limit: 0.2
 contrast_limit: 0.2
@@ -33,17 +33,17 @@ no_loss_curve: true
 visualize_every: 0
 
 # --- Loss Function ---
-pos_weight: 1.0 # Dice Loss handles imbalance well enough
-bce_weight: 0.25
-dice_weight: 0.75
+pos_weight: 1.0 
+bce_weight: 0.5 # Boost Pixel-wise loss guidance
+dice_weight: 0.5
 
 # --- Metrics ---
 metric_threshold: 0.5
 metric_thresholds: ""
-scheduler_metric: "loss" # Ignored by Cosine
+scheduler_metric: "loss" 
 
 # --- Optimizer (AdamW) ---
-learning_rate: 0.001 # Aggressive LR for fast convergence
+learning_rate: 0.0002 # 2e-4: Faster convergence start
 weight_decay: 0.01 
 
 # --- Scheduler (CosineAnnealingWarmRestarts) ---
@@ -52,7 +52,7 @@ scheduler_tmult: 2
 
 # --- Hardware Optimization ---
 early_stop_patience: 100
-num_workers: 8 # Balanced for System RAM
+num_workers: 16
 persistent_workers: true
 pin_memory: true
 prefetch_factor: 2

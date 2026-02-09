@@ -2,9 +2,9 @@ import argparse
 import os
 import torch
 
-from unet.unet_model import UNet
 from predict_lib.core import predict_image
 from predict_lib.folder import predict_folder
+import segmentation_models_pytorch as smp
 
 
 def _build_parser():
@@ -12,7 +12,7 @@ def _build_parser():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--image", type=str, help="Input image path.")
     group.add_argument("--input-dir", type=str, help="Input folder containing images.")
-    parser.add_argument("--model", type=str, default="output_results/best_model.pth", help="Model weights path.")
+    parser.add_argument("--model", type=str, default="output_results_p4000/best_model.pth", help="Model weights path.")
     parser.add_argument("--output", type=str, default="results", help="Output directory.")
     parser.add_argument("--threshold", type=float, default=0.5, help="Binarization threshold in [0, 1].")
     parser.add_argument("--no-postprocessing", action="store_true", help="Disable post-processing.")
@@ -57,12 +57,22 @@ def main():
         print(f"Error: model file does not exist: {args.model}")
         return
 
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    model = UNet(in_channels=3, out_channels=1)
-    model.load_state_dict(torch.load(args.model, map_location=device))
-    model = model.to(device)
+    # Build model (Must match training config)
+    model = smp.Unet(
+        encoder_name="tu-convnext_tiny",
+        encoder_weights=None, 
+        in_channels=3, 
+        classes=1,
+        decoder_attention_type="scse"
+    )
+    
+    state_dict = torch.load(args.model, map_location=device, weights_only=False)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
     print(f"Loaded model: {args.model}")
 
     overlap = (args.input_size // 2) if args.tile_overlap == 0 else args.tile_overlap

@@ -73,6 +73,25 @@ class RandomGenerator(object):
         if isinstance(label, torch.Tensor):
             label = label.numpy()
             
+        # --- Size Consistency Check ---
+        # Fixes crash if mask dimensions != image dimensions.
+        # CRACK SPECIFIC: Do NOT stretch (resize). Pad with 0 (background) or Crop.
+        if image.shape[:2] != label.shape[:2]:
+            h_img, w_img = image.shape[:2]
+            h_lbl, w_lbl = label.shape[:2]
+            
+            # Create a blank mask matching image size
+            new_label = np.zeros((h_img, w_img), dtype=label.dtype)
+            
+            # Determine copy region (min of both dimensions)
+            h_copy = min(h_img, h_lbl)
+            w_copy = min(w_img, w_lbl)
+            
+            # Paste existing label into new buffer (Top-Left alignment)
+            new_label[:h_copy, :w_copy] = label[:h_copy, :w_copy]
+            
+            label = new_label
+
         # --- Smart Crop Implementation ---
         # Ensure image has 3 dimensions (H, W, C)
         if len(image.shape) == 2:

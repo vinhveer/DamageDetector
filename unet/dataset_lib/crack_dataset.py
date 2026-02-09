@@ -201,40 +201,39 @@ class CrackDataset(Dataset):
         else:
              aug_list = []
 
-        # Construction Pipeline
-        if preprocess_mode == "random_crop":
-            # Smart Crop Logic handles sizing manually in __getitem__
-            # self.transform only handles Augment + Normalize
-            self.transform = A.Compose(aug_list + norm_transform, is_check_shapes=False)
-            
-        elif preprocess_mode == "letterbox":
-            size_transforms = [
-                 A.LongestMaxSize(max_size=self.output_size, interpolation=cv2.INTER_LINEAR),
-                 A.PadIfNeeded(
-                     min_height=self.output_size, min_width=self.output_size, 
-                     border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0
-                 )
-            ]
-            self.transform = A.Compose(size_transforms + aug_list + norm_transform, is_check_shapes=False)
-            
-        elif preprocess_mode == "resize":
-            size_transforms = [
-                 A.Resize(height=self.output_size, width=self.output_size, interpolation=cv2.INTER_LINEAR)
-            ]
-            self.transform = A.Compose(size_transforms + aug_list + norm_transform, is_check_shapes=False)
-            
+        # Construction Pipeline (Heavy Augmentation WITHOUT CROP/RESIZE)
+        # Sizing is handled manually in __getitem__ via Smart Crop
+        if self.augment:
+             self.transform = A.Compose([
+                 A.HorizontalFlip(p=0.5),
+                 A.VerticalFlip(p=0.5),
+                 A.RandomRotate90(p=0.5),
+                 
+                 # Geometric (Affine)
+                 A.Affine(scale=(0.8, 1.2), translate_percent=(0.1, 0.1), rotate=(-45, 45), p=0.5),
+                 
+                 # Color/Noise (Moderate)
+                 A.OneOf([
+                    A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1.0),
+                    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
+                    A.RandomGamma(gamma_limit=(80, 120), p=1.0),            
+                 ], p=0.5),
+                 
+                 A.OneOf([
+                    A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+                    A.Blur(blur_limit=3, p=1.0),
+                    A.MotionBlur(blur_limit=3, p=1.0),
+                 ], p=0.2),
+                 
+                 A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
+            ], is_check_shapes=False)
         else:
-             # Legacy/Default: Pad -> Crop
-             # Or Fallback to Resize if unknown
-             if self.augment:
-                  # Explicitly insert Pad/Crop logic to aug list for legacy
-                  legacy_aug = list(aug_list)
-                  legacy_aug.insert(0, A.PadIfNeeded(min_height=self.output_size, min_width=self.output_size, border_mode=0, value=0, mask_value=0))
-                  legacy_aug.insert(1, A.RandomCrop(height=self.output_size, width=self.output_size))
-                  self.transform = A.Compose(legacy_aug + norm_transform, is_check_shapes=False)
-             else:
-                  # Just Resize for Val Fallback
-                  self.transform = A.Compose([A.Resize(self.output_size, self.output_size)] + norm_transform, is_check_shapes=False)
+             self.transform = A.Compose([], is_check_shapes=False)
+
+        # Normalization (ImageNet - Specific to UNet Backbones)
+        self.normalize = A.Compose([
+            A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), p=1.0)
+        ])
 
     @staticmethod
     def list_valid_images(image_dir, mask_dir, mask_prefix="auto", mask_index=None):
@@ -256,110 +255,138 @@ class CrackDataset(Dataset):
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if mask is None: raise FileNotFoundError(f"Failed to load mask: {mask_path}")
         
-        if image.shape[:2] != mask.shape[:2]:
-            h, w = image.shape[:2]
-            mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST)
+        # --- Preprocessing Strategy Switch ---
+        target_h, target_w = self.output_size, self.output_size
+        h, w = image.shape[:2]
 
-        # 2. Smart Crop (if enabled)
-        if self.preprocess_mode == "random_crop":
-            # Pad if needed first
-            h, w = image.shape[:2]
-            pad_h = max(0, self.output_size - h)
-            pad_w = max(0, self.output_size - w)
-            if pad_h > 0 or pad_w > 0:
+        if self.preprocess_mode == "letterbox":
+            # Letterbox Resize (Keep Aspect Ratio + Pad)
+            scale = min(target_w / w, target_h / h)
+            new_w, new_h = int(w * scale), int(h * scale)
+            
+            image_resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            mask_resized = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+            
+            # Create buffers
+            image_final_buffer = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+            mask_final_buffer = np.zeros((target_h, target_w), dtype=np.uint8)
+            
+            # Paste Center
+            pad_top = (target_h - new_h) // 2
+            pad_left = (target_w - new_w) // 2
+            
+            image_final_buffer[pad_top:pad_top+new_h, pad_left:pad_left+new_w] = image_resized
+            mask_final_buffer[pad_top:pad_top+new_h, pad_left:pad_left+new_w] = mask_resized
+            
+            image = image_final_buffer
+            mask = mask_final_buffer
+
+        elif self.preprocess_mode == "resize":
+            # Simple Stretch
+            image = cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            mask = cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+
+        else: 
+            # Default: Smart Crop (Random Crop on Train, Center/Median on Val)
+            # Find cracks
+            y_inds, x_inds = np.where(mask > 0)
+            th, tw = target_h, target_w
+            
+            # Pad if smaller than crop size
+            if w < tw or h < th:
+                pad_w = max(0, tw - w)
+                pad_h = max(0, th - h)
                 image = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=(0,0,0))
                 mask = cv2.copyMakeBorder(mask, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
-                h, w = image.shape[:2] # Update sizes
+                h, w = image.shape[:2]
 
-            # Smart Crop Logic
-            new_h, new_w = self.output_size, self.output_size
-            
-            # Decide: Positive Crop or Random Crop?
-            # If augment=True, 80% chance to pick positive.
-            # If augment=False (Val), we still want to see cracks? 
-            # Ideally Validation should use sliding window, but for 'training loop validation', 
-            # let's just center crop or random crop. 
-            # Let's simple apply RandomCrop for Val to be consistent with train loader or just Resize.
-            # Actually, Val with RandomCrop is unstable metrics. 
-            # But we stick to what requested: "random_crop" in config applies to both.
-            
-            do_smart = False
-            # Smart Crop: Always 100% (Ensure every sample contains cracks)
-            # This aligns with SAM Fine-tune strategy.
-            threshold = 1.0
-            if random.random() < threshold:
-                # Find positive pixels
-                y_inds, x_inds = np.where(mask > 0)
-                if len(y_inds) > 0:
-                    do_smart = True
-                    if self.augment:
-                        # Train: Pick a random crack pixel
-                        idx = random.randint(0, len(y_inds) - 1)
-                        cy, cx = y_inds[idx], x_inds[idx]
-                    else:
-                        # Val: Pick deterministic center (median) of crack
-                        cy = int(np.median(y_inds))
-                        cx = int(np.median(x_inds))
-                    
-                    # Random jitter around center?
-                    start_y1 = max(0, cy - new_h // 2)
-                    y1 = min(start_y1, h - new_h)
-                    y1 = int(max(0, y1))
-
-                    if self.augment:
-                        # Allow random jitter around center
-                        min_y1 = max(0, cy - new_h + 1)
-                        max_y1 = min(h - new_h, cy)
-                        max_y1 = max(max_y1, min_y1)
-                        y1 = random.randint(min_y1, max_y1)
-
-                    start_x1 = max(0, cx - new_w // 2)
-                    x1 = min(start_x1, w - new_w)
-                    x1 = int(max(0, x1))
-
-                    if self.augment:
-                        min_x1 = max(0, cx - new_w + 1)
-                        max_x1 = min(w - new_w, cx)
-                        max_x1 = max(max_x1, min_x1)
-                        x1 = random.randint(min_x1, max_x1)
-                    
-                    image = image[y1:y1+new_h, x1:x1+new_w]
-                    mask = mask[y1:y1+new_h, x1:x1+new_w]
-            
-            if not do_smart:
-                # Fallback to Random Crop (Pure Random)
+            if len(y_inds) > 0:
                 if self.augment:
-                    if h > new_h:
-                        y1 = random.randint(0, h - new_h)
-                    else: y1 = 0
+                    # Train: Smart Random
+                    idx = random.randint(0, len(y_inds) - 1)
+                    cy, cx = y_inds[idx], x_inds[idx]
+                    y1_min = max(0, cy - th + 1)
+                    x1_min = max(0, cx - tw + 1)
+                    y1_max = min(h - th, cy)
+                    x1_max = min(w - tw, cx)
                     
-                    if w > new_w:
-                        x1 = random.randint(0, w - new_w)
-                    else: x1 = 0
+                    # Fix invalid ranges (if crack at edge)
+                    y1_max = max(y1_min, y1_max)
+                    x1_max = max(x1_min, x1_max)
+                    
+                    y1 = random.randint(y1_min, min(y1_max, h-th))
+                    x1 = random.randint(x1_min, min(x1_max, w-tw))
                 else:
-                    # Valid/Test: Center Crop Fallback
-                    y1 = max(0, (h - new_h) // 2)
-                    x1 = max(0, (w - new_w) // 2)
-
-                image = image[y1:y1+new_h, x1:x1+new_w]
-                mask = mask[y1:y1+new_h, x1:x1+new_w]
+                    # Val: Median Center
+                    cy, cx = int(np.median(y_inds)), int(np.median(x_inds))
+                    y1 = max(0, min(cy - th // 2, h - th))
+                    x1 = max(0, min(cx - tw // 2, w - tw))
             else:
-                 # Smart Crop logic determined above
-                 pass # Already handled inside the if do_smart block? 
-                 # Wait, I need to edit the INSIDE of do_smart block too. 
-                 # The previous tool call view_file shows do_smart block ends at 313.
-                 # I need to target the whole block.
+                # No crack -> Random (Train) or Center (Val)
+                if self.augment:
+                    y1 = random.randint(0, max(0, h - th))
+                    x1 = random.randint(0, max(0, w - tw))
+                else:
+                    y1 = max(0, (h - th) // 2)
+                    x1 = max(0, (w - tw) // 2)
 
+            image = image[y1:y1+th, x1:x1+tw]
+            mask = mask[y1:y1+th, x1:x1+tw]
 
-        # 3. Augment & Normalize
-        augmented = self.transform(image=image, mask=mask)
-        image = augmented['image']
-        mask = augmented['mask']
+        # 2. Augment
+        # Image/Mask are now (H, W, 3) and (H, W) uint8
+        if self.augment:
+            augmented = self.transform(image=image, mask=mask)
+            image_aug = augmented['image']
+            mask_aug = augmented['mask']
+        else:
+            image_aug = image
+            mask_aug = mask
+        
+        # 3. Normalize (Standardize: (X - Mean) / Std)
+        # Returns float32
+        if self.normalize:
+            normed = self.normalize(image=image_aug)
+            image_aug = normed['image']
+        else:
+            image_aug = image_aug.astype(np.float32) / 255.0 # Fallback if no normalize
 
         # 4. To Tensor
-        image = torch.from_numpy(image).permute(2, 0, 1)
-        mask = (mask > 127).astype(np.float32)
-        mask = torch.from_numpy(mask).unsqueeze(0)
+        # Robust Channel Handling
+        target_h, target_w = self.output_size, self.output_size
+        final_image = np.zeros((target_h, target_w, 3), dtype=np.float32)
+        
+        h_aug, w_aug = image_aug.shape[:2]
+        
+        # Safety Resize (in case aug changed size)
+        if h_aug != target_h or w_aug != target_w:
+             image_aug = cv2.resize(image_aug, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+             mask_aug = cv2.resize(mask_aug, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+             h_aug, w_aug = target_h, target_w
 
+        # Paste (should be full cover usually)
+        pad_top = max(0, (target_h - h_aug) // 2)
+        pad_left = max(0, (target_w - w_aug) // 2)
+        
+        if len(image_aug.shape) == 2:
+             final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, 0] = image_aug
+             final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, 1] = image_aug
+             final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, 2] = image_aug
+        elif image_aug.shape[2] == 1:
+             ck = image_aug[:, :, 0]
+             for k in range(3): final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, k] = ck
+        else:
+             final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, :] = image_aug
+             
+        # Mask Binarization
+        final_mask = np.zeros((target_h, target_w), dtype=np.float32)
+        final_mask[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug] = mask_aug
+        final_mask = (final_mask > 0).astype(np.float32) # Strict 0/1
+
+        image = torch.from_numpy(final_image).permute(2, 0, 1).float() 
+        mask = torch.from_numpy(final_mask).float().unsqueeze(0)       
+        
         return image, mask
+
+
 

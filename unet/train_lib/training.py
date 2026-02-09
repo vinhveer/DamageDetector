@@ -41,11 +41,11 @@ def _iter_prefetch(loader, device):
 import csv
 import logging
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, csv_path=None, grad_accum_steps=1):
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, csv_path=None, grad_accum_steps=1, use_amp=False):
     # Ensure the output directory exists.
     os.makedirs(output_dir, exist_ok=True)
 
-    use_cuda = device.type == "cuda"
+    use_cuda = device.type == "cuda" and use_amp
     use_prefetch = use_cuda
     non_blocking = use_cuda
     
