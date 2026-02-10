@@ -135,8 +135,12 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
         net.eval()
         with torch.no_grad():
             outputs = net(inputs, multimask_output, patch_size[0], boxes=boxes, points=points) # inputs 1,c,h,w
-            output_masks = outputs['masks']  # 1,2,h,w
-            out = torch.argmax(torch.softmax(output_masks, dim=1), dim=1).squeeze(0) # h,w
+            output_masks = outputs['masks']
+            if output_masks.shape[1] == 1:
+                # Binary segmentation: logits > 0 <=> sigmoid > 0.5
+                out = (output_masks > 0).float().squeeze(0).squeeze(0)
+            else:
+                out = torch.argmax(torch.softmax(output_masks, dim=1), dim=1).squeeze(0)
             prediction = out.cpu().detach().numpy()# h,w  
             if x != patch_size[0] or y != patch_size[1]:
                 prediction = zoom(prediction, (x / patch_size[0], y / patch_size[1]), order=0) 
@@ -145,7 +149,7 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
 
     if test_save_path is not None:
         # image: 1,c,h,w  ndarray
-        image = image*255
+        # image = image*255 # Input is already 0-255
         label = label*255
         prediction = prediction*255
         image = Image.fromarray(np.transpose(image.squeeze(0), (1, 2, 0)).astype(np.uint8)) # 1,c,h,w -> h,w,c

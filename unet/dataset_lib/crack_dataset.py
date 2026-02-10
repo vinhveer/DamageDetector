@@ -302,8 +302,12 @@ class CrackDataset(Dataset):
                 h, w = image.shape[:2]
 
             if len(y_inds) > 0:
-                if self.augment:
-                    # Train: Smart Random
+                # 30% chance to pick random crop (learn background), 70% force crack
+                if self.augment and random.random() < 0.3:
+                     y1 = random.randint(0, max(0, h - th))
+                     x1 = random.randint(0, max(0, w - tw))
+                elif self.augment:
+                    # Train: Smart Random (Force Crack)
                     idx = random.randint(0, len(y_inds) - 1)
                     cy, cx = y_inds[idx], x_inds[idx]
                     y1_min = max(0, cy - th + 1)

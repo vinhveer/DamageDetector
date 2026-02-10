@@ -22,20 +22,15 @@ class RandomGenerator(object):
         self.output_size = output_size
         self.low_res = low_res
         
-        # Define Albumentations pipeline (Heavy Augmentation WITHOUT CROP)
+        # Define Albumentations pipeline (Refined for Surface Defects)
         self.transform = A.Compose([
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
             
-            # Geometric Augmentations (Affine) - Aligned with UNet
-            A.Affine(scale=(0.8, 1.2), translate_percent=(0.1, 0.1), rotate=(-45, 45), p=0.5),
-            
-            A.OneOf([
-                A.GridDistortion(num_steps=5, distort_limit=0.3, p=1.0),
-                A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=1.0),
-                A.ElasticTransform(alpha=1, sigma=50, p=1.0)
-            ], p=0.5),
+            # Geometric Augmentations (Safe for linear structures)
+            # Removed Elastic/Grid distortion to preserve crack physics
+            A.Affine(scale=(0.8, 1.2), translate_percent=(0.05, 0.05), rotate=(-45, 45), p=0.5),
             
             # Color/Noise Augmentations
             A.OneOf([
@@ -44,24 +39,17 @@ class RandomGenerator(object):
                 A.RandomGamma(gamma_limit=(80, 120), p=1.0),            
             ], p=0.5),
             
-            # Weather Effects (Outdoor Robustness)
-            A.OneOf([
-                A.RandomRain(brightness_coefficient=0.9, drop_width=1, blur_value=3, p=1.0),
-                A.RandomSnow(brightness_coeff=2.5, snow_point_lower=0.3, snow_point_upper=0.5, p=1.0),
-                A.RandomFog(fog_coef_lower=0.3, fog_coef_upper=0.5, alpha_coef=0.08, p=1.0),
-            ], p=0.4),
-
+            # Blur & Noise (Sensor Simulation)
             A.OneOf([
                 A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
                 A.Blur(blur_limit=3, p=1.0),
                 A.MotionBlur(blur_limit=3, p=1.0),
             ], p=0.3),
             
-            A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
+            # Removed Weather Effects (Rain/Snow) as they mimic cracks or noise
             
-            # Environmental / Occlusion
-            A.RandomShadow(num_shadows_lower=1, num_shadows_upper=3, shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.3),
-            A.CoarseDropout(max_holes=10, max_height=32, max_width=32, min_holes=1, min_height=8, min_width=8, fill_value=0, mask_fill_value=0, p=0.3),
+            # Occlusion (Optional, keep for robustness against dirt/stains)
+            A.CoarseDropout(max_holes=5, max_height=32, max_width=32, min_holes=1, min_height=8, min_width=8, fill_value=0, mask_fill_value=0, p=0.2),
         ], is_check_shapes=False)
 
     def __call__(self, sample):
@@ -112,7 +100,7 @@ class RandomGenerator(object):
             # Pad image (Use Zero Padding to avoid reflecting cracks!)
             # Reflection can duplicate a crack at the border, but the mask remains 0 (background),
             # confusing the model. Zero padding is safer for thin structures like cracks.
-            image = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+            image = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
             
             # Pad label (Keep explicit 0 for background/ignore)
             label = cv2.copyMakeBorder(label, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
@@ -124,11 +112,19 @@ class RandomGenerator(object):
         y_inds, x_inds = np.where(label > 0)
 
         if len(y_inds) > 0:
-            # Smart Crop: Center on a random crack pixel
+            # Smart Crop (With Random Offset): Avoid Center Bias
             idx = random.randint(0, len(y_inds) - 1)
             cy, cx = y_inds[idx], x_inds[idx]
+            
+            # Add significant random offset to center
+            # Can shift up to 40% of the crop size away from center
+            offset_y = random.randint(-int(th * 0.4), int(th * 0.4))
+            offset_x = random.randint(-int(tw * 0.4), int(tw * 0.4))
 
-            # Determine crop coordinates (try to center the crack)
+            cy += offset_y
+            cx += offset_x
+
+            # Determine crop coordinates
             y1 = max(0, cy - th // 2)
             x1 = max(0, cx - tw // 2)
 
@@ -168,7 +164,7 @@ class RandomGenerator(object):
         label_aug = augmented['mask']
         
         # Convert back
-        image = image_aug.astype(np.float32) / 255.0
+        image = image_aug.astype(np.float32)
         label = label_aug.astype(np.float32)
 
         
@@ -186,7 +182,7 @@ class RandomGenerator(object):
 
         # Skip resize if already correct (rare with float scale, but good practice)
         if new_w != y or new_h != x:
-            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             if c == 1 and len(image.shape) == 2:
                 image = image[:, :, None]
             label = cv2.resize(label, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
@@ -298,7 +294,7 @@ class ValGenerator(object):
             
         # Convert back
         if image.dtype == np.uint8:
-             image = image.astype(np.float32) / 255.0
+             image = image.astype(np.float32)
         label = label.astype(np.float32)
 
         # Clip just in case
@@ -383,7 +379,7 @@ class GenericDataset(Dataset):
             image_arr = self.cached_images[idx]
             label_arr = self.cached_masks[idx]
             # Norm
-            image = (image_arr / 255.0).astype(np.float32)
+            image = (image_arr).astype(np.float32)
             label = (label_arr / 255.0).astype(np.float32)
         else:
             # Fallback to disk load (or if cache disabled)
@@ -413,7 +409,7 @@ class GenericDataset(Dataset):
             image = Image.open(filepath_image).convert("RGB")
             label = Image.open(filepath_label).convert("L")
     
-            image = (np.array(image) / 255.0).astype(np.float32)
+            image = (np.array(image)).astype(np.float32)
             label = (np.array(label) / 255.0).astype(np.float32)
 
         sample = {'image': image, 'label': label}
@@ -443,7 +439,7 @@ class GenericDataset(Dataset):
              new_h = int(x * scale)
 
              if new_w != y or new_h != x:
-                image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+                image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                 if c == 1 and len(image.shape) == 2:
                     image = image[:, :, None]
                 label = cv2.resize(label, (new_w, new_h), interpolation=cv2.INTER_NEAREST)

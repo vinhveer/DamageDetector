@@ -1,14 +1,14 @@
-train_images: "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/crack500/dataset/train/images"
-train_masks:  "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/crack500/dataset/train/masks"
-val_images:   "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/crack500/dataset/val/images"
-val_masks:    "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/Datasets/crack500/dataset/val/masks"
+train_images: "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/DamageDetector/crack500_crop/train/images"
+train_masks:  "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/DamageDetector/crack500_crop/train/masks"
+val_images:   "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/DamageDetector/crack500_crop/val/images"
+val_masks:    "C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/DamageDetector/crack500_crop/val/masks"
 mask_prefix: "auto"
 output_dir: "output_results_p4000"
 
 # --- Preprocessing ---
 preprocess: "letterbox"
 preprocess_train: "random_crop"
-preprocess_val: "letterbox"
+preprocess_val: "patch"
 input_size: 512 # Optimal for ConvNeXt Tiny speed/memory
 patches_per_image: 4
 
@@ -35,7 +35,7 @@ no_loss_curve: true
 visualize_every: 0
 
 # --- Loss Function ---
-pos_weight: "auto"
+pos_weight: 2.0 # Fixed value to prevent massive False Positives (was "auto")
 pos_weight_min: 2.0
 pos_weight_max: 20.0
 pos_weight_sample: 200

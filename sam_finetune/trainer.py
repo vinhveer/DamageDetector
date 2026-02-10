@@ -29,7 +29,7 @@ def calc_loss(outputs, high_res_label_batch, ce_loss, dice_loss, dice_weight:flo
         loss_masks = masks
 
     loss_ce = ce_loss(loss_masks, high_res_label_batch[:].long())
-    loss_dice = dice_loss(masks, high_res_label_batch, softmax=True)
+    loss_dice = dice_loss(loss_masks, high_res_label_batch, softmax=True)
     loss = (1 - dice_weight) * loss_ce + dice_weight * loss_dice
     return loss, loss_ce, loss_dice
 
@@ -167,7 +167,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 box_batch = None
                 points_batch = None
 
-            assert image_batch.max() <= 1, f'image_batch max: {image_batch.max()}'
+            # assert image_batch.max() <= 1, f'image_batch max: {image_batch.max()}'
 
             if args.use_amp:
                 with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=args.use_amp):

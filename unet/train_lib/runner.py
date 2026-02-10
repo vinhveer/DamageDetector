@@ -213,7 +213,10 @@ def run_training(args):
 
     def _build_val_dataset(mode):
         if mode == "patch":
-            image_transform = transforms.Compose([transforms.ToTensor()])
+            image_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+            ])
             mask_transform = transforms.Compose([transforms.ToTensor()])
             stride = args.val_stride if args.val_stride and args.val_stride > 0 else args.input_size // 2
             return TiledDataset(

@@ -41,6 +41,7 @@ runs/
 wandb/
 checkpoints/*.pth
 checkpoints/*.pt
+crack500_crop/
 
 # Prevent accidentally committing embedded repos
 **/.git/
