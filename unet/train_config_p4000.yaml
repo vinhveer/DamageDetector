@@ -6,9 +6,11 @@ mask_prefix: "auto"
 output_dir: "output_results_p4000"
 
 # --- Preprocessing ---
-preprocess: "letterbox" 
+preprocess: "letterbox"
+preprocess_train: "random_crop"
+preprocess_val: "letterbox"
 input_size: 512 # Optimal for ConvNeXt Tiny speed/memory
-patches_per_image: 1 
+patches_per_image: 4
 
 # --- SOTA Model Config (8GB VRAM Optimized) ---
 encoder_name: "tu-convnext_tiny" 
@@ -33,17 +35,23 @@ no_loss_curve: true
 visualize_every: 0
 
 # --- Loss Function ---
-pos_weight: 1.0 
-bce_weight: 0.5 # Boost Pixel-wise loss guidance
+pos_weight: "auto"
+pos_weight_min: 2.0
+pos_weight_max: 20.0
+pos_weight_sample: 200
+bce_weight: 1.0 # ENABLED
 dice_weight: 0.5
+focal_weight: 0.5
+focal_alpha: 0.25
+focal_gamma: 2.0
 
 # --- Metrics ---
 metric_threshold: 0.5
-metric_thresholds: ""
+metric_thresholds: "0.2,0.3,0.4,0.5,0.6"
 scheduler_metric: "loss" 
 
 # --- Optimizer (AdamW) ---
-learning_rate: 0.0002 # 2e-4: Faster convergence start
+learning_rate: 0.0001 # 1e-4: More stable with BCE+Dice+Focal
 weight_decay: 0.01 
 
 # --- Scheduler (CosineAnnealingWarmRestarts) ---

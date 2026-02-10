@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import cv2
 import albumentations as A
-# from albumentations.pytorch import ToTensorV2  # Optional, but we can do manual cast
 from PIL import Image
 from torch.utils.data import Dataset
 from concurrent.futures import ThreadPoolExecutor
@@ -161,42 +160,41 @@ class CrackDataset(Dataset):
                  A.RandomRotate90(p=0.5),
                  A.Affine(scale=(0.8, 1.2), translate_percent=(0.1, 0.1), rotate=(-45, 45), p=0.5),
                  
-                 # Distortions
-                 A.OneOf([
-                    A.GridDistortion(num_steps=5, distort_limit=0.3, p=1.0),
-                    A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=1.0),
-                    A.ElasticTransform(alpha=1, sigma=50, p=1.0)
-                 ], p=0.5),
+                 # Distortions (Reduced: Too heavy deformation breaks crack continuity)
+                 # A.OneOf([
+                 #    A.GridDistortion(num_steps=5, distort_limit=0.3, p=1.0),
+                 #    A.OpticalDistortion(distort_limit=1, p=1.0),
+                 #    A.ElasticTransform(alpha=1, sigma=50, p=1.0)
+                 # ], p=0.1),
 
-                 # Occlusion
-                 A.RandomShadow(num_shadows_lower=1, num_shadows_upper=3, shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.3),
-                 A.CoarseDropout(
-                    max_holes=10, max_height=32, max_width=32, 
-                    min_holes=1, min_height=8, min_width=8, 
-                    fill_value=0, mask_fill_value=0, p=0.3
-                 ),
+                 # Occlusion (Disabled: CoarseDropout creates holes that look like disconnected cracks)
+                 # A.RandomShadow(num_shadows_limit=(1, 3), shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.1),
+                 # A.CoarseDropout(
+                 #    num_holes_range=(1, 10), hole_height_range=(8, 32), hole_width_range=(8, 32), 
+                 #    p=0.1
+                 # ),
 
-                 # Weather Effects (Outdoor Robustness)
-                 A.OneOf([
-                     A.RandomRain(brightness_coefficient=0.9, drop_width=1, blur_value=3, p=1.0),
-                     A.RandomSnow(brightness_coeff=2.5, snow_point_lower=0.3, snow_point_upper=0.5, p=1.0),
-                     A.RandomFog(fog_coef_lower=0.3, fog_coef_upper=0.5, alpha_coef=0.08, p=1.0),
-                 ], p=0.4),
+                 # Weather Effects (Disabled: Rain/Snow adds artifacts confusing with cracks)
+                 # A.OneOf([
+                 #     A.RandomRain(brightness_coefficient=0.9, drop_width=1, blur_value=3, p=1.0),
+                 #     A.RandomSnow(brightness_coeff=2.5, snow_point_range=(0.3, 0.5), p=1.0),
+                 #     A.RandomFog(fog_coef_range=(0.3, 0.5), alpha_coef=0.08, p=1.0),
+                 # ], p=0.1),
 
-                 # Color/Noise
+                 # Color/Noise (Kept but reduced intensity)
                  A.OneOf([
-                    A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1.0),
+                    A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=1.0),
                     A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
                     A.RandomGamma(gamma_limit=(80, 120), p=1.0),            
                  ], p=0.5),
                  
                  A.OneOf([
-                    A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+                    A.GaussNoise(var_limit=(10.0, 30.0), p=1.0),
                     A.Blur(blur_limit=3, p=1.0),
                     A.MotionBlur(blur_limit=3, p=1.0),
-                 ], p=0.3),
+                 ], p=0.2),
                  
-                 A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
+                 # A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
             ]
         else:
              aug_list = []
@@ -214,18 +212,19 @@ class CrackDataset(Dataset):
                  
                  # Color/Noise (Moderate)
                  A.OneOf([
-                    A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1.0),
+                    A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=1.0),
                     A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
                     A.RandomGamma(gamma_limit=(80, 120), p=1.0),            
                  ], p=0.5),
                  
                  A.OneOf([
-                    A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+                    A.GaussNoise(var_limit=(10.0, 30.0), p=1.0),
                     A.Blur(blur_limit=3, p=1.0),
                     A.MotionBlur(blur_limit=3, p=1.0),
                  ], p=0.2),
                  
-                 A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
+                 # HueSaturationValue (Disabled)
+                 # A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
             ], is_check_shapes=False)
         else:
              self.transform = A.Compose([], is_check_shapes=False)
@@ -254,6 +253,8 @@ class CrackDataset(Dataset):
 
         mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if mask is None: raise FileNotFoundError(f"Failed to load mask: {mask_path}")
+        if mask.shape[:2] != image.shape[:2]:
+            mask = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
         
         # --- Preprocessing Strategy Switch ---
         target_h, target_w = self.output_size, self.output_size
@@ -309,13 +310,21 @@ class CrackDataset(Dataset):
                     x1_min = max(0, cx - tw + 1)
                     y1_max = min(h - th, cy)
                     x1_max = min(w - tw, cx)
-                    
-                    # Fix invalid ranges (if crack at edge)
-                    y1_max = max(y1_min, y1_max)
-                    x1_max = max(x1_min, x1_max)
-                    
-                    y1 = random.randint(y1_min, min(y1_max, h-th))
-                    x1 = random.randint(x1_min, min(x1_max, w-tw))
+
+                    # Clamp ranges to valid crop space
+                    max_y1 = max(0, h - th)
+                    max_x1 = max(0, w - tw)
+                    y1_min = max(0, min(y1_min, max_y1))
+                    x1_min = max(0, min(x1_min, max_x1))
+                    y1_max = max(0, min(y1_max, max_y1))
+                    x1_max = max(0, min(x1_max, max_x1))
+                    if y1_max < y1_min:
+                        y1_max = y1_min
+                    if x1_max < x1_min:
+                        x1_max = x1_min
+
+                    y1 = random.randint(y1_min, y1_max)
+                    x1 = random.randint(x1_min, x1_max)
                 else:
                     # Val: Median Center
                     cy, cx = int(np.median(y_inds)), int(np.median(x_inds))

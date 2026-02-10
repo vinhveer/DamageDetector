@@ -2,8 +2,10 @@ import csv
 import logging
 import os
 import sys
+import random
 from datetime import datetime
 
+import cv2
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -20,8 +22,55 @@ from dataset_lib import (
     find_mask_path,
 )
 from .collate import collate_skip_none
-from .losses import dice_loss
+from .losses import dice_loss, focal_loss_with_logits
 from .training import train_model
+
+
+def _estimate_pos_weight(
+    train_names,
+    mask_dir,
+    mask_prefix,
+    mask_index,
+    sample_size=200,
+    min_weight=1.0,
+    max_weight=20.0,
+):
+    if not train_names:
+        return None
+    names = train_names
+    if sample_size and len(train_names) > sample_size:
+        names = random.sample(train_names, int(sample_size))
+
+    pos = 0
+    total = 0
+    used = 0
+    for img_name in names:
+        base_name = os.path.splitext(img_name)[0]
+        mask_path = find_mask_path(
+            mask_dir,
+            base_name,
+            mask_prefix=mask_prefix,
+            mask_index=mask_index,
+        )
+        if mask_path is None:
+            continue
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            continue
+        pos += int((mask > 0).sum())
+        total += int(mask.size)
+        used += 1
+
+    if total == 0:
+        return None
+
+    pos_ratio = pos / float(total)
+    if pos_ratio <= 0:
+        weight = float(max_weight)
+    else:
+        weight = (1.0 - pos_ratio) / pos_ratio
+    weight = max(float(min_weight), min(float(max_weight), float(weight)))
+    return float(weight), float(pos_ratio), int(used)
 
 
 def run_training(args):
@@ -74,46 +123,80 @@ def run_training(args):
             f"No valid image-mask pairs found under: {val_images_path} and {val_masks_path}"
         )
 
+    # Resolve preprocess modes (train vs val)
+    train_preprocess = getattr(args, "preprocess_train", None) or args.preprocess
+    val_preprocess = getattr(args, "preprocess_val", None) or args.preprocess
+    print(f"Preprocess: train={train_preprocess} | val={val_preprocess}")
+
+    # Auto pos_weight (optional)
+    pos_weight_value = args.pos_weight
+    auto_requested = isinstance(pos_weight_value, str) and pos_weight_value.lower() == "auto"
+    if not auto_requested:
+        try:
+            pos_weight_value = float(pos_weight_value)
+        except (TypeError, ValueError):
+            auto_requested = True
+    if auto_requested or (isinstance(pos_weight_value, (int, float)) and float(pos_weight_value) <= 0):
+        min_w = float(getattr(args, "pos_weight_min", 1.0) or 1.0)
+        max_w = float(getattr(args, "pos_weight_max", 20.0) or 20.0)
+        sample_n = int(getattr(args, "pos_weight_sample", 200) or 200)
+        auto_info = _estimate_pos_weight(
+            train_names=train_names,
+            mask_dir=train_masks_path,
+            mask_prefix=args.mask_prefix,
+            mask_index=train_mask_index,
+            sample_size=sample_n,
+            min_weight=min_w,
+            max_weight=max_w,
+        )
+        if auto_info is not None:
+            pos_weight_value, pos_ratio, used = auto_info
+            print(
+                f"Auto pos_weight: {pos_weight_value:.2f} (pos_ratio={pos_ratio:.4f}, samples={used})"
+            )
+        else:
+            pos_weight_value = 1.0
+            print("Auto pos_weight failed (no valid masks). Falling back to 1.0.")
+    args.pos_weight = float(pos_weight_value)
+
     # Preprocessing / datasets
-    if args.preprocess == "patch":
+    def _build_train_dataset(mode):
+        if mode == "patch":
+            image_transform = transforms.Compose([transforms.ToTensor()])
+            mask_transform = transforms.Compose([transforms.ToTensor()])
+            return RandomPatchDataset(
+                image_dir=train_images_path,
+                mask_dir=train_masks_path,
+                image_filenames=train_names,
+                mask_prefix=args.mask_prefix,
+                mask_index=train_mask_index,
+                patch_size=args.input_size,
+                patches_per_image=args.patches_per_image,
+                max_patch_tries=args.max_patch_tries,
+                augment=not args.no_augment,
+                image_transform=image_transform,
+                mask_transform=mask_transform,
+                verbose=True,
+            )
 
-        image_transform = transforms.Compose([transforms.ToTensor()])
-        mask_transform = transforms.Compose([transforms.ToTensor()])
+        if mode in ["letterbox", "resize", "random_crop"]:
+            return CrackDataset(
+                image_dir=train_images_path,
+                mask_dir=train_masks_path,
+                image_filenames=train_names,
+                mask_prefix=args.mask_prefix,
+                mask_index=train_mask_index,
+                augment=not args.no_augment,
+                patch_size=None,
+                output_size=args.input_size,
+                verbose=True,
+                cache_data=False,
+                preprocess_mode=mode,
+                patches_per_image=getattr(args, "patches_per_image", 1),
+            )
 
-        train_dataset = RandomPatchDataset(
-            image_dir=train_images_path,
-            mask_dir=train_masks_path,
-            image_filenames=train_names,
-            mask_prefix=args.mask_prefix,
-            mask_index=train_mask_index,
-            patch_size=args.input_size,
-            patches_per_image=args.patches_per_image,
-            max_patch_tries=args.max_patch_tries,
-            augment=not args.no_augment,
-            image_transform=image_transform,
-            mask_transform=mask_transform,
-            verbose=True,
-        )
-
-        stride = args.val_stride if args.val_stride and args.val_stride > 0 else args.input_size // 2
-        val_dataset = TiledDataset(
-            image_dir=val_images_path,
-            mask_dir=val_masks_path,
-            image_filenames=val_names,
-            mask_prefix=args.mask_prefix,
-            mask_index=val_mask_index,
-            patch_size=args.input_size,
-            stride=stride,
-            image_transform=image_transform,
-            mask_transform=mask_transform,
-            verbose=True,
-        )
-
-    elif args.preprocess in ["letterbox", "resize", "random_crop"]:
-        # New Standard Behaviour: Delegate generic preprocessing to CrackDataset (Albumentations)
-        # This handles both "letterbox" (pad) and "resize" (stretch) modes via the 'preprocess_mode' arg.
-        
-        train_full = CrackDataset(
+        print(f"Warning: Unknown preprocess mode '{mode}', falling back to 'resize' for train.")
+        return CrackDataset(
             image_dir=train_images_path,
             mask_dir=train_masks_path,
             image_filenames=train_names,
@@ -124,9 +207,46 @@ def run_training(args):
             output_size=args.input_size,
             verbose=True,
             cache_data=False,
-            preprocess_mode=args.preprocess # Pass the mode!
+            preprocess_mode="resize",
+            patches_per_image=getattr(args, "patches_per_image", 1),
         )
-        val_full = CrackDataset(
+
+    def _build_val_dataset(mode):
+        if mode == "patch":
+            image_transform = transforms.Compose([transforms.ToTensor()])
+            mask_transform = transforms.Compose([transforms.ToTensor()])
+            stride = args.val_stride if args.val_stride and args.val_stride > 0 else args.input_size // 2
+            return TiledDataset(
+                image_dir=val_images_path,
+                mask_dir=val_masks_path,
+                image_filenames=val_names,
+                mask_prefix=args.mask_prefix,
+                mask_index=val_mask_index,
+                patch_size=args.input_size,
+                stride=stride,
+                image_transform=image_transform,
+                mask_transform=mask_transform,
+                verbose=True,
+            )
+
+        if mode in ["letterbox", "resize", "random_crop"]:
+            return CrackDataset(
+                image_dir=val_images_path,
+                mask_dir=val_masks_path,
+                image_filenames=val_names,
+                mask_prefix=args.mask_prefix,
+                mask_index=val_mask_index,
+                augment=False,
+                patch_size=None,
+                output_size=args.input_size,
+                verbose=True,
+                cache_data=False,
+                preprocess_mode=mode,
+                patches_per_image=1,
+            )
+
+        print(f"Warning: Unknown preprocess mode '{mode}', falling back to 'resize' for val.")
+        return CrackDataset(
             image_dir=val_images_path,
             mask_dir=val_masks_path,
             image_filenames=val_names,
@@ -137,42 +257,12 @@ def run_training(args):
             output_size=args.input_size,
             verbose=True,
             cache_data=False,
-            preprocess_mode=args.preprocess, # Pass the mode!
-            patches_per_image=getattr(args, "patches_per_image", 1)
+            preprocess_mode="resize",
+            patches_per_image=1,
         )
-        train_dataset = train_full
-        val_dataset = val_full
-    else:
-        # Legacy options or fallback
-        print(f"Warning: Unknown preprocess mode '{args.preprocess}', falling back to old 'resize' behaviour.")
-        train_full = CrackDataset(
-            image_dir=train_images_path,
-            mask_dir=train_masks_path,
-            image_filenames=train_names,
-            mask_prefix=args.mask_prefix,
-            mask_index=train_mask_index,
-            augment=not args.no_augment,
-            patch_size=None,
-            output_size=args.input_size,
-            verbose=True,
-            cache_data=False,
-            preprocess_mode="resize"
-        )
-        val_full = CrackDataset(
-            image_dir=val_images_path,
-            mask_dir=val_masks_path,
-            image_filenames=val_names,
-            mask_prefix=args.mask_prefix,
-            mask_index=val_mask_index,
-            augment=False,
-            patch_size=None,
-            output_size=args.input_size,
-            verbose=True,
-            cache_data=False,
-            preprocess_mode="resize"
-        )
-        train_dataset = train_full
-        val_dataset = val_full
+
+    train_dataset = _build_train_dataset(train_preprocess)
+    val_dataset = _build_val_dataset(val_preprocess)
 
     print(f'Train set size: {len(train_dataset)}')
     print(f'Val set size: {len(val_dataset)}')
@@ -229,7 +319,19 @@ def run_training(args):
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     def criterion(pred, target):
-        return float(args.bce_weight) * bce(pred, target) + float(args.dice_weight) * dice_loss(pred, target)
+        loss = 0.0
+        bce_weight = float(args.bce_weight)
+        dice_weight = float(args.dice_weight)
+        focal_weight = float(getattr(args, "focal_weight", 0.0))
+        if bce_weight > 0:
+            loss += bce_weight * bce(pred, target)
+        if dice_weight > 0:
+            loss += dice_weight * dice_loss(pred, target)
+        if focal_weight > 0:
+            alpha = float(getattr(args, "focal_alpha", 0.25))
+            gamma = float(getattr(args, "focal_gamma", 2.0))
+            loss += focal_weight * focal_loss_with_logits(pred, target, alpha=alpha, gamma=gamma)
+        return loss
 
     # Optimizer: AdamW is generally better than Adam for SOTA models
     optimizer = torch.optim.AdamW(
@@ -255,13 +357,18 @@ def run_training(args):
     
     # Allow fallback to ReduceLROnPlateau if explicitly requested (not implemented here to keep clean SOTA flow)
 
-    if args.preprocess == "patch":
+    if train_preprocess == "patch":
         print(
             f"Patch training: patch_size={args.input_size}, train_patches_per_image={args.patches_per_image}, "
             f"val_stride={args.val_stride if args.val_stride > 0 else (args.input_size // 2)}"
         )
     print(
-        f"Loss: bce_weight={args.bce_weight}, dice_weight={args.dice_weight}, pos_weight={args.pos_weight}"
+        "Loss: "
+        f"bce_weight={args.bce_weight}, dice_weight={args.dice_weight}, "
+        f"focal_weight={getattr(args, 'focal_weight', 0.0)}, "
+        f"focal_alpha={getattr(args, 'focal_alpha', 0.25)}, "
+        f"focal_gamma={getattr(args, 'focal_gamma', 2.0)}, "
+        f"pos_weight={args.pos_weight}"
     )
     print(f"Val metric threshold: {args.metric_threshold} | Scheduler metric: {args.scheduler_metric}")
 

@@ -11,7 +11,6 @@ This project implements crack segmentation using an improved U-Net architecture 
 ## Project Structure
 
 ```
-unet/unet_model.py   # Improved U-Net model definition
 dataset_lib/         # Dataset loading and preprocessing (modular)
 train.py             # Training entrypoint
 predict.py           # Predict a single image or a folder

@@ -1,7 +1,7 @@
 sam_checkpoint="C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/DamageDetector/checkpoints/sam_vit_b_01ec64.pth"
 sam_model_type=vit_b
 delta_type=lora
-delta_checkpoint="C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/DamageDetector/output/training/generic_256_pretrain_vit_b_30k_epo65_bs8_lr0.001_s3407_type_lora_r4/best_model.pth"
+delta_checkpoint="C:/Users/Dell Precision 7810/Desktop/quangvinh_workspace/DamageDetector/checkpoints/sam_lora_2000_vitb_512.pth"
 middle_dim=32
 scaling_factor=0.2
 rank=4
@@ -27,5 +27,4 @@ unet_overlap=0
 unet_tile_batch=4
 brush_radius=3
 overlay_opacity=120
-workspace_path="C:\\Users\\Dell Precision 7810\\Desktop\\quangvinh_workspace\\Predict"
-last_folder_path="C:\\Users\\Dell Precision 7810\\Desktop\\quangvinh_workspace\\Predict\\images"
+workspace_path="C:\\Users\\Dell Precision 7810\\Desktop\\quangvinh_workspace\\Compare"
