@@ -1,3 +1,12 @@
+import cv2
+import os
+
+# Tối ưu cho DataLoader đa luồng trên Windows
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 from train_lib.cli import build_arg_parser, load_config, validate_args
 from train_lib.runner import run_training
 
