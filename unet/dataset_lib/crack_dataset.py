@@ -289,8 +289,19 @@ class CrackDataset(Dataset):
 
         else: 
             # Default: Smart Crop (Random Crop on Train, Center/Median on Val)
-            # Find cracks
-            y_inds, x_inds = np.where(mask > 0)
+            # Find cracks (Optimized: Resize mask to 1/8 to find coords quickly)
+            small_scale = 0.125 # 1/8
+            mask_small = cv2.resize(mask, (0, 0), fx=small_scale, fy=small_scale, interpolation=cv2.INTER_NEAREST)
+            y_inds_small, x_inds_small = np.where(mask_small > 0)
+            
+            # Map back to original scale
+            if len(y_inds_small) > 0:
+                # Approximate coords
+                y_inds = (y_inds_small / small_scale).astype(int)
+                x_inds = (x_inds_small / small_scale).astype(int)
+            else:
+                y_inds, x_inds = [], []
+            
             th, tw = target_h, target_w
             
             # Pad if smaller than crop size
