@@ -55,6 +55,7 @@ parser.add_argument('--tf32', action='store_true', help='If activated, use tf32 
 parser.add_argument('--use_amp', action='store_true', help='If activated, adopt mixed precision for acceleration, but may cause NaN')
 parser.add_argument('--save_interval', type=int, default=1, help='Save and validation intervals')
 parser.add_argument('--num_workers', type=int, default=8, help='number of dataloader workers')
+parser.add_argument('--patches_per_image', type=int, default=1, help='number of random patches to crop per image per epoch')
 
 args = parser.parse_args()
 

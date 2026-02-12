@@ -9,6 +9,10 @@ import glob
 import cv2
 import albumentations as A
 
+# Prevent OpenCV from using multithreading within workers
+cv2.setNumThreads(0)
+cv2.ocl.setUseOpenCL(False)
+
 def random_rot_flip(image, label):
     # Deprecated: Handled by Albumentations
     pass
@@ -305,12 +309,13 @@ class ValGenerator(object):
         sample = {'image': image, 'label': label > 0.5}
         return sample
 class GenericDataset(Dataset):
-    def __init__(self, base_dir, split="train", transform=None, img_exts=None, mask_exts=None, output_size=None, cache_data=False):
+    def __init__(self, base_dir, split="train", transform=None, img_exts=None, mask_exts=None, output_size=None, cache_data=False, patches_per_image=1):
         self.transform = transform  
         self.split = split
         self.data_dir = base_dir
         self.output_size = output_size # Tuple (h, w) or list
         self.cache_data = cache_data
+        self.patches_per_image = patches_per_image
         
         self.img_dir = os.path.join(base_dir, "images")
         self.mask_dir = os.path.join(base_dir, "masks")
@@ -372,9 +377,12 @@ class GenericDataset(Dataset):
             print(f"GenericDataset ({split}): Cached {len(self.cached_images)} items into RAM.")
 
     def __len__(self):
-        return len(self.sample_list)
+        return len(self.sample_list) * self.patches_per_image
 
     def __getitem__(self, idx):
+        # Map augmented index to original image index
+        idx = idx // self.patches_per_image
+        
         if self.cache_data and idx in self.cached_images:
             image_arr = self.cached_images[idx]
             label_arr = self.cached_masks[idx]

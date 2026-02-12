@@ -17,8 +17,8 @@ encoder_name: "tu-convnext_tiny"
 encoder_weights: "imagenet"
 
 # --- Training Strategy ---
-batch_size: 8       
-grad_accum_steps: 2 
+batch_size: 4
+grad_accum_steps: 4 
 epochs: 100
 seed: 42    
 
@@ -63,4 +63,4 @@ early_stop_patience: 100
 num_workers: 16
 persistent_workers: true
 pin_memory: true
-prefetch_factor: 2
+prefetch_factor: 8

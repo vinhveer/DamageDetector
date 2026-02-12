@@ -61,7 +61,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                             transform=ValGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res]))
 
     db_train = GenericDataset(base_dir=args.root_path, split="train",
-                               transform=RandomGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res]))
+                               transform=RandomGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res]),
+                               patches_per_image=args.patches_per_image)
     
     print("The length of train set is: {}".format(len(db_train)))
 
@@ -81,12 +82,12 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     
     if args.num_workers > 0:
         loader_kwargs['persistent_workers'] = True
-        loader_kwargs['prefetch_factor'] = 2
+        loader_kwargs['prefetch_factor'] = 32 # Aggressive prefetching for 64GB RAM
         
         # Adjust val accordingly
         if val_kwargs['num_workers'] > 0:
             val_kwargs['persistent_workers'] = True
-            val_kwargs['prefetch_factor'] = 2
+            val_kwargs['prefetch_factor'] = 16
 
     trainloader = DataLoader(db_train, **loader_kwargs)
     valloader = DataLoader(db_val, **val_kwargs)
