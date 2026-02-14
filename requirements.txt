@@ -75,6 +75,7 @@ requests
 safetensors
 scikit-learn
 scipy
+segmentation-models-pytorch
 segment_anything @ git+https://github.com/facebookresearch/segment-anything.git@dca509fe793f601edb92606367a655c15ac00fdf
 setuptools
 shiboken6
