@@ -414,10 +414,39 @@ def run_training(args):
     train_preprocess = getattr(args, "preprocess_train", None) or args.preprocess
     val_preprocess = getattr(args, "preprocess_val", None) or args.preprocess
 
-    # Multi-GPU support (DataParallel)
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel!")
-        model = nn.DataParallel(model)
+    # Multi-GPU support (DistributedDataParallel)
+    # Using DDP instead of DataParallel to avoid misaligned address errors with AMP/ConvNext
+    import torch.distributed as dist
+    
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if local_rank != -1:
+        # DDP mode
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+        if local_rank == 0:
+            print(f"[Rank {local_rank}] Using device: {device}")
+    else:
+        # Fallback to DataParallel if not launched with torch.distributed.launch
+        if torch.cuda.device_count() > 1:
+             print("WARNING: Running with DataParallel (DP) because not launched via torch.distributed.launch.")
+             print("To use DDP (Recommended), run: python -m torch.distributed.launch --nproc_per_node=2 unet/train.py ...")
+             # Force Single GPU to avoid crash with ConvNext+SCSE if not using DDP
+             print("Forcing Single GPU mode to avoid 'misaligned address' error with ConvNext/SCSE in DataParallel.")
+             print("Please use DDP launch command for Multi-GPU training.")
+             
+             # Use only device 0
+             device = torch.device("cuda:0")
+             model = model.to(device)
+
+    # Move model to device (if not already)
+    model = model.to(device)
+    
+    if local_rank != -1:
+        model = nn.parallel.DistributedDataParallel(
+            model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False
+        )
 
     # Loss + optimizer.
     pos_weight = torch.tensor([float(args.pos_weight)], device=device)
