@@ -549,7 +549,7 @@ def run_training(args):
         num_epochs=args.epochs,
         device=device,
         output_dir=output_dir,
-        use_amp=False, # Disable AMP to fix CUDA misaligned address error with ConvNext/SCSE
+        use_amp=True, # Re-enable AMP for speed
 
         csv_path=csv_path, # Pass CSV path
         grad_accum_steps=getattr(args, "grad_accum_steps", 1)
