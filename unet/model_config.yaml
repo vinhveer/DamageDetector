@@ -1,0 +1,59 @@
+# Cấu hình kiến trúc mô hình
+model:
+  encoder_name: "tu-convnext_tiny"
+  encoder_weights: "imagenet"
+  classes: 1
+  activation: null # None vì dùng BCEWithLogitsLoss
+  decoder_attention_type: "scse"
+
+# Cấu hình huấn luyện (Hyperparameters)
+training:
+  # Preprocessing & Data
+  mask_prefix: "auto"
+  preprocess: "letterbox"
+  preprocess_train: "random_crop"
+  preprocess_val: "patch"
+  max_patch_tries: 5
+  val_stride: 0
+  
+  # Augmentation
+  no_augment: false
+  aug_prob: 0.5
+  rotate_limit: 10
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+  
+  # Caching
+  cache_data: false
+  cache_rebuild: false
+  
+  # Optimization
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  grad_accum_steps: 4
+  early_stop_patience: 100
+  
+  # Scheduler (CosineAnnealingWarmRestarts)
+  scheduler_t0: 10
+  scheduler_tmult: 2
+  scheduler_metric: "loss"
+  
+  # Loss Function Weights
+  pos_weight: 2.0
+  pos_weight_min: 2.0
+  pos_weight_max: 20.0
+  pos_weight_sample: 200
+  bce_weight: 1.0
+  dice_weight: 0.5
+  focal_weight: 0.5
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  
+  # Metrics
+  metric_threshold: 0.5
+  metric_thresholds: "0.2,0.3,0.4,0.5,0.6"
+
+  # Visualization
+  no_visualize: true
+  no_loss_curve: true
+  visualize_every: 0
