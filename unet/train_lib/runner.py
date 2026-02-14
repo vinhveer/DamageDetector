@@ -354,8 +354,7 @@ def run_training(args):
         optimizer,
         T_0=T_0,
         T_mult=T_mult,
-        eta_min=float(args.learning_rate) * 0.01,
-        verbose=False
+        eta_min=float(args.learning_rate) * 0.01
     )
     
     # Allow fallback to ReduceLROnPlateau if explicitly requested (not implemented here to keep clean SOTA flow)
