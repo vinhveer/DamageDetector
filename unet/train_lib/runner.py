@@ -445,7 +445,7 @@ def run_training(args):
     
     if local_rank != -1:
         model = nn.parallel.DistributedDataParallel(
-            model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False
+            model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True
         )
 
     # Loss + optimizer.
