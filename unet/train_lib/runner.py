@@ -398,6 +398,17 @@ def run_training(args):
     classes = model_cfg.get("classes", 1)
     activation = model_cfg.get("activation", None)
     decoder_attention_type = model_cfg.get("decoder_attention_type", "scse")
+    
+    # Init Model
+    print(f"Model: Unet (smp) | Encoder: {encoder_name} | Weights: {encoder_weights} | Attention: {decoder_attention_type}")
+    model = smp.Unet(
+        encoder_name=encoder_name, 
+        encoder_weights=encoder_weights, 
+        in_channels=3, 
+        classes=classes, 
+        activation=activation,
+        decoder_attention_type=decoder_attention_type
+    ).to(device)
 
     # Resolve preprocess modes (train vs val) - Re-resolve after merge
     train_preprocess = getattr(args, "preprocess_train", None) or args.preprocess
