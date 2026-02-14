@@ -32,30 +32,79 @@ python -m pip install -r requirements.txt
 
 ## Training
 
-Edit `train_config.yaml` and run:
+Run `train.py` with command-line arguments:
 
 ```bash
-python train.py --config train_config.yaml
+python train.py --train-images path/to/images --train-masks path/to/masks --val-images path/to/val_images --val-masks path/to/val_masks
 ```
 
-Key config fields to edit:
+### Arguments
 
-- `preprocess`: `patch` (default), `letterbox`, or `stretch`
-- `input_size`, `patches_per_image`, `val_stride`
-- `no_augment` (true/false)
-- `pos_weight`, `bce_weight`, `dice_weight`
-- `metric_threshold`, `metric_thresholds`, `scheduler_metric`
+#### Dataset Paths (Required)
+- `--train-images`: Path to training images folder.
+- `--train-masks`: Path to training masks folder.
+- `--val-images`: Path to validation images folder.
+- `--val-masks`: Path to validation masks folder.
+- `--mask-prefix`: Prefix for mask files (default: `auto`).
 
-Loss tuning for class imbalance (thin cracks / few positives):
+#### Output & Logging
+- `--output-dir`: Directory to save results (default: `output_results`).
+- `--visualize`: Enable visualization (default: disabled).
+- `--loss-curve`: Enable loss curve plotting (default: disabled).
+- `--visualize-every`: Visualize every N epochs (0 to disable, default: 0).
 
-Set `pos_weight`, `bce_weight`, `dice_weight` in `train_config.yaml`.
+#### Preprocessing
+- `--preprocess`: Method: `patch`, `letterbox`, `stretch` (default: `patch`).
+- `--input-size`: Model input size (default: 256).
+- `--patches-per-image`: Number of patches per image (default: 1).
+- `--max-patch-tries`: Max tries to find a patch with crack (default: 5).
+- `--val-stride`: Stride for validation patching (default: 0 = input_size).
 
-Safe speed-ups (no data/gradient changes):
+#### Augmentation
+- `--no-augment`: Disable augmentation.
+- `--aug-prob`: Augmentation probability (default: 0.5).
+- `--rotate-limit`: Rotation limit in degrees (default: 10).
+- `--brightness-limit`: Brightness limit (default: 0.2).
+- `--contrast-limit`: Contrast limit (default: 0.2).
 
-- Cache preprocessing for letterbox/stretch (requires `no_augment: true`): set `cache_dir`
-- Disable extra plots: set `no_visualize: true` and/or `no_loss_curve: true`
+#### Caching
+- `--cache-data`: Cache data in memory (default: false).
+- `--cache-dir`: Directory to cache preprocessed images.
+- `--cache-rebuild`: Rebuild cache.
 
-Model checkpoints are saved under `output_results/<timestamp>/` (default: `output_results/YYYYMMDD_HHMMSS/best_model.pth`).
+#### Training Hyperparameters
+- `--batch-size`: Batch size (default: 16).
+- `--epochs`: Number of epochs (default: 80).
+- `--learning-rate`: Learning rate (default: 0.0005).
+- `--weight-decay`: Weight decay (default: 0.00001).
+- `--seed`: Random seed (default: 42).
+- `--early-stop-patience`: Early stopping patience (default: 15).
+- `--grad-accum-steps`: Gradient accumulation steps (default: 1).
+- `--num-workers`: Number of workers (default: 8).
+- `--prefetch-factor`: Prefetch factor (default: 2).
+- `--no-persistent-workers`: Disable persistent workers (default: enabled).
+- `--pin-memory`: Enable pin memory (default: disabled).
+
+#### Model
+- `--encoder-name`: Encoder name (default: `efficientnet-b4`).
+- `--encoder-weights`: Encoder weights (default: `imagenet`).
+
+#### Loss Weights
+- `--pos-weight`: Positive class weight (default: 5.0).
+- `--bce-weight`: BCE loss weight (default: 0.4).
+- `--dice-weight`: Dice loss weight (default: 0.6).
+- `--focal-weight`: Focal loss weight (default: 0.0).
+- `--focal-alpha`: Focal loss alpha (default: 0.25).
+- `--focal-gamma`: Focal loss gamma (default: 2.0).
+
+#### Metrics & Scheduler
+- `--metric-threshold`: Threshold for metrics (default: 0.5).
+- `--metric-thresholds`: Comma-separated thresholds (default: "").
+- `--scheduler-metric`: Metric for scheduler (default: `loss`).
+- `--scheduler-factor`: Scheduler factor (default: 0.5).
+- `--scheduler-patience`: Scheduler patience (default: 10).
+- `--scheduler-t0`: Scheduler T0 (default: 10).
+- `--scheduler-tmult`: Scheduler T_mult (default: 2).
 
 ## Prediction
 
