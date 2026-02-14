@@ -206,6 +206,8 @@ class RandomGenerator(object):
             
         final_label[pad_top:pad_top+new_h, pad_left:pad_left+new_w] = label
 
+        # FIX: Normalize to 0-1 before clipping
+        final_image = final_image / 255.0
         # Clip values to [0, 1] to avoid cubic interpolation overshoot
         final_image = np.clip(final_image, 0, 1)
 
@@ -302,6 +304,7 @@ class ValGenerator(object):
         label = label.astype(np.float32)
 
         # Clip just in case
+        image = image / 255.0
         image = np.clip(image, 0, 1)
 
         image = torch.from_numpy(image)
