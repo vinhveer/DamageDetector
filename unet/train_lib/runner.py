@@ -320,6 +320,9 @@ def run_training(args):
         activation=activation,
         decoder_attention_type="scse" # <--- SOTA Attention for Cracks
     ).to(device)
+    if device.type == "cuda" and torch.cuda.device_count() > 1:
+        print(f"Multi-GPU: DataParallel on {torch.cuda.device_count()} GPUs")
+        model = nn.DataParallel(model)
 
     # Loss + optimizer.
     pos_weight = torch.tensor([float(args.pos_weight)], device=device)

@@ -41,6 +41,11 @@ def _iter_prefetch(loader, device):
 import csv
 import logging
 
+def _state_dict_for_saving(model):
+    if hasattr(model, "module"):
+        return model.module.state_dict()
+    return model.state_dict()
+
 def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, csv_path=None, grad_accum_steps=1, use_amp=False):
     # Ensure the output directory exists.
     os.makedirs(output_dir, exist_ok=True)
@@ -186,13 +191,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 
         # Save last model
         last_model_path = os.path.join(output_dir, 'last_model.pth')
-        torch.save(model.state_dict(), last_model_path)
+        torch.save(_state_dict_for_saving(model), last_model_path)
         
         # Save epoch model (if configured)
         save_all = getattr(train_model, "_save_all_epochs", True) 
         if save_all:
              epoch_model_path = os.path.join(output_dir, f'epoch_{epoch+1}.pth')
-             torch.save(model.state_dict(), epoch_model_path)
+             torch.save(_state_dict_for_saving(model), epoch_model_path)
 
         # Save the best model (using IoU as primary)
         current_perf = avg_val_iou 
@@ -201,7 +206,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             best_val_loss = avg_val_loss  
             counter = 0 
             model_path = os.path.join(output_dir, 'best_model.pth')
-            torch.save(model.state_dict(), model_path)
+            torch.save(_state_dict_for_saving(model), model_path)
             logging.info(f'New best IoU: {current_perf:.4f}. Saved best model to {model_path}!')
         else:
             counter += 1
