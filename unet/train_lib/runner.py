@@ -326,6 +326,10 @@ def run_training(args):
     dataloader_cfg = model_config.get("dataloader", {})
     model_cfg = model_config.get("model", model_config) # fallback if flat
 
+    # 1. Print current args and YAML config to debug
+    print(f"[DEBUG] CLI Args: {vars(args)}")
+    print(f"[DEBUG] YAML Config: {model_config}")
+
     # Helper to prioritize YAML if default, otherwise keep CLI arg
     # Better logic: Check if arg was explicitly passed in sys.argv
     def override_if_default(arg_val, arg_name, yaml_key, default_val, section=training_cfg):
@@ -333,6 +337,10 @@ def run_training(args):
         cli_flag = "--" + arg_name.replace("_", "-")
         is_passed = any(cli_flag in s for s in sys.argv)
         
+        # DEBUG LOG
+        # if arg_name == "pos_weight":
+        #     print(f"[DEBUG] {arg_name}: CLI passed? {is_passed} | CLI Val: {arg_val} | YAML Val: {section.get(yaml_key)}")
+
         if not is_passed and yaml_key in section:
              return section[yaml_key]
         return arg_val

@@ -100,7 +100,6 @@ class RandomPatchDataset(Dataset):
         ])
 
         # 2. Augmentations (Only if augment=True)
-        # 2. Augmentations (Only if augment=True)
         if self.augment:
             # Matches SAM GenericDataset
             self.aug_transform = A.Compose([
@@ -110,7 +109,7 @@ class RandomPatchDataset(Dataset):
                 
                 A.Affine(scale=(0.9, 1.1), translate_percent=0.0625, rotate=30, p=0.5),
                 A.OneOf([
-                    A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05), # Removed alpha_affine
+                    A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05),
                     A.GridDistortion(p=0.5),
                     A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
                 ], p=0.3),
@@ -131,7 +130,7 @@ class RandomPatchDataset(Dataset):
                 
                 # Environmental / Occlusion
                 A.RandomShadow(num_shadows_limit=(1, 3), shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.3),
-                A.CoarseDropout(num_holes_limit=(1, 8), hole_height_range=(8, 32), hole_width_range=(8, 32), min_holes=None, min_height=None, min_width=None, fill_value=0, mask_fill_value=0, p=0.3),
+                A.CoarseDropout(num_holes_limit=8, max_height=32, max_width=32, min_holes=1, min_height=8, min_width=8, fill_value=0, mask_fill_value=0, p=0.3),
             ], is_check_shapes=False)
         else:
             self.aug_transform = None

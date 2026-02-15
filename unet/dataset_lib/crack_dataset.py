@@ -404,8 +404,12 @@ class CrackDataset(Dataset):
              
         # Mask Binarization
         final_mask = np.zeros((target_h, target_w), dtype=np.float32)
+        # Handle mask resize/pad
         final_mask[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug] = mask_aug
-        final_mask = (final_mask > 0).astype(np.float32) # Strict 0/1
+        
+        # Thresholding: 0-255 -> 0.0/1.0
+        # Use 127 as safe threshold for JPEG artifacts or soft edges
+        final_mask = (final_mask > 127).astype(np.float32)
 
         image = torch.from_numpy(final_image).permute(2, 0, 1).float() 
         mask = torch.from_numpy(final_mask).float().unsqueeze(0)       
