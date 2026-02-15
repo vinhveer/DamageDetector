@@ -195,7 +195,7 @@ def run_training(args):
                 augment=not args.no_augment,
                 image_transform=image_transform,
                 mask_transform=mask_transform,
-                verbose=True,
+                verbose=(rank == 0),
             )
 
         if mode in ["letterbox", "resize", "random_crop"]:
@@ -208,7 +208,7 @@ def run_training(args):
                 augment=not args.no_augment,
                 patch_size=None,
                 output_size=args.input_size,
-                verbose=True,
+                verbose=(rank == 0),
                 cache_data=False,
                 preprocess_mode=mode,
                 patches_per_image=getattr(args, "patches_per_image", 1),
@@ -224,7 +224,7 @@ def run_training(args):
             augment=not args.no_augment,
             patch_size=None,
             output_size=args.input_size,
-            verbose=True,
+            verbose=(rank == 0),
             cache_data=False,
             preprocess_mode="resize",
             patches_per_image=getattr(args, "patches_per_image", 1),
@@ -248,7 +248,7 @@ def run_training(args):
                 stride=stride,
                 image_transform=image_transform,
                 mask_transform=mask_transform,
-                verbose=True,
+                verbose=(rank == 0),
             )
 
         if mode in ["letterbox", "resize", "random_crop"]:
@@ -261,7 +261,7 @@ def run_training(args):
                 augment=False,
                 patch_size=None,
                 output_size=args.input_size,
-                verbose=True,
+                verbose=(rank == 0),
                 cache_data=False,
                 preprocess_mode=mode,
                 patches_per_image=1,
@@ -277,7 +277,7 @@ def run_training(args):
             augment=False,
             patch_size=None,
             output_size=args.input_size,
-            verbose=True,
+            verbose=(rank == 0),
             cache_data=False,
             preprocess_mode="resize",
             patches_per_image=1,
@@ -351,7 +351,8 @@ def run_training(args):
     classes = 1
     activation = None # We use BCEWithLogitsLoss, so no activation at output
 
-    print(f"Model: Unet (smp) | Encoder: {encoder_name} | Weights: {encoder_weights} | Attention: SCSE")
+    if rank == 0:
+        print(f"Model: Unet (smp) | Encoder: {encoder_name} | Weights: {encoder_weights} | Attention: SCSE")
     model = smp.Unet(
         encoder_name=encoder_name, 
         encoder_weights=encoder_weights, 
@@ -366,6 +367,7 @@ def run_training(args):
             device_ids=[local_rank],
             output_device=local_rank,
             broadcast_buffers=False,
+            find_unused_parameters=True,
         )
 
     # Loss + optimizer.
@@ -400,7 +402,8 @@ def run_training(args):
     T_0 = int(getattr(args, "scheduler_t0", 10))
     T_mult = int(getattr(args, "scheduler_tmult", 2))
     
-    print(f"Scheduler: CosineAnnealingWarmRestarts (T_0={T_0}, T_mult={T_mult})")
+    if rank == 0:
+        print(f"Scheduler: CosineAnnealingWarmRestarts (T_0={T_0}, T_mult={T_mult})")
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
         T_0=T_0,
@@ -415,14 +418,15 @@ def run_training(args):
             f"Patch training: patch_size={args.input_size}, train_patches_per_image={args.patches_per_image}, "
             f"val_stride={args.val_stride if args.val_stride > 0 else (args.input_size // 2)}"
         )
-    print(
-        "Loss: "
-        f"bce_weight={args.bce_weight}, dice_weight={args.dice_weight}, "
-        f"focal_weight={getattr(args, 'focal_weight', 0.0)}, "
-        f"focal_alpha={getattr(args, 'focal_alpha', 0.25)}, "
-        f"focal_gamma={getattr(args, 'focal_gamma', 2.0)}, "
-        f"pos_weight={args.pos_weight}"
-    )
+    if rank == 0:
+        print(
+            "Loss: "
+            f"bce_weight={args.bce_weight}, dice_weight={args.dice_weight}, "
+            f"focal_weight={getattr(args, 'focal_weight', 0.0)}, "
+            f"focal_alpha={getattr(args, 'focal_alpha', 0.25)}, "
+            f"focal_gamma={getattr(args, 'focal_gamma', 2.0)}, "
+            f"pos_weight={args.pos_weight}"
+        )
     if rank == 0:
         print(f"Val metric threshold: {args.metric_threshold} | Scheduler metric: {args.scheduler_metric}")
 
@@ -463,21 +467,21 @@ def run_training(args):
             writer = csv.writer(f)
             writer.writerow(["epoch", "train_loss", "val_loss", "val_dice", "val_iou", "lr"])
 
-    train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        criterion=criterion,
-        optimizer=optimizer,
-        scheduler=scheduler,  # Pass the scheduler
-        num_epochs=args.epochs,
-        device=device,
-        output_dir=output_dir,
-        use_amp=(device.type == "cuda" and not bool(getattr(args, "no_amp", False))),
-
-        csv_path=csv_path, # Pass CSV path
-        grad_accum_steps=getattr(args, "grad_accum_steps", 1)
-    )
-
-    if is_distributed:
-        dist.destroy_process_group()
+    try:
+        train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            scheduler=scheduler,  # Pass the scheduler
+            num_epochs=args.epochs,
+            device=device,
+            output_dir=output_dir,
+            use_amp=(device.type == "cuda" and not bool(getattr(args, "no_amp", False))),
+            csv_path=csv_path,  # Pass CSV path
+            grad_accum_steps=getattr(args, "grad_accum_steps", 1),
+        )
+    finally:
+        if is_distributed and dist.is_initialized():
+            dist.destroy_process_group()
