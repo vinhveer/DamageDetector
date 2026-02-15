@@ -49,7 +49,8 @@ def build_arg_parser():
     parser.add_argument("--grad-accum-steps", type=int, default=1, help="Gradient accumulation steps")
     
     # Model
-    parser.add_argument("--model-config", type=str, default="unet/model_config.yaml", help="Path to model config YAML")
+    parser.add_argument("--encoder-name", type=str, default="efficientnet-b4", help="Encoder name")
+    parser.add_argument("--encoder-weights", type=str, default="imagenet", help="Encoder weights")
     
     # Loss weights
     parser.add_argument("--pos-weight", type=str, default="5.0", help="Positive class weight (or 'auto')")

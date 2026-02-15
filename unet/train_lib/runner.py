@@ -76,7 +76,11 @@ def _estimate_pos_weight(
 def run_training(args):
     # Select device.
     if torch.cuda.is_available():
-        device = torch.device("cuda")
+        if torch.cuda.device_count() > 1:
+            print(f"Using {torch.cuda.device_count()} GPUs!")
+            device = torch.device("cuda")
+        else:
+            device = torch.device("cuda")
         torch.backends.cudnn.benchmark = True
     else:
         device = torch.device("cpu")
@@ -300,174 +304,22 @@ def run_training(args):
 
     # Model: Using Segmentation Models Pytorch (SMP) for SOTA backbones
     import segmentation_models_pytorch as smp
-    try:
-        import yaml
-    except ImportError:
-        raise ImportError("PyYAML is required. Install with: pip install PyYAML")
 
-    # Load model config from YAML
-    model_config_path = getattr(args, "model_config", "unet/model_config.yaml")
-    if not os.path.exists(model_config_path):
-        # Fallback to current dir
-        if os.path.exists("model_config.yaml"):
-            model_config_path = "model_config.yaml"
-        else:
-             print(f"Warning: Model config not found at {model_config_path}. Using defaults.")
-             model_config = {}
+    # Default to a strong backbone if not specified
+    encoder_name = getattr(args, "encoder_name", "efficientnet-b4")
+    encoder_weights = getattr(args, "encoder_weights", "imagenet")
+    classes = 1
+    activation = None # We use BCEWithLogitsLoss, so no activation at output
 
-    if os.path.exists(model_config_path):
-        with open(model_config_path, "r") as f:
-            full_config = yaml.safe_load(f) or {}
-            model_config = full_config.get("model", full_config) # Handle nested or flat structure
-            print(f"Loaded model config from {model_config_path}: {model_config}")
-    
-    # Merge defaults from model_config into args
-    training_cfg = model_config.get("training", {})
-    dataloader_cfg = model_config.get("dataloader", {})
-    model_cfg = model_config.get("model", model_config) # fallback if flat
-
-    # 1. Print current args and YAML config to debug
-    print(f"[DEBUG] CLI Args: {vars(args)}")
-    print(f"[DEBUG] YAML Config: {model_config}")
-
-    # Helper to prioritize YAML if default, otherwise keep CLI arg
-    # Better logic: Check if arg was explicitly passed in sys.argv
-    def override_if_default(arg_val, arg_name, yaml_key, default_val, section=training_cfg):
-        # Convert arg_name (e.g. "input_size") to CLI flag (e.g. "--input-size")
-        cli_flag = "--" + arg_name.replace("_", "-")
-        is_passed = any(cli_flag in s for s in sys.argv)
-        
-        # DEBUG LOG
-        # if arg_name == "pos_weight":
-        #     print(f"[DEBUG] {arg_name}: CLI passed? {is_passed} | CLI Val: {arg_val} | YAML Val: {section.get(yaml_key)}")
-
-        if not is_passed and yaml_key in section:
-             return section[yaml_key]
-        return arg_val
-
-    # Preprocessing
-    args.preprocess = override_if_default(args.preprocess, "preprocess", "preprocess", "patch")
-    args.preprocess_train = override_if_default(args.preprocess_train, "preprocess_train", "preprocess_train", None)
-    args.preprocess_val = override_if_default(args.preprocess_val, "preprocess_val", "preprocess_val", None)
-    args.input_size = override_if_default(args.input_size, "input_size", "input_size", 256)
-    args.patches_per_image = override_if_default(args.patches_per_image, "patches_per_image", "patches_per_image", 1)
-    args.max_patch_tries = override_if_default(args.max_patch_tries, "max_patch_tries", "max_patch_tries", 5)
-    args.val_stride = override_if_default(args.val_stride, "val_stride", "val_stride", 0)
-    args.mask_prefix = override_if_default(args.mask_prefix, "mask_prefix", "mask_prefix", "auto")
-
-    # Augmentation
-    if "no_augment" in training_cfg and training_cfg["no_augment"] and "--no-augment" not in sys.argv:
-         args.no_augment = True
-         
-    args.aug_prob = override_if_default(args.aug_prob, "aug_prob", "aug_prob", 0.5)
-    args.rotate_limit = override_if_default(args.rotate_limit, "rotate_limit", "rotate_limit", 10)
-    args.brightness_limit = override_if_default(args.brightness_limit, "brightness_limit", "brightness_limit", 0.2)
-    args.contrast_limit = override_if_default(args.contrast_limit, "contrast_limit", "contrast_limit", 0.2)
-    
-    # Caching
-    if "cache_data" in training_cfg and training_cfg["cache_data"] and "--cache-data" not in sys.argv:
-         args.cache_data = True
-
-    # Optimization
-    args.learning_rate = override_if_default(args.learning_rate, "learning_rate", "learning_rate", 0.0005)
-    args.weight_decay = override_if_default(args.weight_decay, "weight_decay", "weight_decay", 1e-5)
-    args.grad_accum_steps = override_if_default(getattr(args, "grad_accum_steps", 1), "grad_accum_steps", "grad_accum_steps", 1)
-    args.early_stop_patience = override_if_default(getattr(args, "early_stop_patience", 15), "early_stop_patience", "early_stop_patience", 15)
-
-    # Scheduler
-    args.scheduler_t0 = override_if_default(getattr(args, "scheduler_t0", 10), "scheduler_t0", "scheduler_t0", 10)
-    args.scheduler_tmult = override_if_default(getattr(args, "scheduler_tmult", 2), "scheduler_tmult", "scheduler_tmult", 2)
-    args.scheduler_metric = override_if_default(getattr(args, "scheduler_metric", "loss"), "scheduler_metric", "scheduler_metric", "loss")
-
-    # Loss Weights
-    # Special handling for pos_weight which defaults to string "5.0"
-    if "--pos-weight" not in sys.argv and "pos_weight" in training_cfg:
-         args.pos_weight = training_cfg["pos_weight"]
-
-    args.bce_weight = override_if_default(args.bce_weight, "bce_weight", "bce_weight", 0.4)
-    args.dice_weight = override_if_default(args.dice_weight, "dice_weight", "dice_weight", 0.6)
-    args.focal_weight = override_if_default(getattr(args, "focal_weight", 0.0), "focal_weight", "focal_weight", 0.0)
-    args.focal_alpha = override_if_default(getattr(args, "focal_alpha", 0.25), "focal_alpha", "focal_alpha", 0.25)
-    args.focal_gamma = override_if_default(getattr(args, "focal_gamma", 2.0), "focal_gamma", "focal_gamma", 2.0)
-    
-    # Metrics
-    args.metric_threshold = override_if_default(args.metric_threshold, "metric_threshold", "metric_threshold", 0.5)
-    
-    # Metric thresholds string handling
-    if "metric_thresholds" in training_cfg and "--metric-thresholds" not in sys.argv:
-         val = training_cfg["metric_thresholds"]
-         if isinstance(val, list):
-             val = ",".join(str(v) for v in val)
-         args.metric_thresholds = val
-
-    # Dataloader
-    args.num_workers = override_if_default(args.num_workers, "num_workers", "num_workers", 8, dataloader_cfg)
-    args.prefetch_factor = override_if_default(getattr(args, "prefetch_factor", 2), "prefetch_factor", "prefetch_factor", 2, dataloader_cfg)
-    
-    if "pin_memory" in dataloader_cfg and "--pin-memory" not in sys.argv:
-         args.pin_memory = dataloader_cfg["pin_memory"]
-    
-    if "persistent_workers" in dataloader_cfg:
-         # persistent_workers is tricky because argparse default is True (via set_defaults) but flag is --no-persistent-workers
-         # Check if --no-persistent-workers is NOT in args
-         if "--no-persistent-workers" not in sys.argv:
-             args.persistent_workers = dataloader_cfg["persistent_workers"]
-
-    # Model Params
-    encoder_name = model_cfg.get("encoder_name", "efficientnet-b4")
-    encoder_weights = model_cfg.get("encoder_weights", "imagenet")
-    classes = model_cfg.get("classes", 1)
-    activation = model_cfg.get("activation", None)
-    decoder_attention_type = model_cfg.get("decoder_attention_type", "scse")
-    
-    # Init Model
-    print(f"Model: Unet (smp) | Encoder: {encoder_name} | Weights: {encoder_weights} | Attention: {decoder_attention_type}")
+    print(f"Model: Unet (smp) | Encoder: {encoder_name} | Weights: {encoder_weights} | Attention: SCSE")
     model = smp.Unet(
         encoder_name=encoder_name, 
         encoder_weights=encoder_weights, 
         in_channels=3, 
         classes=classes, 
         activation=activation,
-        decoder_attention_type=decoder_attention_type
+        decoder_attention_type="scse" # <--- SOTA Attention for Cracks
     ).to(device)
-
-    # Resolve preprocess modes (train vs val) - Re-resolve after merge
-    train_preprocess = getattr(args, "preprocess_train", None) or args.preprocess
-    val_preprocess = getattr(args, "preprocess_val", None) or args.preprocess
-
-    # Multi-GPU support (DistributedDataParallel)
-    # Using DDP instead of DataParallel to avoid misaligned address errors with AMP/ConvNext
-    import torch.distributed as dist
-    
-    local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if local_rank != -1:
-        # DDP mode
-        if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
-        torch.cuda.set_device(local_rank)
-        device = torch.device("cuda", local_rank)
-        if local_rank == 0:
-            print(f"[Rank {local_rank}] Using device: {device}")
-    else:
-        # Fallback to DataParallel if not launched with torch.distributed.launch
-        if torch.cuda.device_count() > 1:
-             print("WARNING: Running with DataParallel (DP) because not launched via torch.distributed.launch.")
-             print("To use DDP (Recommended), run: python -m torch.distributed.launch --nproc_per_node=2 unet/train.py ...")
-             # Force Single GPU to avoid crash with ConvNext+SCSE if not using DDP
-             print("Forcing Single GPU mode to avoid 'misaligned address' error with ConvNext/SCSE in DataParallel.")
-             print("Please use DDP launch command for Multi-GPU training.")
-             
-             # Use only device 0
-             device = torch.device("cuda:0")
-             model = model.to(device)
-
-    # Move model to device (if not already)
-    model = model.to(device)
-    
-    if local_rank != -1:
-        model = nn.parallel.DistributedDataParallel(
-            model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True
-        )
 
     # Loss + optimizer.
     pos_weight = torch.tensor([float(args.pos_weight)], device=device)
@@ -570,11 +422,8 @@ def run_training(args):
         num_epochs=args.epochs,
         device=device,
         output_dir=output_dir,
-        use_amp=True, # Re-enable AMP for speed
+        use_amp=True, # Enable FP16 Mixed Precision for speed & memory savings
 
         csv_path=csv_path, # Pass CSV path
         grad_accum_steps=getattr(args, "grad_accum_steps", 1)
     )
-
-    if local_rank != -1:
-        dist.destroy_process_group()
