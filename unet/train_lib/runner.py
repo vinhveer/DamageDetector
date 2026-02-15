@@ -327,70 +327,83 @@ def run_training(args):
     model_cfg = model_config.get("model", model_config) # fallback if flat
 
     # Helper to prioritize YAML if default, otherwise keep CLI arg
-    def override_if_default(arg_val, yaml_key, default_val, section=training_cfg):
-        if arg_val == default_val and yaml_key in section:
+    # Better logic: Check if arg was explicitly passed in sys.argv
+    def override_if_default(arg_val, arg_name, yaml_key, default_val, section=training_cfg):
+        # Convert arg_name (e.g. "input_size") to CLI flag (e.g. "--input-size")
+        cli_flag = "--" + arg_name.replace("_", "-")
+        is_passed = any(cli_flag in s for s in sys.argv)
+        
+        if not is_passed and yaml_key in section:
              return section[yaml_key]
         return arg_val
 
     # Preprocessing
-    args.preprocess = override_if_default(args.preprocess, "preprocess", "patch")
-    args.preprocess_train = override_if_default(args.preprocess_train, "preprocess_train", None)
-    args.preprocess_val = override_if_default(args.preprocess_val, "preprocess_val", None)
-    args.input_size = override_if_default(args.input_size, "input_size", 256)
-    args.patches_per_image = override_if_default(args.patches_per_image, "patches_per_image", 1)
-    args.max_patch_tries = override_if_default(args.max_patch_tries, "max_patch_tries", 5)
-    args.val_stride = override_if_default(args.val_stride, "val_stride", 0)
-    args.mask_prefix = override_if_default(args.mask_prefix, "mask_prefix", "auto")
+    args.preprocess = override_if_default(args.preprocess, "preprocess", "preprocess", "patch")
+    args.preprocess_train = override_if_default(args.preprocess_train, "preprocess_train", "preprocess_train", None)
+    args.preprocess_val = override_if_default(args.preprocess_val, "preprocess_val", "preprocess_val", None)
+    args.input_size = override_if_default(args.input_size, "input_size", "input_size", 256)
+    args.patches_per_image = override_if_default(args.patches_per_image, "patches_per_image", "patches_per_image", 1)
+    args.max_patch_tries = override_if_default(args.max_patch_tries, "max_patch_tries", "max_patch_tries", 5)
+    args.val_stride = override_if_default(args.val_stride, "val_stride", "val_stride", 0)
+    args.mask_prefix = override_if_default(args.mask_prefix, "mask_prefix", "mask_prefix", "auto")
 
     # Augmentation
-    if "no_augment" in training_cfg and training_cfg["no_augment"]:
+    if "no_augment" in training_cfg and training_cfg["no_augment"] and "--no-augment" not in sys.argv:
          args.no_augment = True
-    args.aug_prob = override_if_default(args.aug_prob, "aug_prob", 0.5)
-    args.rotate_limit = override_if_default(args.rotate_limit, "rotate_limit", 10)
-    args.brightness_limit = override_if_default(args.brightness_limit, "brightness_limit", 0.2)
-    args.contrast_limit = override_if_default(args.contrast_limit, "contrast_limit", 0.2)
+         
+    args.aug_prob = override_if_default(args.aug_prob, "aug_prob", "aug_prob", 0.5)
+    args.rotate_limit = override_if_default(args.rotate_limit, "rotate_limit", "rotate_limit", 10)
+    args.brightness_limit = override_if_default(args.brightness_limit, "brightness_limit", "brightness_limit", 0.2)
+    args.contrast_limit = override_if_default(args.contrast_limit, "contrast_limit", "contrast_limit", 0.2)
     
     # Caching
-    if "cache_data" in training_cfg and training_cfg["cache_data"]:
+    if "cache_data" in training_cfg and training_cfg["cache_data"] and "--cache-data" not in sys.argv:
          args.cache_data = True
 
     # Optimization
-    args.learning_rate = override_if_default(args.learning_rate, "learning_rate", 0.0005)
-    args.weight_decay = override_if_default(args.weight_decay, "weight_decay", 1e-5)
-    args.grad_accum_steps = override_if_default(getattr(args, "grad_accum_steps", 1), "grad_accum_steps", 1)
-    args.early_stop_patience = override_if_default(getattr(args, "early_stop_patience", 15), "early_stop_patience", 15)
+    args.learning_rate = override_if_default(args.learning_rate, "learning_rate", "learning_rate", 0.0005)
+    args.weight_decay = override_if_default(args.weight_decay, "weight_decay", "weight_decay", 1e-5)
+    args.grad_accum_steps = override_if_default(getattr(args, "grad_accum_steps", 1), "grad_accum_steps", "grad_accum_steps", 1)
+    args.early_stop_patience = override_if_default(getattr(args, "early_stop_patience", 15), "early_stop_patience", "early_stop_patience", 15)
 
     # Scheduler
-    args.scheduler_t0 = override_if_default(getattr(args, "scheduler_t0", 10), "scheduler_t0", 10)
-    args.scheduler_tmult = override_if_default(getattr(args, "scheduler_tmult", 2), "scheduler_tmult", 2)
-    args.scheduler_metric = override_if_default(getattr(args, "scheduler_metric", "loss"), "scheduler_metric", "loss")
+    args.scheduler_t0 = override_if_default(getattr(args, "scheduler_t0", 10), "scheduler_t0", "scheduler_t0", 10)
+    args.scheduler_tmult = override_if_default(getattr(args, "scheduler_tmult", 2), "scheduler_tmult", "scheduler_tmult", 2)
+    args.scheduler_metric = override_if_default(getattr(args, "scheduler_metric", "loss"), "scheduler_metric", "scheduler_metric", "loss")
 
     # Loss Weights
-    if args.pos_weight == "5.0" and "pos_weight" in training_cfg:
+    # Special handling for pos_weight which defaults to string "5.0"
+    if "--pos-weight" not in sys.argv and "pos_weight" in training_cfg:
          args.pos_weight = training_cfg["pos_weight"]
 
-    args.bce_weight = override_if_default(args.bce_weight, "bce_weight", 0.4)
-    args.dice_weight = override_if_default(args.dice_weight, "dice_weight", 0.6)
-    args.focal_weight = override_if_default(getattr(args, "focal_weight", 0.0), "focal_weight", 0.0)
-    args.focal_alpha = override_if_default(getattr(args, "focal_alpha", 0.25), "focal_alpha", 0.25)
-    args.focal_gamma = override_if_default(getattr(args, "focal_gamma", 2.0), "focal_gamma", 2.0)
+    args.bce_weight = override_if_default(args.bce_weight, "bce_weight", "bce_weight", 0.4)
+    args.dice_weight = override_if_default(args.dice_weight, "dice_weight", "dice_weight", 0.6)
+    args.focal_weight = override_if_default(getattr(args, "focal_weight", 0.0), "focal_weight", "focal_weight", 0.0)
+    args.focal_alpha = override_if_default(getattr(args, "focal_alpha", 0.25), "focal_alpha", "focal_alpha", 0.25)
+    args.focal_gamma = override_if_default(getattr(args, "focal_gamma", 2.0), "focal_gamma", "focal_gamma", 2.0)
     
     # Metrics
-    args.metric_threshold = override_if_default(args.metric_threshold, "metric_threshold", 0.5)
-    if "metric_thresholds" in training_cfg:
+    args.metric_threshold = override_if_default(args.metric_threshold, "metric_threshold", "metric_threshold", 0.5)
+    
+    # Metric thresholds string handling
+    if "metric_thresholds" in training_cfg and "--metric-thresholds" not in sys.argv:
          val = training_cfg["metric_thresholds"]
          if isinstance(val, list):
              val = ",".join(str(v) for v in val)
-         if not args.metric_thresholds:
-             args.metric_thresholds = val
+         args.metric_thresholds = val
 
     # Dataloader
-    args.num_workers = override_if_default(args.num_workers, "num_workers", 8, dataloader_cfg)
-    args.prefetch_factor = override_if_default(getattr(args, "prefetch_factor", 2), "prefetch_factor", 2, dataloader_cfg)
-    if "pin_memory" in dataloader_cfg and not args.pin_memory:
+    args.num_workers = override_if_default(args.num_workers, "num_workers", "num_workers", 8, dataloader_cfg)
+    args.prefetch_factor = override_if_default(getattr(args, "prefetch_factor", 2), "prefetch_factor", "prefetch_factor", 2, dataloader_cfg)
+    
+    if "pin_memory" in dataloader_cfg and "--pin-memory" not in sys.argv:
          args.pin_memory = dataloader_cfg["pin_memory"]
+    
     if "persistent_workers" in dataloader_cfg:
-         args.persistent_workers = dataloader_cfg["persistent_workers"]
+         # persistent_workers is tricky because argparse default is True (via set_defaults) but flag is --no-persistent-workers
+         # Check if --no-persistent-workers is NOT in args
+         if "--no-persistent-workers" not in sys.argv:
+             args.persistent_workers = dataloader_cfg["persistent_workers"]
 
     # Model Params
     encoder_name = model_cfg.get("encoder_name", "efficientnet-b4")
@@ -554,3 +567,6 @@ def run_training(args):
         csv_path=csv_path, # Pass CSV path
         grad_accum_steps=getattr(args, "grad_accum_steps", 1)
     )
+
+    if local_rank != -1:
+        dist.destroy_process_group()
