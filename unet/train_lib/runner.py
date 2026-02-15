@@ -8,6 +8,8 @@ from datetime import datetime
 import cv2
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
@@ -74,18 +76,29 @@ def _estimate_pos_weight(
 
 
 def run_training(args):
-    # Select device.
-    if torch.cuda.is_available():
-        if torch.cuda.device_count() > 1:
-            print(f"Using {torch.cuda.device_count()} GPUs!")
-            device = torch.device("cuda")
-        else:
-            device = torch.device("cuda")
+    is_distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+
+    if is_distributed:
+        if not torch.cuda.is_available():
+            raise RuntimeError("DDP requires CUDA. CUDA is not available.")
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        dist.init_process_group(backend="nccl", init_method="env://")
         torch.backends.cudnn.benchmark = True
+        if rank == 0:
+            print(f"DDP: world_size={world_size} | local_rank={local_rank}")
     else:
-        device = torch.device("cpu")
-    
-    print(f'Using device: {device}')
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+            torch.backends.cudnn.benchmark = True
+        else:
+            device = torch.device("cpu")
+
+    if rank == 0:
+        print(f"Using device: {device}")
 
     # Output directory.
     output_dir = args.output_dir
@@ -96,7 +109,8 @@ def run_training(args):
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             output_dir = os.path.join(output_dir, stamp)
     os.makedirs(output_dir, exist_ok=True)
-    print(f'Output directory: {output_dir}')
+    if rank == 0:
+        print(f"Output directory: {output_dir}")
 
     # Dataset paths.
     train_images_path = args.train_images
@@ -130,7 +144,8 @@ def run_training(args):
     # Resolve preprocess modes (train vs val)
     train_preprocess = getattr(args, "preprocess_train", None) or args.preprocess
     val_preprocess = getattr(args, "preprocess_val", None) or args.preprocess
-    print(f"Preprocess: train={train_preprocess} | val={val_preprocess}")
+    if rank == 0:
+        print(f"Preprocess: train={train_preprocess} | val={val_preprocess}")
 
     # Auto pos_weight (optional)
     pos_weight_value = args.pos_weight
@@ -271,8 +286,9 @@ def run_training(args):
     train_dataset = _build_train_dataset(train_preprocess)
     val_dataset = _build_val_dataset(val_preprocess)
 
-    print(f'Train set size: {len(train_dataset)}')
-    print(f'Val set size: {len(val_dataset)}')
+    if rank == 0:
+        print(f"Train set size: {len(train_dataset)}")
+        print(f"Val set size: {len(val_dataset)}")
 
     # Data loaders.
     pin_memory = args.pin_memory
@@ -293,14 +309,38 @@ def run_training(args):
         if prefetch_factor and prefetch_factor > 0:
             loader_kwargs["prefetch_factor"] = prefetch_factor
     try:
-        train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
-        val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+        train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
+        val_sampler = DistributedSampler(val_dataset, shuffle=False) if is_distributed else None
+        train_loader = DataLoader(
+            train_dataset,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
+            **loader_kwargs,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            shuffle=False,
+            sampler=val_sampler,
+            **loader_kwargs,
+        )
     except TypeError:
         loader_kwargs.pop("pin_memory_device", None)
         loader_kwargs.pop("persistent_workers", None)
         loader_kwargs.pop("prefetch_factor", None)
-        train_loader = DataLoader(train_dataset, shuffle=True, **loader_kwargs)
-        val_loader = DataLoader(val_dataset, shuffle=False, **loader_kwargs)
+        train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
+        val_sampler = DistributedSampler(val_dataset, shuffle=False) if is_distributed else None
+        train_loader = DataLoader(
+            train_dataset,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
+            **loader_kwargs,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            shuffle=False,
+            sampler=val_sampler,
+            **loader_kwargs,
+        )
 
     # Model: Using Segmentation Models Pytorch (SMP) for SOTA backbones
     import segmentation_models_pytorch as smp
@@ -320,9 +360,13 @@ def run_training(args):
         activation=activation,
         decoder_attention_type="scse" # <--- SOTA Attention for Cracks
     ).to(device)
-    if device.type == "cuda" and torch.cuda.device_count() > 1:
-        print(f"Multi-GPU: DataParallel on {torch.cuda.device_count()} GPUs")
-        model = nn.DataParallel(model)
+    if is_distributed:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
+        )
 
     # Loss + optimizer.
     pos_weight = torch.tensor([float(args.pos_weight)], device=device)
@@ -379,7 +423,8 @@ def run_training(args):
         f"focal_gamma={getattr(args, 'focal_gamma', 2.0)}, "
         f"pos_weight={args.pos_weight}"
     )
-    print(f"Val metric threshold: {args.metric_threshold} | Scheduler metric: {args.scheduler_metric}")
+    if rank == 0:
+        print(f"Val metric threshold: {args.metric_threshold} | Scheduler metric: {args.scheduler_metric}")
 
     train_model._metric_threshold = float(args.metric_threshold)
     train_model._scheduler_metric = args.scheduler_metric
@@ -395,25 +440,28 @@ def run_training(args):
         train_model._metric_thresholds = []
 
     # Logging Setup
-    logging.basicConfig(
-        filename=os.path.join(output_dir, "log.txt"),
-        level=logging.INFO,
-        format='[%(asctime)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        force=True
-    )
-    # Add console handler if not present (to avoid double log)
-    if not any(isinstance(h, logging.StreamHandler) for h in logging.getLogger().handlers):
-        logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    if rank == 0:
+        logging.basicConfig(
+            filename=os.path.join(output_dir, "log.txt"),
+            level=logging.INFO,
+            format="[%(asctime)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            force=True,
+        )
+        if not any(isinstance(h, logging.StreamHandler) for h in logging.getLogger().handlers):
+            logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    else:
+        logging.disable(logging.CRITICAL)
     
     logging.info(f"Training started. Output dir: {output_dir}")
     logging.info(f"Config: {vars(args)}")
 
     # CSV Writer Init
     csv_path = os.path.join(output_dir, "val_metrics.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["epoch", "train_loss", "val_loss", "val_dice", "val_iou", "lr"])
+    if rank == 0:
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch", "train_loss", "val_loss", "val_dice", "val_iou", "lr"])
 
     train_model(
         model=model,
@@ -425,8 +473,11 @@ def run_training(args):
         num_epochs=args.epochs,
         device=device,
         output_dir=output_dir,
-        use_amp=True, # Enable FP16 Mixed Precision for speed & memory savings
+        use_amp=(device.type == "cuda" and not bool(getattr(args, "no_amp", False))),
 
         csv_path=csv_path, # Pass CSV path
         grad_accum_steps=getattr(args, "grad_accum_steps", 1)
     )
+
+    if is_distributed:
+        dist.destroy_process_group()

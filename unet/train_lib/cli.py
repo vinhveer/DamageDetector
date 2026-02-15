@@ -78,6 +78,7 @@ def build_arg_parser():
     parser.add_argument("--no-persistent-workers", dest="persistent_workers", action="store_false", help="Disable persistent workers")
     parser.set_defaults(persistent_workers=True)
     parser.add_argument("--pin-memory", action="store_true", help="Pin memory")
+    parser.add_argument("--no-amp", action="store_true", help="Disable AMP (mixed precision)")
 
     return parser
 
