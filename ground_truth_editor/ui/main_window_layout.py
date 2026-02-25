@@ -62,11 +62,13 @@ class MainWindowLayoutMixin:
         self._history_tab = self._build_tab_history()
         self._image_tools_tab = self._build_tab_editor()
         self._mask_tab = self._build_tab_mask()
+        self._compare_tab = self._build_tab_compare()
 
         self._left_tabs.addTab(self._explorer_tab, "Explorer")
         self._left_tabs.addTab(self._history_tab, "History")
         self._left_tabs.addTab(self._image_tools_tab, "Image Tools")
         self._left_tabs.addTab(self._mask_tab, "Mask")
+        self._left_tabs.addTab(self._compare_tab, "Compare")
         layout.addWidget(self._left_tabs, 1)
         return sidebar
 
@@ -94,6 +96,16 @@ class MainWindowLayoutMixin:
     def _focus_mask_tab(self) -> None:
         if hasattr(self, "_left_tabs") and hasattr(self, "_mask_tab"):
             self._left_tabs.setCurrentWidget(self._mask_tab)
+
+    def _build_tab_compare(self) -> QtWidgets.QWidget:
+        from .features.compare_panel import ComparePanel
+        tab = QtWidgets.QWidget(self)
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self._compare_panel = ComparePanel(tab)
+        layout.addWidget(self._compare_panel)
+        return tab
 
     def _build_tab_history(self) -> QtWidgets.QWidget:
         tab = QtWidgets.QWidget(self)

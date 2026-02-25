@@ -691,3 +691,98 @@ class MainWindowIOMixin:
         next_path = self._explorer_panel.navigate(delta, self._state.image_path if self._state is not None else None)
         if next_path:
             self.load_image(next_path, switch_tab=True)
+
+    def _open_compare_tool_dialog(self) -> None:
+        from .dialogs.compare_dialog import CompareDialog
+        from .features.compare_utils import compute_dice_iou
+        import cv2
+        import numpy as np
+
+        if not hasattr(self, "_results_dir") or not self._results_dir:
+            QtWidgets.QMessageBox.warning(self, "Compare", "No workspace results folder found. Run a prediction first.")
+            return
+
+        dlg = CompareDialog(self)
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+
+        gt_dir, prefix = dlg.get_result()
+        if not gt_dir or not os.path.exists(gt_dir):
+            QtWidgets.QMessageBox.warning(self, "Compare", "Invalid GT folder.")
+            return
+
+        results_root = Path(self._results_dir)
+        # Find all run dirs (we use glob to find directories with data.csv inside)
+        # We need to find the latest run
+        run_dirs = []
+        for d in results_root.iterdir():
+             if d.is_dir() and d.name != "models":
+                 if (d / "data.csv").exists():
+                      run_dirs.append(d)
+        
+        # Sort by creation time / name desc
+        run_dirs = sorted(run_dirs, reverse=True)
+        if not run_dirs:
+             QtWidgets.QMessageBox.warning(self, "Compare", "No runs found.")
+             return
+             
+        latest_run = run_dirs[0]
+        mask_dir = latest_run / "mask"
+        
+        if not mask_dir.exists():
+            QtWidgets.QMessageBox.warning(self, "Compare", f"No mask folder in latest run ({latest_run.name}).")
+            return
+            
+        pred_masks = list(mask_dir.glob("*.png"))
+        if not pred_masks:
+            QtWidgets.QMessageBox.warning(self, "Compare", "No masks found in latest run.")
+            return
+
+        results = []
+        for p_mask_path in pred_masks:
+             img_name = p_mask_path.name
+             gt_files = list(Path(gt_dir).glob("*.png")) + list(Path(gt_dir).glob("*.jpg"))
+             best_match = None
+             
+             # simple matching logic
+             for gf in gt_files:
+                  # Exact match (stem or name)
+                  if gf.name == img_name or gf.stem == p_mask_path.stem:
+                      best_match = gf
+                      break
+                  if prefix:
+                      if gf.stem == f"{prefix}{p_mask_path.stem}" or gf.stem == f"{p_mask_path.stem}{prefix}":
+                          best_match = gf
+                          break
+
+             if not best_match:
+                 continue
+                 
+             pm_img = cv2.imread(str(p_mask_path), cv2.IMREAD_GRAYSCALE)
+             gt_img = cv2.imread(str(best_match), cv2.IMREAD_GRAYSCALE)
+             
+             if pm_img is None or gt_img is None:
+                 continue
+                 
+             # Resize to match if needed
+             if pm_img.shape != gt_img.shape:
+                 gt_img = cv2.resize(gt_img, (pm_img.shape[1], pm_img.shape[0]), interpolation=cv2.INTER_NEAREST)
+                 
+             dice, iou = compute_dice_iou(pm_img, gt_img)
+             results.append({
+                 "image": img_name,
+                 "gt_mask": best_match.name,
+                 "dice": dice,
+                 "iou": iou
+             })
+             
+        if not results:
+             QtWidgets.QMessageBox.information(self, "Compare", "No matching masks found between GT folder and predictions.")
+             return
+             
+        if hasattr(self, "_compare_panel"):
+             self._compare_panel.set_results(results)
+             if hasattr(self, "_left_tabs") and hasattr(self, "_compare_tab"):
+                 self._left_tabs.setCurrentWidget(self._compare_tab)
+        
+        QtWidgets.QMessageBox.information(self, "Compare", f"Compared {len(results)} masks successfully.")

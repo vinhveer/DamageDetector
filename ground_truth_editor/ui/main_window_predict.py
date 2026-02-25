@@ -122,7 +122,7 @@ class MainWindowPredictMixin:
         widget.appendPlainText(text)
 
     def _new_run_id(self) -> str:
-        base = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         run_id = base
         results_root = getattr(self, "_results_dir", None)
         if results_root is None:
@@ -132,7 +132,7 @@ class MainWindowPredictMixin:
         except Exception:
             return run_id
         suffix = 1
-        while (root / f"{run_id}_lan_quet_workspace.csv").exists():
+        while (root / run_id / f"{run_id}_lan_quet_workspace.csv").exists():
             suffix += 1
             run_id = f"{base}_{suffix:02d}"
         return run_id
@@ -142,7 +142,9 @@ class MainWindowPredictMixin:
         if not results_root:
             return
 
-        txt_path = Path(results_root) / f"{run_id}_info.txt"
+        out_dir = Path(results_root) / run_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        txt_path = out_dir / f"{run_id}_info.txt"
         
         lines = [
             f"Run ID: {run_id}",
@@ -241,9 +243,11 @@ class MainWindowPredictMixin:
             return
 
         img_path = Path(image_path)
-        img_dir_name = self._sanitize_name(img_path.stem or "image")
-        img_dir = Path(results_root) / img_dir_name
-        img_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = Path(results_root) / run_id
+        mask_dir = out_dir / "mask"
+        data_dir = out_dir / "data"
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
 
         rel_image = ""
         try:
@@ -264,8 +268,16 @@ class MainWindowPredictMixin:
 
                 mask_arr = (mask_arr.astype(np.uint8) * 255)
 
-            mask_name = f"{run_id}__ket_qua_lan_quet_workspace__det_{idx+1:03d}.png"
-            mask_path = img_dir / mask_name
+            # Mask trùng tên với ảnh
+            mask_name = img_path.name
+            if len(dets) > 1:
+                 # If there are multiple detections, we need to save them separately so they don't overwrite each other,
+                 # or maybe the user wants to combine them? "Mask trùng tên với ảnh nhé"
+                 # I'll append the index just to be safe if there are multiple.
+                 if idx > 0:
+                     mask_name = f"{img_path.stem}_{idx}{img_path.suffix}"
+                
+            mask_path = mask_dir / mask_name
             try:
                 import cv2
 
@@ -298,7 +310,7 @@ class MainWindowPredictMixin:
                     "model": str(model_name),
                     "label": str(label),
                     "score": score,
-                    "mask_rel": str(Path(img_dir_name) / mask_name),
+                    "mask_rel": f"mask/{mask_name}",
                     "image_rel": rel_image,
                     "box": box_text,
                 }
@@ -307,11 +319,11 @@ class MainWindowPredictMixin:
         if not rows:
             return
 
-        data_csv = img_dir / "data.csv"
+        data_csv = data_dir / "data.csv"
         fields = ["run_id", "created_at", "model", "label", "score", "mask_rel", "image_rel", "box"]
         self._append_csv_rows(data_csv, rows, fields)
 
-        run_csv = Path(results_root) / f"{run_id}_lan_quet_workspace.csv"
+        run_csv = out_dir / f"{run_id}_lan_quet_workspace.csv"
         self._append_csv_rows(run_csv, rows, fields)
         self._populate_history_list()
 
@@ -617,15 +629,30 @@ class MainWindowPredictMixin:
             for line in pre_logs:
                 self._append_log(self._active_log_widget, line)
 
+        # Create a broker in the GUI thread to safely route signals.
+        # This bypasses PySide6's metaclass bugs with bound methods on Mixins.
+        class SignalBroker(QtCore.QObject):
+            log = QtCore.Signal(str)
+            failed = QtCore.Signal(str)
+            finished = QtCore.Signal(object)
+
+        # Keep a reference to the broker to prevent GC
+        self._worker_broker = SignalBroker(self)
+        self._worker_broker.log.connect(self._on_worker_log)
+        self._worker_broker.failed.connect(self._on_worker_failed_slot)
+        self._worker_broker.finished.connect(self._on_worker_finished_slot)
+
         worker.moveToThread(self._thread)
 
         self._thread.started.connect(worker.run)
-        worker.log.connect(self._on_worker_log)
-        worker.failed.connect(self._on_worker_failed_slot)
-        worker.finished.connect(self._on_worker_finished_slot)
+        
+        worker.log.connect(self._worker_broker.log)
+        worker.failed.connect(self._worker_broker.failed)
+        worker.finished.connect(self._worker_broker.finished)
 
-        worker.finished.connect(self._thread.quit)
-        worker.failed.connect(self._thread.quit)
+        # thread.quit can be directly connected since QThread is a proper QObject
+        worker.finished.connect(self._thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(self._thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
         self._thread.finished.connect(self._thread.deleteLater)
         self._thread.finished.connect(self._cleanup_worker)
 

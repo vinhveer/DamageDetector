@@ -53,24 +53,35 @@ class UnetRunner:
         if log_fn is not None:
             log_fn(f"Loading UNet weights... ({params.model_path})")
         
-        # Initialize SMP UNet (Standard for trained model)
-        # Assuming efficientnet-b0 as per config. 
-        # TODO: Detect encoder from filename or config if changed.
-        try:
-             # Match training: smp.Unet with ConvNeXt-Tiny + SCSE
-             m = smp.Unet(
-                 encoder_name="tu-convnext_tiny",
-                 encoder_weights=None, 
-                 in_channels=3, 
-                 classes=1,
-                 decoder_attention_type="scse"
-             )
-             state = torch.load(params.model_path, map_location=device, weights_only=False)
-             m.load_state_dict(state)
-        except Exception as e:
-             # Fallback or Report
-             if log_fn: log_fn(f"Error loading model: {e}. Ensure architecture matches training config (Unet+ConvNeXt).")
-             raise e
+        # Initialize SMP UNet
+        # Try loading with EfficientNet-B4 (default in training) first, then fallback to ConvNeXt-Tiny
+        encoders_to_try = ["efficientnet-b4", "tu-convnext_tiny"]
+        
+        last_exception = None
+        m = None
+        
+        state = torch.load(params.model_path, map_location=device, weights_only=False)
+        
+        for enc_name in encoders_to_try:
+            try:
+                if log_fn: log_fn(f"Attempting to load model with encoder: {enc_name}...")
+                m = smp.Unet(
+                    encoder_name=enc_name,
+                    encoder_weights=None, 
+                    in_channels=3, 
+                    classes=1,
+                    decoder_attention_type="scse"
+                )
+                m.load_state_dict(state)
+                if log_fn: log_fn(f"Successfully loaded model with encoder: {enc_name}")
+                break
+            except Exception as e:
+                last_exception = e
+                m = None
+        
+        if m is None:
+             if log_fn: log_fn(f"Error loading model: {last_exception}. Ensure architecture matches training config.")
+             raise last_exception
 
         m = m.to(device)
         m.eval()

@@ -18,6 +18,7 @@ class ToolbarActions:
     next_image: QtGui.QAction
     stop: QtGui.QAction
     folder_history: QtGui.QAction
+    compare_tool: QtGui.QAction
 
 
 class ToolbarController:
@@ -64,6 +65,7 @@ class ToolbarController:
             [a.stop],
             [a.folder_history],
             [a.isolate_object],
+            [a.compare_tool],
         ]
 
         visible_groups: list[list[QtGui.QAction]] = []

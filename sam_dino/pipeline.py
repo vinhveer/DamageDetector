@@ -73,6 +73,8 @@ def label_matches(label: str, targets: Sequence[str]) -> bool:
     return False
 
 
+import inspect
+
 def post_process_gdino(
     processor: AutoProcessor,
     outputs,
@@ -84,16 +86,23 @@ def post_process_gdino(
     fn = getattr(processor, "post_process_grounded_object_detection", None)
     if fn is None:
         raise RuntimeError(
-            "Processor kh??ng c?? post_process_grounded_object_detection; "
-            "h??y n??ng transformers ho???c d??ng model/processor t????ng th??ch."
+            "Processor khong co post_process_grounded_object_detection; "
+            "hay nang transformers hoac dung model/processor tuong thich."
         )
-    return fn(
-        outputs=outputs,
-        input_ids=input_ids,
-        box_threshold=box_threshold,
-        text_threshold=text_threshold,
-        target_sizes=target_sizes,
-    )
+    
+    sig = inspect.signature(fn)
+    kwargs = {
+        "outputs": outputs,
+        "input_ids": input_ids,
+        "text_threshold": text_threshold,
+        "target_sizes": target_sizes,
+    }
+    if "box_threshold" in sig.parameters:
+        kwargs["box_threshold"] = box_threshold
+    else:
+        kwargs["threshold"] = box_threshold
+        
+    return fn(**kwargs)
 
 
 def run_text_boxes(

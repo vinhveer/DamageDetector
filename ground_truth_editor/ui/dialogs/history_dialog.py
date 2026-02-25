@@ -76,8 +76,13 @@ class FolderHistoryDialog(HistoryBaseDialog):
         if not self._results_root.exists():
             return
 
-        # Find all run CSVs
-        run_files = sorted(self._results_root.glob("*_lan_quet_workspace.csv"), reverse=True)
+        # Find all run CSVs (now inside date-named folders)
+        run_files = sorted(self._results_root.glob("*/*_lan_quet_workspace.csv"), reverse=True)
+        # Also check old format just in case
+        run_files.extend(sorted(self._results_root.glob("*_lan_quet_workspace.csv"), reverse=True))
+        
+        # Also sort by date in the filename
+        run_files.sort(key=lambda p: p.name, reverse=True)
         
         for p in run_files:
             # Parse CSV to get summary (Model, Date from first row, Image count)

@@ -89,6 +89,9 @@ class MainWindowActionsMixin:
         self._act_view_history_image = QtGui.QAction("Image History", self)
         self._act_view_history_image.triggered.connect(self._open_image_history_dialog)
 
+        self._act_compare_tool = QtGui.QAction("Compare GT Folder...", self)
+        self._act_compare_tool.triggered.connect(self._open_compare_tool_dialog)
+
         self._act_model_settings = QtGui.QAction("Model Settings...", self)
         self._act_model_settings.setShortcut(QtGui.QKeySequence("Ctrl+,"))
         self._act_model_settings.triggered.connect(self._open_model_settings_dialog)
@@ -144,6 +147,8 @@ class MainWindowActionsMixin:
         run.addAction(self._act_predict_sam_dino_ft)
         run.addAction(self._act_predict_unet_dino)
         run.addSeparator()
+        run.addAction(self._act_compare_tool)
+        run.addSeparator()
         run.addAction(self._act_stop)
 
     def _build_toolbar(self) -> None:
@@ -161,6 +166,7 @@ class MainWindowActionsMixin:
                 next_image=self._act_next_image,
                 stop=self._act_stop,
                 folder_history=self._act_view_history_folder,
+                compare_tool=self._act_compare_tool,
             )
         )
 

@@ -175,3 +175,8 @@ If your ground truth is a folder of mask images (e.g. `compare_test_dataset/mask
 ```bash
 python compare_result.py --pred-dir compare/result_unet --gt-dir compare_test_dataset/masks --gt-suffix _mask.png --out-xlsx compare/compare_metrics.xlsx
 ```
+
+## Example Train Command (Kaggle)
+```
+!torchrun --standalone --nproc_per_node=2 unet/train.py --train-images "/kaggle/input/datasets/vinhnquntu/crack500croped/crack500_crop/train/images" --train-masks "/kaggle/input/datasets/vinhnquntu/crack500croped/crack500_crop/train/masks" --val-images "/kaggle/input/datasets/vinhnquntu/crack500croped/crack500_crop/val/images" --val-masks "/kaggle/input/datasets/vinhnquntu/crack500croped/crack500_crop/val/masks" --output-dir output_results_p4000 --preprocess letterbox --preprocess-train random_crop --preprocess-val patch --input-size 512 --patches-per-image 4 --encoder-name tu-convnext_tiny --encoder-weights imagenet --batch-size 4 --grad-accum-steps 4 --epochs 100 --seed 42 --aug-prob 0.5 --rotate-limit 10 --brightness-limit 0.2 --contrast-limit 0.2 --pos-weight 2.0 --pos-weight-min 2.0 --pos-weight-max 20.0 --pos-weight-sample 200 --bce-weight 1.0 --dice-weight 0.5 --focal-weight 0.5 --focal-alpha 0.25 --focal-gamma 2.0 --metric-threshold 0.5 --metric-thresholds "0.2,0.3,0.4,0.5,0.6" --scheduler-metric loss --learning-rate 0.0001 --weight-decay 0.01 --scheduler-t0 10 --scheduler-tmult 2 --early-stop-patience 100 --num-workers 2 --pin-memory --prefetch-factor 8
+```
