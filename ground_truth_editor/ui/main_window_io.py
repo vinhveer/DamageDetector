@@ -458,7 +458,9 @@ class MainWindowIOMixin:
                 continue
             data_csv = sub / "data.csv"
             if not data_csv.is_file():
-                continue
+                data_csv = sub / "data" / "data.csv"
+                if not data_csv.is_file():
+                    continue
             try:
                 with data_csv.open("r", encoding="utf-8", newline="") as f:
                     reader = csv.DictReader(f)
@@ -523,7 +525,10 @@ class MainWindowIOMixin:
         results_root = Path(self._results_dir)
         if not results_root.exists():
             return
-        items = sorted(results_root.glob("*_lan_quet_workspace.csv"))
+        items = sorted(
+            list(results_root.glob("*_lan_quet_workspace.csv")) +
+            list(results_root.glob("*/*_lan_quet_workspace.csv"))
+        )
         for p in items:
             item = QtWidgets.QListWidgetItem(p.name)
             item.setData(QtCore.Qt.UserRole, str(p))
@@ -717,7 +722,9 @@ class MainWindowIOMixin:
         run_dirs = []
         for d in results_root.iterdir():
              if d.is_dir() and d.name != "models":
-                 if (d / "data.csv").exists():
+                 # In the new structure, data.csv is saved in the 'data' subfolder
+                 # and a run-level csv is also saved directly in the run_id folder.
+                 if (d / "data" / "data.csv").exists() or list(d.glob("*_lan_quet_workspace.csv")):
                       run_dirs.append(d)
         
         # Sort by creation time / name desc
