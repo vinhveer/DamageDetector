@@ -5,10 +5,52 @@ from dataclasses import asdict
 
 from PySide6 import QtCore
 
+from image_io import load_image, load_mask
 from predict.dino import get_dino_service
 from predict.unet import get_unet_service
 from predict_sam_dino import SamDinoParams
 from predict_unet import UnetParams
+
+
+class ImageIoWorker(QtCore.QObject):
+    failed = QtCore.Signal(str)
+    finished = QtCore.Signal(object)
+
+    def __init__(self, kind: str, path: str, expected_size: tuple[int, int] | None = None) -> None:
+        super().__init__()
+        self._kind = str(kind)
+        self._path = str(path)
+        self._expected_size = expected_size
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            if self._kind == "image":
+                self.finished.emit(
+                    {
+                        "kind": "image",
+                        "path": self._path,
+                        "image": load_image(self._path),
+                    }
+                )
+                return
+
+            if self._kind == "mask":
+                if self._expected_size is None:
+                    raise RuntimeError("Missing expected mask size.")
+                loaded = load_mask(self._path, self._expected_size)
+                self.finished.emit(
+                    {
+                        "kind": "mask",
+                        "path": self._path,
+                        "mask": loaded.mask,
+                    }
+                )
+                return
+
+            raise RuntimeError(f"Unsupported IO worker kind: {self._kind}")
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 class WorkerBase(QtCore.QObject):
@@ -372,6 +414,140 @@ class UnetDinoWorker(WorkerBase):
             }
             
             self.finished.emit(result)
+        except Exception as e:
+            if self._stop_checker():
+                self.finished.emit({"stopped": True})
+            else:
+                self.failed.emit(str(e))
+
+
+class SamOnlyWorker(WorkerBase):
+    """Run SAM on a single image without GroundingDINO."""
+
+    def __init__(self, image_path: str, params: SamDinoParams) -> None:
+        super().__init__()
+        self._image_path = image_path
+        self._params = params
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            details = get_dino_service().call(
+                "sam_only_run",
+                {"image_path": self._image_path, "params": asdict(self._params)},
+                log_fn=self.log.emit,
+                stop_checker=self._stop_checker,
+            )
+            self.finished.emit(details)
+        except Exception as e:
+            if self._stop_checker():
+                self.finished.emit({"stopped": True})
+            else:
+                self.failed.emit(str(e))
+
+
+class BatchSamOnlyWorker(WorkerBase):
+    """Run SAM on a batch of images without GroundingDINO."""
+
+    def __init__(self, image_paths: list[str], params: SamDinoParams) -> None:
+        super().__init__()
+        self._image_paths = image_paths
+        self._params = params
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            details = get_dino_service().call(
+                "sam_only_batch_run",
+                {"image_paths": list(self._image_paths), "params": asdict(self._params)},
+                log_fn=self.log.emit,
+                stop_checker=self._stop_checker,
+            )
+            self.finished.emit(details)
+        except Exception as e:
+            if self._stop_checker():
+                self.finished.emit({"stopped": True})
+            else:
+                self.failed.emit(str(e))
+
+
+class SamDinoTiledWorker(WorkerBase):
+    """Run recursive zoom-in SAM+DINO crack detection on a single image."""
+
+    def __init__(
+        self,
+        image_path: str,
+        params: SamDinoParams,
+        *,
+        target_labels: list[str] | None = None,
+        max_depth: int = 3,
+        min_box_px: int = 48,
+    ) -> None:
+        super().__init__()
+        self._image_path = image_path
+        self._params = params
+        self._target_labels = target_labels or ["crack"]
+        self._max_depth = max_depth
+        self._min_box_px = min_box_px
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            details = get_dino_service().call(
+                "tiled_run",
+                {
+                    "image_path": self._image_path,
+                    "params": asdict(self._params),
+                    "target_labels": list(self._target_labels),
+                    "max_depth": self._max_depth,
+                    "min_box_px": self._min_box_px,
+                },
+                log_fn=self.log.emit,
+                stop_checker=self._stop_checker,
+            )
+            self.finished.emit(details)
+        except Exception as e:
+            if self._stop_checker():
+                self.finished.emit({"stopped": True})
+            else:
+                self.failed.emit(str(e))
+
+
+class BatchSamDinoTiledWorker(WorkerBase):
+    """Run recursive zoom-in SAM+DINO crack detection on a batch of images."""
+
+    def __init__(
+        self,
+        image_paths: list[str],
+        params: SamDinoParams,
+        *,
+        target_labels: list[str] | None = None,
+        max_depth: int = 3,
+        min_box_px: int = 48,
+    ) -> None:
+        super().__init__()
+        self._image_paths = image_paths
+        self._params = params
+        self._target_labels = target_labels or ["crack"]
+        self._max_depth = max_depth
+        self._min_box_px = min_box_px
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            details = get_dino_service().call(
+                "tiled_batch_run",
+                {
+                    "image_paths": list(self._image_paths),
+                    "params": asdict(self._params),
+                    "target_labels": list(self._target_labels),
+                    "max_depth": self._max_depth,
+                    "min_box_px": self._min_box_px,
+                },
+                log_fn=self.log.emit,
+                stop_checker=self._stop_checker,
+            )
+            self.finished.emit(details)
         except Exception as e:
             if self._stop_checker():
                 self.finished.emit({"stopped": True})

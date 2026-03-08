@@ -22,6 +22,15 @@ class MainWindowActionsMixin:
         self._act_open_mask.setShortcut(QtGui.QKeySequence("Ctrl+M"))
         self._act_open_mask.triggered.connect(self.open_mask_dialog)
 
+        self._act_save_image = QtGui.QAction("Export Image As...", self)
+        self._act_save_image.triggered.connect(self.save_image_dialog)
+
+        self._act_save_overlay = QtGui.QAction("Export Overlay As...", self)
+        self._act_save_overlay.triggered.connect(self.save_overlay_dialog)
+
+        self._act_save_overlay_boxes = QtGui.QAction("Export Overlay + Boxes As...", self)
+        self._act_save_overlay_boxes.triggered.connect(self.save_overlay_boxes_dialog)
+
         self._act_save_mask = QtGui.QAction("Save Mask As...", self)
         self._act_save_mask.setShortcut(QtGui.QKeySequence.Save)
         self._act_save_mask.triggered.connect(self.save_mask_dialog)
@@ -34,6 +43,9 @@ class MainWindowActionsMixin:
 
         self._act_predict_with = QtGui.QAction("Predict with...", self)
         self._act_predict_with.triggered.connect(self._open_predict_mode_dialog)
+
+        self._act_predict_roi = QtGui.QAction("Predict with ROI...", self)
+        self._act_predict_roi.triggered.connect(self._start_predict_roi)
 
         self._act_predict_folder = QtGui.QAction("Predict Folder...", self)
         self._act_predict_folder.triggered.connect(self._predict_folder_dialog)
@@ -116,6 +128,9 @@ class MainWindowActionsMixin:
         menu.addSeparator()
         menu.addAction(self._act_open_mask)
         menu.addSeparator()
+        menu.addAction(self._act_save_image)
+        menu.addAction(self._act_save_overlay)
+        menu.addAction(self._act_save_overlay_boxes)
         menu.addAction(self._act_save_mask)
         menu.addSeparator()
         menu.addAction(self._act_exit)
@@ -141,6 +156,7 @@ class MainWindowActionsMixin:
 
         run = self.menuBar().addMenu("Run")
         run.addAction(self._act_predict_with)  # Added here too
+        run.addAction(self._act_predict_roi)
         run.addAction(self._act_predict_folder)
         run.addSeparator()
         run.addAction(self._act_predict_sam_dino)
@@ -156,6 +172,7 @@ class MainWindowActionsMixin:
         self._toolbar.set_actions(
             ToolbarActions(
                 predict_with=self._act_predict_with,
+                predict_roi=self._act_predict_roi,
                 isolate_object=self._act_isolate_object,
                 model_settings=self._act_model_settings,
                 open_folder=self._act_add_folder,
@@ -188,6 +205,9 @@ class MainWindowActionsMixin:
         self._act_model_settings.setEnabled(not running)
 
         self._act_open_mask.setEnabled(can_interact and has_image)
+        self._act_save_image.setEnabled(can_interact and has_image)
+        self._act_save_overlay.setEnabled(can_interact and has_image and has_mask)
+        self._act_save_overlay_boxes.setEnabled(can_interact and has_image)
         self._act_save_mask.setEnabled(can_interact and has_image and has_mask)
 
         visible_items = self._visible_folder_items()
@@ -199,6 +219,7 @@ class MainWindowActionsMixin:
         self._act_predict_sam_dino.setEnabled(can_predict)
         self._act_predict_sam_dino_ft.setEnabled(can_predict)
         self._act_predict_unet_dino.setEnabled(can_predict)
+        self._act_predict_roi.setEnabled(can_interact and has_image)
         self._act_view_history_folder.setEnabled(can_interact)
         self._act_view_history_folder.setEnabled(can_interact)
         self._act_view_history_image.setEnabled(can_interact and has_image)

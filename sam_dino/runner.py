@@ -30,8 +30,9 @@ class SamDinoParams:
     sam_min_component_area: int = 0
     sam_dilate_iters: int = 0
     seed: int = 1337
-    device: str = "cpu"  # auto|cpu|mps|cuda
+    device: str = "cuda"  # auto|cpu|mps|cuda
     output_dir: str = "results_sam_dino"
+    roi_box: tuple[int, int, int, int] | None = None
 
 
 class SamDinoRunner:
@@ -426,7 +427,112 @@ class SamDinoRunner:
 
         return self._predictor, self._processor, self._gdino, device
 
+    def _run_with_roi(self, func_name: str, image_path: str, params: SamDinoParams, **kwargs) -> dict:
+        import cv2, os, numpy as np, tempfile
+        from dataclasses import replace
+
+        bgr = cv2.imread(image_path)
+        if bgr is None:
+            raise FileNotFoundError(f"Cannot read image: {image_path}")
+
+        rx1, ry1, rx2, ry2 = params.roi_box
+        rx1 = max(0, min(bgr.shape[1] - 1, rx1))
+        ry1 = max(0, min(bgr.shape[0] - 1, ry1))
+        rx2 = max(0, min(bgr.shape[1], rx2))
+        ry2 = max(0, min(bgr.shape[0], ry2))
+
+        if rx2 <= rx1 or ry2 <= ry1:
+            raise ValueError("Invalid ROI box")
+
+        crop = bgr[ry1:ry2, rx1:rx2]
+        ext = os.path.splitext(image_path)[1] or ".png"
+        fd, tmp_path = tempfile.mkstemp(suffix=ext)
+        os.close(fd)
+        cv2.imwrite(tmp_path, crop)
+
+        sub_params = replace(params, roi_box=None)
+        
+        try:
+            func = getattr(self, func_name)
+            res = func(tmp_path, sub_params, **kwargs)
+
+            base = os.path.splitext(os.path.basename(image_path))[0]
+            out_dir = params.output_dir
+            
+            overlay_path = res.get("overlay_path")
+            if overlay_path and os.path.isfile(overlay_path):
+                crop_ov = cv2.imread(overlay_path)
+                if crop_ov is not None:
+                    full_ov = bgr.copy()
+                    ch, cw = crop.shape[:2]
+                    full_ov[ry1:ry1+ch, rx1:rx1+cw] = crop_ov[:ch, :cw]
+                    final_ov_path = os.path.join(out_dir, f"{base}_roi_overlay.png")
+                    cv2.imwrite(final_ov_path, full_ov)
+                    res["overlay_path"] = final_ov_path
+            
+            mask_path = res.get("mask_path")
+            if mask_path and os.path.isfile(mask_path):
+                crop_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                if crop_mask is not None:
+                    full_mask = np.zeros((bgr.shape[0], bgr.shape[1]), dtype=np.uint8)
+                    ch, cw = crop.shape[:2]
+                    full_mask[ry1:ry1+ch, rx1:rx1+cw] = crop_mask[:ch, :cw]
+                    final_mask_path = os.path.join(out_dir, f"{base}_roi_mask.png")
+                    cv2.imwrite(final_mask_path, full_mask)
+                    res["mask_path"] = final_mask_path
+
+            isolate_path = res.get("isolate_path")
+            if isolate_path and os.path.isfile(isolate_path):
+                crop_iso = cv2.imread(isolate_path)
+                if crop_iso is not None:
+                    outside_value = kwargs.get("outside_value", 0)
+                    full_iso = np.full_like(bgr, outside_value)
+                    ch, cw = crop.shape[:2]
+                    full_iso[ry1:ry1+ch, rx1:rx1+cw] = crop_iso[:ch, :cw]
+                    final_iso_path = os.path.join(out_dir, f"{base}_roi_isolate.png")
+                    cv2.imwrite(final_iso_path, full_iso)
+                    res["isolate_path"] = final_iso_path
+
+            dets = res.get("detections", [])
+            for d in dets:
+                mask_b64 = d.get("mask_b64")
+                if mask_b64:
+                    try:
+                        import base64
+
+                        mask_bytes = base64.b64decode(mask_b64)
+                        arr = np.frombuffer(mask_bytes, np.uint8)
+                        crop_mask = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+                        if crop_mask is not None:
+                            full_mask = np.zeros((bgr.shape[0], bgr.shape[1]), dtype=np.uint8)
+                            mh, mw = crop_mask.shape[:2]
+                            paste_h = min(mh, ry2 - ry1)
+                            paste_w = min(mw, rx2 - rx1)
+                            full_mask[ry1:ry1 + paste_h, rx1:rx1 + paste_w] = crop_mask[:paste_h, :paste_w]
+                            ok, full_png = cv2.imencode(".png", full_mask)
+                            if ok:
+                                d["mask_b64"] = base64.b64encode(full_png.tobytes()).decode("ascii")
+                    except Exception:
+                        pass
+
+                box = d.get("box")
+                if box:
+                    d["box"] = [box[0]+rx1, box[1]+ry1, box[2]+rx1, box[3]+ry1]
+
+            res["image_path"] = str(image_path)
+            res["output_dir"] = out_dir
+
+            return res
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
     def run(self, image_path: str, params: SamDinoParams, *, stop_checker=None, log_fn=None) -> dict:
+        if params.roi_box is not None:
+            return self._run_with_roi("run", image_path, params, stop_checker=stop_checker, log_fn=log_fn)
+
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
         if not os.path.isfile(params.sam_checkpoint):
@@ -473,6 +579,117 @@ class SamDinoRunner:
             "image_path": str(image_path),
         }
 
+    def _ensure_sam_only(self, params: SamDinoParams, *, log_fn=None) -> tuple:
+        """Load SAM (optionally with delta) but skip GroundingDINO."""
+        self._ensure_import_paths()
+        import torch
+        from device_utils import select_device_str
+        from sam_dino.pipeline import apply_delta_to_sam, load_sam_model, resolve_best_delta_checkpoint
+        from segment_anything import SamPredictor  # type: ignore
+
+        device = select_device_str(params.device, torch=torch)
+
+        dt = str(params.delta_type or "none").strip().lower()
+        if dt not in {"none", "adapter", "lora", "both"}:
+            raise ValueError("delta_type must be none/adapter/lora/both")
+
+        delta_path = None
+        if dt != "none":
+            delta_path = resolve_best_delta_checkpoint(dt, str(params.delta_checkpoint or "auto"))
+            inferred = self._infer_delta_type_from_path(delta_path)
+            if inferred is not None and inferred != dt:
+                if log_fn is not None:
+                    log_fn(f"WARN: delta_type={dt} nhưng checkpoint là {inferred}. Tự đổi -> {inferred}.")
+                dt = inferred
+            if log_fn is not None:
+                log_fn(f"Delta: type={dt} ckpt={delta_path}")
+
+        delta_sig = (
+            dt,
+            delta_path,
+            int(params.middle_dim),
+            float(params.scaling_factor),
+            int(params.rank),
+        )
+
+        need_sam = (
+            self._predictor is None
+            or self._sam_checkpoint != params.sam_checkpoint
+            or self._sam_model_type != params.sam_model_type
+            or self._delta_sig != delta_sig
+            or self._device != device
+        )
+        if need_sam:
+            if log_fn is not None:
+                log_fn("Loading SAM checkpoint...")
+            sam, _used = load_sam_model(params.sam_checkpoint, params.sam_model_type)
+            if dt != "none":
+                assert delta_path is not None
+                if log_fn is not None:
+                    log_fn("Applying delta to SAM...")
+                apply_delta_to_sam(
+                    sam=sam,
+                    delta_type=dt,
+                    delta_ckpt_path=str(delta_path),
+                    middle_dim=int(params.middle_dim),
+                    scaling_factor=float(params.scaling_factor),
+                    rank=int(params.rank),
+                )
+            sam.to(device=device)
+            self._predictor = SamPredictor(sam)
+            self._sam_checkpoint = params.sam_checkpoint
+            self._sam_model_type = params.sam_model_type
+            self._delta_sig = delta_sig
+            self._device = device
+            if log_fn is not None:
+                log_fn(f"SAM ready (type={params.sam_model_type}, device={device}).")
+
+        return self._predictor, device
+
+    def run_sam_only(self, image_path: str, params: SamDinoParams, *, stop_checker=None, log_fn=None) -> dict:
+        """Run SAM on the full image without GroundingDINO."""
+        if params.roi_box is not None:
+            return self._run_with_roi("run_sam_only", image_path, params, stop_checker=stop_checker, log_fn=log_fn)
+
+        if not os.path.isfile(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        if not os.path.isfile(params.sam_checkpoint):
+            raise FileNotFoundError(f"SAM checkpoint not found: {params.sam_checkpoint}")
+
+        os.makedirs(params.output_dir, exist_ok=True)
+
+        self._ensure_import_paths()
+        from sam_dino.pipeline import StopRequested, process_one_image_sam_only
+
+        predictor, device = self._ensure_sam_only(params, log_fn=log_fn)
+
+        if log_fn is not None:
+            log_fn("Running SAM only (no DINO)...")
+
+        masks_saved, overlay_path, mask_path, detections = process_one_image_sam_only(
+            image_path=image_path,
+            out_dir=params.output_dir,
+            predictor=predictor,
+            overlay_alpha=float(params.overlay_alpha),
+            seed=int(params.seed),
+            invert_mask=bool(params.invert_mask),
+            sam_min_component_area=int(params.sam_min_component_area),
+            sam_dilate_iters=int(params.sam_dilate_iters),
+            stop_checker=stop_checker,
+        )
+        if log_fn is not None:
+            log_fn(f"Done. masks_saved={masks_saved}")
+
+        return {
+            "mask_path": mask_path,
+            "overlay_path": overlay_path,
+            "output_dir": params.output_dir,
+            "masks_saved": int(masks_saved),
+            "detections": detections,
+            "image_path": str(image_path),
+        }
+
+
     def run_isolate(
         self,
         image_path: str,
@@ -484,6 +701,13 @@ class SamDinoRunner:
         stop_checker=None,
         log_fn=None,
     ) -> dict:
+        if params.roi_box is not None:
+            return self._run_with_roi(
+                "run_isolate", image_path, params,
+                target_labels=target_labels, outside_value=outside_value,
+                crop_to_bbox=crop_to_bbox, stop_checker=stop_checker, log_fn=log_fn
+            )
+
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
         if not os.path.isfile(params.sam_checkpoint):
@@ -519,6 +743,7 @@ class SamDinoRunner:
             sam_min_component_area=int(params.sam_min_component_area),
             sam_dilate_iters=int(params.sam_dilate_iters),
             stop_checker=stop_checker,
+            log_fn=log_fn,
         )
 
         return {
@@ -528,4 +753,71 @@ class SamDinoRunner:
             "output_dir": params.output_dir,
             "dets": int(n_dets),
             "masks_saved": int(masks_saved),
+            "image_path": str(image_path),
+        }
+
+    def run_tiled_crack(
+        self,
+        image_path: str,
+        params: SamDinoParams,
+        *,
+        target_labels: Sequence[str] = ("crack",),
+        max_depth: int = 3,
+        min_box_px: int = 48,
+        stop_checker=None,
+        log_fn=None,
+    ) -> dict:
+        """Recursive zoom-in: detect -> zoom into each box -> keep FINEST level that finds something -> SAM."""
+        if params.roi_box is not None:
+            return self._run_with_roi(
+                "run_tiled_crack", image_path, params,
+                target_labels=target_labels, max_depth=max_depth,
+                min_box_px=min_box_px, stop_checker=stop_checker, log_fn=log_fn
+            )
+
+        if not os.path.isfile(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        if not os.path.isfile(params.sam_checkpoint):
+            raise FileNotFoundError(f"SAM checkpoint not found: {params.sam_checkpoint}")
+
+        os.makedirs(params.output_dir, exist_ok=True)
+        self._ensure_import_paths()
+        from sam_dino.pipeline import StopRequested, process_one_image_recursive_crack_sam
+
+        predictor, processor, gdino, device = self._ensure_models(params, log_fn=log_fn)
+
+        if log_fn:
+            log_fn(f"Recursive crack detect: max_depth={max_depth}, "
+                   f"min_box_px={min_box_px}, target={list(target_labels)}")
+
+        n_boxes, masks_saved, overlay_path, mask_path, detections = process_one_image_recursive_crack_sam(
+            image_path=image_path,
+            out_dir=params.output_dir,
+            predictor=predictor,
+            processor=processor,
+            gdino=gdino,
+            device=device,
+            text_queries=list(params.text_queries),
+            target_labels=list(target_labels),
+            box_threshold=float(params.box_threshold),
+            text_threshold=float(params.text_threshold),
+            max_dets=int(params.max_dets),
+            overlay_alpha=float(params.overlay_alpha),
+            seed=int(params.seed),
+            invert_mask=bool(params.invert_mask),
+            sam_min_component_area=int(params.sam_min_component_area),
+            sam_dilate_iters=int(params.sam_dilate_iters),
+            min_box_px=int(min_box_px),
+            stop_checker=stop_checker,
+            log_fn=log_fn,
+        )
+
+        return {
+            "mask_path": mask_path,
+            "overlay_path": overlay_path,
+            "output_dir": params.output_dir,
+            "dets": int(n_boxes),
+            "masks_saved": int(masks_saved),
+            "detections": detections,
+            "image_path": str(image_path),
         }

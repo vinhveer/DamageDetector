@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import csv
 import datetime
+import json
 import os
 import shutil
 from pathlib import Path
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from image_io import (
     ImageIoError,
@@ -17,10 +18,163 @@ from image_io import (
     save_mask_png_0255,
 )
 
+from .features.predict.workers import ImageIoWorker
 from .state import LoadedState
 
 
 class MainWindowIOMixin:
+    def _run_with_loading(self, title: str, message: str, func):
+        dlg = QtWidgets.QProgressDialog(message, "", 0, 0, self)
+        dlg.setWindowTitle(title)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        dlg.setValue(0)
+        dlg.show()
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        QtWidgets.QApplication.processEvents()
+        try:
+            return func()
+        finally:
+            dlg.close()
+            dlg.deleteLater()
+            QtWidgets.QApplication.restoreOverrideCursor()
+            QtWidgets.QApplication.processEvents()
+
+    def _show_async_loading(self, title: str, message: str) -> None:
+        dlg = QtWidgets.QProgressDialog(message, "", 0, 0, self)
+        dlg.setWindowTitle(title)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        dlg.setValue(0)
+        dlg.show()
+        self._io_progress_dialog = dlg
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        QtWidgets.QApplication.processEvents()
+
+    def _hide_async_loading(self) -> None:
+        dlg = getattr(self, "_io_progress_dialog", None)
+        if dlg is not None:
+            dlg.close()
+            dlg.deleteLater()
+            self._io_progress_dialog = None
+        QtWidgets.QApplication.restoreOverrideCursor()
+        QtWidgets.QApplication.processEvents()
+
+    def _start_async_io_job(
+        self,
+        *,
+        kind: str,
+        path: str,
+        switch_tab: bool = True,
+        expected_size: tuple[int, int] | None = None,
+    ) -> None:
+        current_thread = getattr(self, "_io_thread", None)
+        if current_thread is not None and current_thread.isRunning():
+            self.statusBar().showMessage("Image or mask is still loading...", 3000)
+            return
+
+        self._active_io_job = {
+            "kind": str(kind),
+            "path": str(path),
+            "switch_tab": bool(switch_tab),
+            "expected_size": expected_size,
+        }
+        self._show_async_loading(
+            "Open Image" if str(kind) == "image" else "Open Mask",
+            "Loading image..." if str(kind) == "image" else "Loading mask...",
+        )
+
+        thread = QtCore.QThread(self)
+        worker = ImageIoWorker(str(kind), str(path), expected_size)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_async_io_finished)
+        worker.failed.connect(self._on_async_io_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._cleanup_async_io_job)
+        self._io_thread = thread
+        self._io_worker = worker
+        thread.start()
+
+    @QtCore.Slot(object)
+    def _on_async_io_finished(self, payload_obj) -> None:
+        payload = dict(payload_obj or {})
+        job = dict(getattr(self, "_active_io_job", {}) or {})
+        try:
+            kind = str(payload.get("kind") or job.get("kind") or "")
+            if kind == "image":
+                image = payload.get("image")
+                if not isinstance(image, QtGui.QImage) or image.isNull():
+                    raise ImageIoError(f"Không mở được ảnh: {job.get('path')}")
+                self._apply_loaded_image(str(payload.get("path") or job.get("path") or ""), image, bool(job.get("switch_tab", True)))
+            elif kind == "mask":
+                mask = payload.get("mask")
+                if not isinstance(mask, QtGui.QImage) or mask.isNull():
+                    raise ImageIoError(f"Không mở được mask: {job.get('path')}")
+                self._apply_loaded_mask(str(payload.get("path") or job.get("path") or ""), mask)
+        except ImageIoError as e:
+            QtWidgets.QMessageBox.critical(self, "Open Image" if job.get("kind") == "image" else "Open Mask", str(e))
+        finally:
+            self._hide_async_loading()
+
+    @QtCore.Slot(str)
+    def _on_async_io_failed(self, message: str) -> None:
+        job = dict(getattr(self, "_active_io_job", {}) or {})
+        self._hide_async_loading()
+        QtWidgets.QMessageBox.critical(
+            self,
+            "Open Image" if job.get("kind") == "image" else "Open Mask",
+            str(message or "Unknown IO error."),
+        )
+
+    @QtCore.Slot()
+    def _cleanup_async_io_job(self) -> None:
+        self._io_thread = None
+        self._io_worker = None
+        self._active_io_job = None
+
+    def _apply_loaded_image(self, path: str, img: QtGui.QImage, switch_tab: bool = True) -> None:
+        prev_image_path = self._state.image_path if self._state is not None else ""
+        self._state = LoadedState(image_path=path, image_w=img.width(), image_h=img.height())
+        self._overlay_canvas.set_image(img)
+        self._image_canvas.set_image(img)
+
+        blank = new_blank_mask((img.width(), img.height())).mask
+        self._overlay_canvas.set_mask(blank)
+        self._sync_mask_views()
+        self._mask_path = None
+        self._sync_path_labels()
+        self._explorer_panel.select_path(path)
+        if switch_tab:
+            self._view_tabs.setCurrentIndex(0)
+
+        self._overlay_canvas.set_highlight_boxes([])
+        self._image_canvas.set_highlight_boxes([])
+        self._active_highlight_boxes = []
+        if os.path.normpath(str(prev_image_path)) != os.path.normpath(str(path)):
+            if hasattr(self, "_roi_session_run_id"):
+                self._roi_session_run_id = None
+            if hasattr(self, "_roi_session_image_path"):
+                self._roi_session_image_path = None
+            if hasattr(self, "_roi_session_started_at"):
+                self._roi_session_started_at = None
+        self._populate_sidebar_history()
+        self._populate_mask_list()
+        self._refresh_ui_state()
+
+    def _apply_loaded_mask(self, path: str, mask: QtGui.QImage) -> None:
+        self._overlay_canvas.set_mask(mask)
+        self._sync_mask_views()
+        self._mask_path = Path(path)
+        self._view_tabs.setCurrentIndex(0)
+        self._sync_path_labels()
+        self._refresh_ui_state()
+
     def _history_rows_from_csv(self, csv_path: Path) -> list[dict]:
         rows: list[dict] = []
         if not csv_path.is_file():
@@ -34,26 +188,127 @@ class MainWindowIOMixin:
             return []
         return rows
 
+    def _rewrite_csv_rows(self, path: Path, rows: list[dict], fieldnames: list[str] | None = None) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if fieldnames is None:
+            fieldnames = list(rows[0].keys()) if rows else []
+        with path.open("w", encoding="utf-8", newline="") as f:
+            if not fieldnames:
+                return
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+
+    def _rewrite_jsonl_rows(self, path: Path, rows: list[dict]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=True, default=str) + "\n")
+
+    def _delete_detection_persisted(self, det: dict) -> None:
+        run_id = str(det.get("run_id") or "").strip()
+        detection_id = str(det.get("detection_id") or "").strip()
+        if not run_id:
+            return
+
+        mask_path = str(det.get("mask_path") or "").strip()
+        if mask_path and os.path.isfile(mask_path):
+            try:
+                os.remove(mask_path)
+            except OSError:
+                pass
+
+        results_root = getattr(self, "_results_dir", None)
+        if not results_root:
+            return
+        run_dir = Path(results_root) / run_id
+        csv_paths = [
+            run_dir / "data" / "data.csv",
+            run_dir / "data" / "detections.csv",
+            run_dir / f"{run_id}_lan_quet_workspace.csv",
+        ]
+
+        def row_matches(row: dict) -> bool:
+            row_run_id = str(row.get("run_id") or "").strip()
+            row_det_id = str(row.get("detection_id") or "").strip()
+            if row_run_id != run_id:
+                return False
+            if detection_id and row_det_id:
+                return row_det_id == detection_id
+            row_mask_path = self._resolve_results_asset_path(row.get("mask_rel") or "", row_run_id)
+            return bool(mask_path) and os.path.normpath(row_mask_path) == os.path.normpath(mask_path)
+
+        for csv_path in csv_paths:
+            if not csv_path.is_file():
+                continue
+            rows = self._history_rows_from_csv(csv_path)
+            if not rows:
+                continue
+            fieldnames = list(rows[0].keys())
+            kept_rows = [row for row in rows if not row_matches(row)]
+            self._rewrite_csv_rows(csv_path, kept_rows, fieldnames)
+
+        jsonl_path = run_dir / "data" / "detections.jsonl"
+        if jsonl_path.is_file():
+            kept_jsonl: list[dict] = []
+            try:
+                with jsonl_path.open("r", encoding="utf-8", newline="") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except Exception:
+                            continue
+                        if not row_matches(row):
+                            kept_jsonl.append(row)
+            except Exception:
+                kept_jsonl = []
+            self._rewrite_jsonl_rows(jsonl_path, kept_jsonl)
+
+    def _resolve_results_asset_path(self, rel_path: str, run_id: str = "") -> str:
+        rel_path = str(rel_path or "").strip()
+        if not rel_path:
+            return ""
+        if os.path.isabs(rel_path):
+            return rel_path
+        results_root = Path(self._results_dir)
+        if run_id and not rel_path.startswith(f"{run_id}/") and not rel_path.startswith(f"{run_id}\\"):
+            return str(results_root / run_id / rel_path)
+        return str(results_root / rel_path)
+
+    def _row_image_path(self, row: dict) -> str:
+        image_rel = (row.get("image_rel") or row.get("image_path") or "").strip()
+        if not image_rel:
+            return ""
+        if os.path.isabs(image_rel):
+            return image_rel
+        return str(Path(self._workspace_root) / image_rel)
+
+    def _iter_run_csv_files(self) -> list[Path]:
+        results_root = Path(self._results_dir)
+        if not results_root.exists():
+            return []
+        files = list(results_root.glob("*/*_lan_quet_workspace.csv"))
+        files.extend(list(results_root.glob("*_lan_quet_workspace.csv")))
+        files.sort(reverse=True)
+        return files
+
     def _detections_from_history_rows(self, rows: list[dict]) -> dict[str, list[dict]]:
         by_image: dict[str, list[dict]] = {}
-        results_root = Path(self._results_dir)
         for row in rows:
-            image_rel = (row.get("image_rel") or row.get("image_path") or "").strip()
-            if not image_rel:
+            image_path = self._row_image_path(row)
+            if not image_path:
                 continue
-            if os.path.isabs(image_rel):
-                image_path = image_rel
-            else:
-                image_path = str(Path(self._workspace_root) / image_rel)
 
-            mask_rel = (row.get("mask_rel") or "").strip()
-            if mask_rel:
-                if os.path.isabs(mask_rel):
-                    mask_path = mask_rel
-                else:
-                    mask_path = str(results_root / mask_rel)
-            else:
-                mask_path = ""
+            run_id = (row.get("run_id") or "").strip()
+            mask_path = self._resolve_results_asset_path(row.get("mask_rel") or "", run_id)
+            overlay_path = self._resolve_results_asset_path(row.get("overlay_rel") or "", run_id)
+            isolate_path = self._resolve_results_asset_path(row.get("isolate_rel") or "", run_id)
+            image_asset_path = self._resolve_results_asset_path(row.get("image_asset_rel") or "", run_id)
+            full_mask_path = self._resolve_results_asset_path(row.get("full_mask_rel") or "", run_id)
 
             score = 0.0
             try:
@@ -66,7 +321,12 @@ class MainWindowIOMixin:
                 "score": score,
                 "model_name": row.get("model") or row.get("model_name") or "Model",
                 "mask_path": mask_path,
+                "overlay_path": overlay_path,
+                "isolate_path": isolate_path,
+                "image_asset_path": image_asset_path,
+                "full_mask_path": full_mask_path,
                 "run_id": row.get("run_id") or "",
+                "detection_id": row.get("detection_id") or "",
             }
             box = (row.get("box") or "").strip()
             if box:
@@ -98,10 +358,13 @@ class MainWindowIOMixin:
             return
         
         csv_path, image_rel = res
-        
-        # Load the run data so we can display it
-        rows = self._history_rows_from_csv(csv_path)
-        by_image = self._detections_from_history_rows(rows)
+
+        def load_history_payload():
+            rows = self._history_rows_from_csv(csv_path)
+            by_image = self._detections_from_history_rows(rows)
+            return rows, by_image
+
+        rows, by_image = self._run_with_loading("History", "Loading history results...", load_history_payload)
         
         run_name = csv_path.name.replace("_lan_quet_workspace.csv", "")
 
@@ -165,29 +428,15 @@ class MainWindowIOMixin:
             return
         
         self._mask_history_tree.clear()
-        
-        # We need the data.csv for this image
         image_path = self._state.image_path
-        img_name = getattr(self, "_sanitize_name", None)
-        if callable(img_name):
-            folder_name = self._sanitize_name(Path(image_path).stem or "image")
-        else:
-            folder_name = Path(image_path).stem or "image"
-
-        results_root = getattr(self, "_results_dir", None)
-        if not results_root:
-            return
-
-        data_csv = Path(results_root) / folder_name / "data.csv"
         rows = []
-        if data_csv.is_file():
-            rows = self._history_rows_from_csv(data_csv)
+        norm_image = os.path.normpath(image_path)
+        for csv_path in self._iter_run_csv_files():
+            for row in self._history_rows_from_csv(csv_path):
+                row_image = self._row_image_path(row)
+                if row_image and os.path.normpath(row_image) == norm_image:
+                    rows.append(row)
 
-        # 1. Add "Current (Unsaved/Session)" if there are detections in memory?
-        # Actually, self._image_detections might contain unsaved runs.
-        # But our spec says "All masks are saved to disk on each detection".
-        # So reading CSV is the source of truth.
-        
         if not rows:
             return
 
@@ -232,31 +481,18 @@ class MainWindowIOMixin:
         if not item:
             return
         run_id = item.data(0, QtCore.Qt.UserRole)
-        
-        # We need to reload detections from CSV for this run (or all)
-        # Because we might have filtered them out of memory.
-        # Although _load_workspace_results loads everything into _image_detections_all.
-        
         if not self._state:
             return
             
         image_path = self._state.image_path
-        
-        # Re-read CSV to be safe/consistent
-        img_name = getattr(self, "_sanitize_name", None)
-        if callable(img_name):
-            folder_name = self._sanitize_name(Path(image_path).stem or "image")
-        else:
-            folder_name = Path(image_path).stem or "image"
-        
-        results_root = getattr(self, "_results_dir", None)
-        if results_root:
-            data_csv = Path(results_root) / folder_name / "data.csv"
-            rows = self._history_rows_from_csv(data_csv)
-        else:
-            rows = []
+        rows = []
+        norm_image = os.path.normpath(image_path)
+        for csv_path in self._iter_run_csv_files():
+            for row in self._history_rows_from_csv(csv_path):
+                row_image = self._row_image_path(row)
+                if row_image and os.path.normpath(row_image) == norm_image:
+                    rows.append(row)
             
-        # Filter
         target_rows = []
         if run_id == "ALL":
             target_rows = rows
@@ -453,63 +689,16 @@ class MainWindowIOMixin:
         if not results_root.exists():
             return
 
-        for sub in results_root.iterdir():
-            if not sub.is_dir():
-                continue
-            data_csv = sub / "data.csv"
-            if not data_csv.is_file():
-                data_csv = sub / "data" / "data.csv"
-                if not data_csv.is_file():
-                    continue
-            try:
-                with data_csv.open("r", encoding="utf-8", newline="") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        image_rel = (row.get("image_rel") or row.get("image_path") or "").strip()
-                        if not image_rel:
-                            continue
-                        if os.path.isabs(image_rel):
-                            image_path = image_rel
-                        else:
-                            image_path = str(Path(self._workspace_root) / image_rel)
+        def load_all_results():
+            rows: list[dict] = []
+            for csv_path in self._iter_run_csv_files():
+                rows.extend(self._history_rows_from_csv(csv_path))
+            return self._detections_from_history_rows(rows)
 
-                        mask_rel = (row.get("mask_rel") or "").strip()
-                        if mask_rel:
-                            if os.path.isabs(mask_rel):
-                                mask_path = mask_rel
-                            else:
-                                mask_path = str(results_root / mask_rel)
-                        else:
-                            mask_path = ""
-
-                        score = 0.0
-                        try:
-                            score = float(row.get("score") or 0.0)
-                        except Exception:
-                            score = 0.0
-
-                        det = {
-                            "label": row.get("label") or "Mask",
-                            "score": score,
-                            "model_name": row.get("model") or row.get("model_name") or "Model",
-                            "mask_path": mask_path,
-                            "run_id": row.get("run_id") or "",
-                        }
-
-                        box = (row.get("box") or "").strip()
-                        if box:
-                            try:
-                                parts = [float(x) for x in box.split(",")]
-                                if len(parts) == 4:
-                                    det["box"] = parts
-                            except Exception:
-                                pass
-
-                        if hasattr(self, "_image_detections_all"):
-                            self._image_detections_all.setdefault(image_path, []).append(det)
-                        self._image_detections.setdefault(image_path, []).append(det)
-            except Exception:
-                continue
+        by_image = self._run_with_loading("Workspace", "Loading workspace results...", load_all_results)
+        if hasattr(self, "_image_detections_all"):
+            self._image_detections_all = {k: list(v) for k, v in by_image.items()}
+        self._image_detections = {k: list(v) for k, v in by_image.items()}
 
         state = getattr(self, "_state", None)
         if state and hasattr(self, "_object_list"):
@@ -522,17 +711,14 @@ class MainWindowIOMixin:
         self._history_list.clear()
         if not hasattr(self, "_results_dir"):
             return
-        results_root = Path(self._results_dir)
-        if not results_root.exists():
-            return
-        items = sorted(
-            list(results_root.glob("*_lan_quet_workspace.csv")) +
-            list(results_root.glob("*/*_lan_quet_workspace.csv"))
-        )
+        items = self._iter_run_csv_files()
         for p in items:
             item = QtWidgets.QListWidgetItem(p.name)
             item.setData(QtCore.Qt.UserRole, str(p))
             self._history_list.addItem(item)
+            
+        if hasattr(self, "_populate_isolate_list"):
+            self._populate_isolate_list()
 
     def _on_history_item_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
         if item is None:
@@ -567,29 +753,7 @@ class MainWindowIOMixin:
     def load_image(self, path: str, switch_tab: bool = True) -> None:
         if not path:
             return
-        try:
-            img = load_image(path)
-        except ImageIoError as e:
-            QtWidgets.QMessageBox.critical(self, "Open Image", str(e))
-            return
-
-        self._state = LoadedState(image_path=path, image_w=img.width(), image_h=img.height())
-        self._overlay_canvas.set_image(img)
-        self._image_canvas.set_image(img)
-
-        blank = new_blank_mask((img.width(), img.height())).mask
-        self._overlay_canvas.set_mask(blank)
-        self._sync_mask_views()
-        self._mask_path = None
-        self._sync_path_labels()
-        self._explorer_panel.select_path(path)
-        if switch_tab:
-            self._view_tabs.setCurrentIndex(0)  # Overlay
-
-        self._overlay_canvas.set_highlight_box(None)
-        self._populate_sidebar_history()
-        self._populate_mask_list()
-        self._refresh_ui_state()
+        self._start_async_io_job(kind="image", path=path, switch_tab=switch_tab)
 
     def open_mask_dialog(self) -> None:
         if self._state is None:
@@ -605,17 +769,11 @@ class MainWindowIOMixin:
         )
         if not path:
             return
-        try:
-            loaded = load_mask(path, (self._state.image_w, self._state.image_h))
-        except ImageIoError as e:
-            QtWidgets.QMessageBox.critical(self, "Open Mask", str(e))
-            return
-        self._overlay_canvas.set_mask(loaded.mask)
-        self._sync_mask_views()
-        self._mask_path = Path(path)
-        self._view_tabs.setCurrentIndex(0)
-        self._sync_path_labels()
-        self._refresh_ui_state()
+        self._start_async_io_job(
+            kind="mask",
+            path=path,
+            expected_size=(self._state.image_w, self._state.image_h),
+        )
 
     def save_mask_dialog(self) -> None:
         if self._state is None or self._overlay_canvas.mask().isNull():
@@ -645,16 +803,177 @@ class MainWindowIOMixin:
         if not path:
             return
         try:
-            if selected.startswith("PNG (0/1"):
-                save_mask_png_01_indexed(path, self._overlay_canvas.mask())
-            else:
-                save_mask_png_0255(path, self._overlay_canvas.mask())
+            def do_save():
+                if selected.startswith("PNG (0/1"):
+                    save_mask_png_01_indexed(path, self._overlay_canvas.mask())
+                else:
+                    save_mask_png_0255(path, self._overlay_canvas.mask())
+
+            self._run_with_loading("Export Mask", "Saving mask...", do_save)
         except ImageIoError as e:
             QtWidgets.QMessageBox.critical(self, "Save Mask", str(e))
             return
         self._mask_path = Path(path)
         self._sync_path_labels()
         self._refresh_ui_state()
+
+    def save_image_dialog(self) -> None:
+        if self._state is None:
+            QtWidgets.QMessageBox.critical(self, "Export Image", "No image to export.")
+            return
+
+        image = self._image_canvas.image()
+        if image.isNull():
+            image = self._overlay_canvas.image()
+        if image.isNull():
+            QtWidgets.QMessageBox.critical(self, "Export Image", "No image to export.")
+            return
+
+        base = Path(self._state.image_path).stem
+        default_dir = Path(self._state.image_path).parent
+        default_path = os.path.join(default_dir, f"{base}_image.png")
+        path, _selected = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Image As",
+            str(default_path),
+            "PNG (*.png);;JPEG (*.jpg *.jpeg);;BMP (*.bmp)",
+        )
+        if not path:
+            return
+        ok = self._run_with_loading("Export Image", "Saving image...", lambda: image.save(path))
+        if not ok:
+            QtWidgets.QMessageBox.critical(self, "Export Image", f"Failed to save image: {path}")
+
+    def _build_overlay_export_image(self) -> QtGui.QImage:
+        base = self._overlay_canvas.image()
+        if base.isNull():
+            return QtGui.QImage()
+
+        result = base.copy()
+        overlay = self._overlay_canvas.overlay_visual()
+        if not overlay.isNull():
+            painter = QtGui.QPainter(result)
+            painter.setOpacity(self._overlay_canvas.canvas_state().overlay_opacity / 255.0)
+            painter.drawImage(0, 0, overlay)
+            painter.end()
+            return result
+
+        mask = self._overlay_canvas.mask()
+        if mask.isNull():
+            return result
+
+        overlay = mask.convertToFormat(QtGui.QImage.Format_Indexed8)
+        color_table = []
+        opacity = self._overlay_canvas.canvas_state().overlay_opacity
+        for i in range(256):
+            alpha = (i * opacity) // 255
+            color_table.append(QtGui.QColor(255, 0, 0, alpha).rgba())
+        overlay.setColorTable(color_table)
+
+        painter = QtGui.QPainter(result)
+        painter.drawImage(0, 0, overlay)
+        painter.end()
+        return result
+
+    def _build_overlay_boxes_export_image(self) -> QtGui.QImage:
+        result = self._build_overlay_export_image()
+        if result.isNull():
+            return result
+
+        boxes = list(getattr(self, "_active_highlight_boxes", []) or [])
+        if not boxes:
+            return result
+
+        painter = QtGui.QPainter(result)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+
+        for rect, label in boxes:
+            color = self._label_color(label)
+            painter.setPen(QtGui.QPen(color, 2))
+            painter.drawRect(rect)
+            if label:
+                font = painter.font()
+                font.setPointSize(10)
+                painter.setFont(font)
+                fm = painter.fontMetrics()
+                text_rect = fm.boundingRect(label)
+                bg_rect = QtCore.QRectF(
+                    rect.left(),
+                    max(0.0, rect.top() - text_rect.height() - 4),
+                    text_rect.width() + 6,
+                    text_rect.height() + 4,
+                )
+                if bg_rect.top() < 0:
+                    bg_rect.moveTop(rect.top())
+                painter.setPen(QtCore.Qt.PenStyle.NoPen)
+                bg_color = QtGui.QColor(color)
+                bg_color.setAlpha(180)
+                painter.setBrush(bg_color)
+                painter.drawRect(bg_rect)
+                painter.setPen(QtGui.QColor(0, 0, 0))
+                painter.drawText(bg_rect, QtCore.Qt.AlignmentFlag.AlignCenter, label)
+                painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+
+        painter.end()
+        return result
+
+    def save_overlay_dialog(self) -> None:
+        if self._state is None:
+            QtWidgets.QMessageBox.critical(self, "Export Overlay", "No overlay to export.")
+            return
+
+        overlay = self._run_with_loading("Export Overlay", "Preparing overlay...", self._build_overlay_export_image)
+        if overlay.isNull():
+            QtWidgets.QMessageBox.critical(self, "Export Overlay", "No overlay to export.")
+            return
+
+        base = Path(self._state.image_path).stem
+        default_dir = Path(self._state.image_path).parent
+        default_path = os.path.join(default_dir, f"{base}_overlay.png")
+        path, _selected = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Overlay As",
+            str(default_path),
+            "PNG (*.png);;JPEG (*.jpg *.jpeg);;BMP (*.bmp)",
+        )
+        if not path:
+            return
+        ok = self._run_with_loading("Export Overlay", "Saving overlay...", lambda: overlay.save(path))
+        if not ok:
+            QtWidgets.QMessageBox.critical(self, "Export Overlay", f"Failed to save overlay: {path}")
+
+    def save_overlay_boxes_dialog(self) -> None:
+        if self._state is None:
+            QtWidgets.QMessageBox.critical(self, "Export Overlay + Boxes", "No image to export.")
+            return
+
+        image = self._run_with_loading(
+            "Export Overlay + Boxes",
+            "Preparing overlay and boxes...",
+            self._build_overlay_boxes_export_image,
+        )
+        if image.isNull():
+            QtWidgets.QMessageBox.critical(self, "Export Overlay + Boxes", "No overlay/boxes to export.")
+            return
+
+        base = Path(self._state.image_path).stem
+        default_dir = Path(self._state.image_path).parent
+        default_path = os.path.join(default_dir, f"{base}_overlay_boxes.png")
+        path, _selected = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Overlay + Boxes As",
+            str(default_path),
+            "PNG (*.png);;JPEG (*.jpg *.jpeg);;BMP (*.bmp)",
+        )
+        if not path:
+            return
+        ok = self._run_with_loading(
+            "Export Overlay + Boxes",
+            "Saving overlay and boxes...",
+            lambda: image.save(path),
+        )
+        if not ok:
+            QtWidgets.QMessageBox.critical(self, "Export Overlay + Boxes", f"Failed to save image: {path}")
 
     def _sync_brush_slider(self, radius: int) -> None:
         if self._brush_slider.value() == radius:
@@ -669,8 +988,13 @@ class MainWindowIOMixin:
         self._brush_value.setText(f"{radius} px")
 
     def _sync_mask_views(self) -> None:
-        self._mask_canvas.set_mask(self._overlay_canvas.mask())
-        self._mask_canvas.update()
+        if getattr(self, "_mask_canvas", None) is not None and getattr(self, "_overlay_canvas", None) is not None:
+            self._mask_canvas.set_mask(self._overlay_canvas.mask())
+            self._mask_canvas.set_overlay_visual(self._overlay_canvas.overlay_visual())
+            # Sync highlight boxes to mask canvas if available
+            if hasattr(self, "_active_highlight_boxes"):
+                self._mask_canvas.set_highlight_boxes(self._active_highlight_boxes)
+            self._mask_canvas.update()
 
     def _on_cursor_info(self, x: int, y: int, v: int) -> None:
         self._status_label.setText(f"x={x}  y={y}  mask={v}")
@@ -716,72 +1040,69 @@ class MainWindowIOMixin:
             QtWidgets.QMessageBox.warning(self, "Compare", "Invalid GT folder.")
             return
 
-        results_root = Path(self._results_dir)
-        # Find all run dirs (we use glob to find directories with data.csv inside)
-        # We need to find the latest run
-        run_dirs = []
-        for d in results_root.iterdir():
-             if d.is_dir() and d.name != "models":
-                 # In the new structure, data.csv is saved in the 'data' subfolder
-                 # and a run-level csv is also saved directly in the run_id folder.
-                 if (d / "data" / "data.csv").exists() or list(d.glob("*_lan_quet_workspace.csv")):
-                      run_dirs.append(d)
-        
-        # Sort by creation time / name desc
-        run_dirs = sorted(run_dirs, reverse=True)
-        if not run_dirs:
-             QtWidgets.QMessageBox.warning(self, "Compare", "No runs found.")
-             return
-             
-        latest_run = run_dirs[0]
-        mask_dir = latest_run / "mask"
-        
-        if not mask_dir.exists():
-            QtWidgets.QMessageBox.warning(self, "Compare", f"No mask folder in latest run ({latest_run.name}).")
-            return
-            
-        pred_masks = list(mask_dir.glob("*.png"))
-        if not pred_masks:
-            QtWidgets.QMessageBox.warning(self, "Compare", "No masks found in latest run.")
-            return
+        def do_compare():
+            results_root = Path(self._results_dir)
+            run_dirs = []
+            for d in results_root.iterdir():
+                 if d.is_dir() and d.name != "models":
+                     if (d / "data" / "data.csv").exists() or list(d.glob("*_lan_quet_workspace.csv")):
+                          run_dirs.append(d)
 
-        results = []
-        for p_mask_path in pred_masks:
-             img_name = p_mask_path.name
-             gt_files = list(Path(gt_dir).glob("*.png")) + list(Path(gt_dir).glob("*.jpg"))
-             best_match = None
-             
-             # simple matching logic
-             for gf in gt_files:
-                  # Exact match (stem or name)
-                  if gf.name == img_name or gf.stem == p_mask_path.stem:
-                      best_match = gf
-                      break
-                  if prefix:
-                      if gf.stem == f"{prefix}{p_mask_path.stem}" or gf.stem == f"{p_mask_path.stem}{prefix}":
-                          best_match = gf
-                          break
+            run_dirs = sorted(run_dirs, reverse=True)
+            if not run_dirs:
+                return None, "No runs found."
 
-             if not best_match:
-                 continue
-                 
-             pm_img = cv2.imread(str(p_mask_path), cv2.IMREAD_GRAYSCALE)
-             gt_img = cv2.imread(str(best_match), cv2.IMREAD_GRAYSCALE)
-             
-             if pm_img is None or gt_img is None:
-                 continue
-                 
-             # Resize to match if needed
-             if pm_img.shape != gt_img.shape:
-                 gt_img = cv2.resize(gt_img, (pm_img.shape[1], pm_img.shape[0]), interpolation=cv2.INTER_NEAREST)
-                 
-             dice, iou = compute_dice_iou(pm_img, gt_img)
-             results.append({
-                 "image": img_name,
-                 "gt_mask": best_match.name,
-                 "dice": dice,
-                 "iou": iou
-             })
+            latest_run = run_dirs[0]
+            mask_dir = latest_run / "mask"
+
+            if not mask_dir.exists():
+                return None, f"No mask folder in latest run ({latest_run.name})."
+
+            pred_masks = list(mask_dir.glob("*.png")) + list(mask_dir.glob("*.jpg")) + list(mask_dir.glob("*.jpeg"))
+            if not pred_masks:
+                return None, "No masks found in latest run."
+
+            results = []
+            gt_files = list(Path(gt_dir).glob("*.png")) + list(Path(gt_dir).glob("*.jpg"))
+            for p_mask_path in pred_masks:
+                img_name = p_mask_path.name
+                best_match = None
+
+                for gf in gt_files:
+                    if gf.name == img_name or gf.stem == p_mask_path.stem:
+                        best_match = gf
+                        break
+                    if prefix:
+                        if gf.stem == f"{prefix}{p_mask_path.stem}" or gf.stem == f"{p_mask_path.stem}{prefix}":
+                            best_match = gf
+                            break
+
+                if not best_match:
+                    continue
+
+                pm_img = cv2.imread(str(p_mask_path), cv2.IMREAD_GRAYSCALE)
+                gt_img = cv2.imread(str(best_match), cv2.IMREAD_GRAYSCALE)
+
+                if pm_img is None or gt_img is None:
+                    continue
+
+                if pm_img.shape != gt_img.shape:
+                    gt_img = cv2.resize(gt_img, (pm_img.shape[1], pm_img.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+                dice, iou = compute_dice_iou(pm_img, gt_img)
+                results.append({
+                    "image": img_name,
+                    "gt_mask": best_match.name,
+                    "dice": dice,
+                    "iou": iou
+                })
+
+            return results, None
+
+        results, error = self._run_with_loading("Compare", "Comparing masks...", do_compare)
+        if error:
+            QtWidgets.QMessageBox.warning(self, "Compare", error)
+            return
              
         if not results:
              QtWidgets.QMessageBox.information(self, "Compare", "No matching masks found between GT folder and predictions.")

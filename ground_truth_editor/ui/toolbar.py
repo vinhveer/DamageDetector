@@ -8,6 +8,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 @dataclass(frozen=True)
 class ToolbarActions:
     predict_with: QtGui.QAction
+    predict_roi: QtGui.QAction
     isolate_object: QtGui.QAction
     model_settings: QtGui.QAction
     open_folder: QtGui.QAction
@@ -57,7 +58,7 @@ class ToolbarController:
         a = self._actions
 
         groups: list[list[QtGui.QAction]] = [
-            [a.predict_with],
+            [a.predict_with, a.predict_roi],
             [a.model_settings],
             [a.open_folder, a.open_image],
             [a.open_mask, a.save_mask],

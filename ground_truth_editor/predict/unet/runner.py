@@ -133,7 +133,10 @@ class UnetRunner:
         )
         if log_fn is not None:
             log_fn("UNet finished.")
-        return dict(details)
+            
+        res = dict(details)
+        res["image_path"] = str(image_path)
+        return res
 
     def run_rois(
         self,
@@ -242,5 +245,6 @@ class UnetRunner:
         return {
             "mask_path": mask_path,
             "overlay_path": overlay_path,
-            "output_dir": params.output_dir
+            "output_dir": params.output_dir,
+            "image_path": str(image_path),
         }

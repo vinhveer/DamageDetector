@@ -6,6 +6,8 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen, QWheelEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
+from color_utils import label_color
+
 
 @dataclass(frozen=True)
 class CanvasState:
@@ -40,6 +42,7 @@ class ImageCanvas(QWidget):
         self._image = QImage()
         self._mask = QImage()  # QImage.Format_Grayscale8, 0/255
         self._overlay_cache = QImage()
+        self._overlay_visual = QImage()
         self._overlay_dirty = False
 
         self._overlay_opacity = 120
@@ -56,7 +59,7 @@ class ImageCanvas(QWidget):
         self._roi_start: QPoint | None = None
         self._roi_end: QPoint | None = None
         
-        self._highlight_box: QRectF | None = None
+        self._highlight_boxes: list[tuple[QRectF, str]] = []
 
         self._overlay_timer = QTimer(self)
         self._overlay_timer.setSingleShot(True)
@@ -75,6 +78,7 @@ class ImageCanvas(QWidget):
     def set_image(self, image: QImage) -> None:
         self._image = image
         self._overlay_cache = QImage()
+        self._overlay_visual = QImage()
         self._overlay_dirty = True
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
@@ -83,6 +87,7 @@ class ImageCanvas(QWidget):
 
     def set_mask(self, mask: QImage) -> None:
         self._mask = mask
+        self._overlay_visual = QImage()
         self._request_overlay_update()
         self._emit_state()
         self.update()
@@ -92,6 +97,13 @@ class ImageCanvas(QWidget):
 
     def mask(self) -> QImage:
         return self._mask
+
+    def overlay_visual(self) -> QImage:
+        return self._overlay_visual
+
+    def set_overlay_visual(self, overlay: QImage) -> None:
+        self._overlay_visual = overlay
+        self.update()
 
     def set_brush_radius(self, radius: int) -> None:
         new_radius = max(1, int(radius))
@@ -142,8 +154,8 @@ class ImageCanvas(QWidget):
         self.roiSelected.emit(roi_box)
         self.update()
 
-    def set_highlight_box(self, box: QRectF | None) -> None:
-        self._highlight_box = box
+    def set_highlight_boxes(self, boxes: list[tuple[QRectF, str]]) -> None:
+        self._highlight_boxes = boxes
         self.update()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -157,43 +169,92 @@ class ImageCanvas(QWidget):
 
         target = self._target_rect()
         if self._render_mode == "mask":
-            if self._mask.isNull():
+            if not self._overlay_visual.isNull():
+                painter.drawImage(target, self._overlay_visual)
+            elif self._mask.isNull():
                 painter.setPen(QColor(220, 220, 220))
                 painter.drawText(self.rect(), Qt.AlignCenter, "No mask")
                 return
-            painter.drawImage(target, self._mask)
+            else:
+                painter.drawImage(target, self._mask)
         else:
             painter.drawImage(target, self._image)
 
-        if self._render_mode == "overlay" and (not self._mask.isNull()) and (not self._overlay_cache.isNull()):
-            painter.drawImage(target, self._overlay_cache)
+        if self._render_mode == "overlay" and (not self._overlay_visual.isNull()):
+            if not self._roi_mode:
+                painter.save()
+                painter.setOpacity(self._overlay_opacity / 255.0)
+                painter.drawImage(target, self._overlay_visual)
+                painter.restore()
+        elif self._render_mode == "overlay" and (not self._mask.isNull()) and (not self._overlay_cache.isNull()):
+            if not self._roi_mode:
+                painter.drawImage(target, self._overlay_cache)
 
         if self._render_mode == "overlay" and self._roi_mode:
             self._draw_roi_rect(painter, target)
         elif self._render_mode == "overlay" and self._editable:
             self._draw_brush_cursor(painter, target)
             
-        if self._highlight_box is not None:
-            self._draw_highlight_box(painter, target)
+        if getattr(self, "_highlight_boxes", None) and self._render_mode in ("overlay", "image", "mask"):
+            self._draw_highlight_boxes(painter, target)
 
-    def _draw_highlight_box(self, painter: QPainter, target: QRectF) -> None:
-        if self._image.isNull():
+    def _draw_highlight_boxes(self, painter: QPainter, target: QRectF) -> None:
+        if not getattr(self, "_highlight_boxes", None):
              return
         
-        # _highlight_box is in image coordinates (x, y, w, h)
-        # Convert to widget coords
-        # Top-left
-        tl = self._image_to_widget(self._highlight_box.topLeft(), target)
-        # Bottom-right
-        br = self._image_to_widget(self._highlight_box.bottomRight(), target)
-        
-        rect = QRectF(tl, br).normalized()
-        
-        # Draw box
-        pen = QPen(QColor(0, 255, 255), 3, Qt.PenStyle.SolidLine)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRect(rect)
+        has_base = False
+        if not self._image.isNull() and self._image.width() > 0:
+            has_base = True
+        elif not self._mask.isNull() and self._mask.width() > 0:
+            has_base = True
+            
+        if not has_base:
+            return
+
+        for box, label in self._highlight_boxes:
+            color = self._color_from_label(label)
+            # Convert to widget coords
+            tl = self._image_to_widget(box.topLeft(), target)
+            br = self._image_to_widget(box.bottomRight(), target)
+            
+            rect = QRectF(tl, br).normalized()
+            
+            # Draw box
+            pen = QPen(color, 2, Qt.PenStyle.SolidLine)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+            
+            # Draw label if available
+            if label:
+                # Calculate text size to draw a background for better readability
+                font = painter.font()
+                font.setPointSize(10)
+                painter.setFont(font)
+                
+                fm = painter.fontMetrics()
+                text_rect = fm.boundingRect(label)
+                
+                # Position text above top-left corner
+                bg_rect = QRectF(rect.left(), rect.top() - text_rect.height() - 4, text_rect.width() + 6, text_rect.height() + 4)
+                
+                # If text goes above canvas, put it inside the box instead
+                if bg_rect.top() < target.top():
+                    bg_rect = QRectF(rect.left(), rect.top(), text_rect.width() + 6, text_rect.height() + 4)
+                
+                # Draw background
+                painter.setPen(Qt.NoPen)
+                bg_color = QColor(color)
+                bg_color.setAlpha(180)
+                painter.setBrush(bg_color)
+                painter.drawRect(bg_rect)
+                
+                # Draw text
+                painter.setPen(QColor(0, 0, 0)) # Black text
+                painter.drawText(bg_rect, Qt.AlignCenter, label)
+
+    def _color_from_label(self, label: str) -> QColor:
+        return label_color(label)
 
     def _draw_roi_rect(self, painter: QPainter, target: QRectF) -> None:
         if self._roi_start is None or self._roi_end is None or self._image.isNull():
@@ -228,10 +289,16 @@ class ImageCanvas(QWidget):
 
     def _target_rect(self) -> QRectF:
         w, h = self.width(), self.height()
-        if self._render_mode == "mask" and self._image.isNull() and (not self._mask.isNull()):
-            iw, ih = self._mask.width(), self._mask.height()
+        
+        # Determine the base dimensions consistently based on what is actually loaded.
+        # This prevents the mask tab from scaling differently than the image tab if they somehow differ.
+        if not self._image.isNull():
+             iw, ih = self._image.width(), self._image.height()
+        elif not self._mask.isNull():
+             iw, ih = self._mask.width(), self._mask.height()
         else:
-            iw, ih = self._image.width(), self._image.height()
+             return QRectF()
+                 
         if iw <= 0 or ih <= 0 or w <= 0 or h <= 0:
             return QRectF()
 
@@ -245,23 +312,42 @@ class ImageCanvas(QWidget):
     def _widget_to_image(self, pt: QPointF, target: QRectF) -> QPoint | None:
         if target.isNull() or not target.contains(pt):
             return None
-        base_w = self._mask.width() if (self._render_mode == "mask" and self._image.isNull() and (not self._mask.isNull())) else self._image.width()
-        base_h = self._mask.height() if (self._render_mode == "mask" and self._image.isNull() and (not self._mask.isNull())) else self._image.height()
+        
+        if not self._image.isNull():
+             base_w = self._image.width()
+             base_h = self._image.height()
+        elif not self._mask.isNull():
+             base_w = self._mask.width()
+             base_h = self._mask.height()
+        else:
+             return None
+                 
         if base_w <= 0 or base_h <= 0:
             return None
+            
         scale = target.width() / base_w
         x = int((pt.x() - target.left()) / scale)
         y = int((pt.y() - target.top()) / scale)
-        if x < 0 or y < 0 or x >= base_w or y >= base_h:
-            return None
+        # Allow slight out of bounds for drawing or highlighting if necessary, but keep it constrained
+        if x < 0: x = 0
+        if y < 0: y = 0
+        if x >= base_w: x = base_w - 1
+        if y >= base_h: y = base_h - 1
         return QPoint(x, y)
 
     def _image_to_widget(self, pt: QPointF, target: QRectF) -> QPointF:
-        base_w = self._mask.width() if (self._render_mode == "mask" and self._image.isNull() and (not self._mask.isNull())) else self._image.width()
+        if not self._image.isNull():
+             base_w = self._image.width()
+        elif not self._mask.isNull():
+             base_w = self._mask.width()
+        else:
+             return QPointF()
+             
         if base_w <= 0:
             return QPointF()
+            
         scale = target.width() / base_w
-        return QPointF(target.left() + pt.x() * scale, target.top() + pt.y() * scale)
+        return QPointF(target.left() + (pt.x() * scale), target.top() + (pt.y() * scale))
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self._render_mode == "overlay" and self._roi_mode and event.button() == Qt.LeftButton:

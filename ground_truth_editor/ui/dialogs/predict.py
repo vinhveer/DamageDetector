@@ -75,11 +75,17 @@ class PredictRunDialog(QtWidgets.QDialog):
 
         self.rb_sam_dino = QtWidgets.QRadioButton("SAM + DINO", model_group)
         self.rb_sam_dino_ft = QtWidgets.QRadioButton("SAM + DINO + Finetune (LoRA)", model_group)
+        self.rb_sam_only = QtWidgets.QRadioButton("SAM Only (no DINO)", model_group)
+        self.rb_sam_only_ft = QtWidgets.QRadioButton("SAM Only + Finetune (no DINO)", model_group)
+        self.rb_sam_tiled = QtWidgets.QRadioButton("SAM + DINO Tiled (Crack only)", model_group)
         self.rb_unet = QtWidgets.QRadioButton("UNet + DINO", model_group)
         self.rb_sam_dino.setChecked(True)
 
         mg_layout.addWidget(self.rb_sam_dino)
         mg_layout.addWidget(self.rb_sam_dino_ft)
+        mg_layout.addWidget(self.rb_sam_only)
+        mg_layout.addWidget(self.rb_sam_only_ft)
+        mg_layout.addWidget(self.rb_sam_tiled)
         mg_layout.addWidget(self.rb_unet)
         layout.addWidget(model_group)
 
@@ -119,6 +125,12 @@ class PredictRunDialog(QtWidgets.QDialog):
     def get_result(self) -> tuple[str, str]:
         if self.rb_sam_dino_ft.isChecked():
             mode = "sam_dino_ft"
+        elif self.rb_sam_only.isChecked():
+            mode = "sam_only"
+        elif self.rb_sam_only_ft.isChecked():
+            mode = "sam_only_ft"
+        elif self.rb_sam_tiled.isChecked():
+            mode = "sam_tiled"
         elif self.rb_unet.isChecked():
             mode = "unet"
         else:
@@ -525,8 +537,8 @@ class PredictDialog(QtWidgets.QDialog):
         gdino_layout.addWidget(dino_cfg)
 
         device = QtWidgets.QComboBox(page)
-        device.addItems(["cpu", "auto", "cuda"])
-        device.setCurrentText(str(settings.get("device") or "cpu"))
+        device.addItems(["cuda", "cpu", "auto"])
+        device.setCurrentText(str(settings.get("device") or "cuda"))
         gdino_layout.addWidget(QtWidgets.QLabel("Device (SAM + DINO)", gdino_group))
         gdino_layout.addWidget(device)
         layout.addWidget(gdino_group)

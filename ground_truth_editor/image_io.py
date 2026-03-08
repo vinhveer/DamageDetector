@@ -3,8 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QImage, QImageReader
+
+# Disable QImage memory allocation limit (Qt defaults to 256MB)
+QImageReader.setAllocationLimit(0)
 
 
 class ImageIoError(RuntimeError):
@@ -28,13 +32,10 @@ def load_image(path: str | Path) -> QImage:
 def _threshold_to_binary_grayscale(image: QImage) -> QImage:
     gray = image.convertToFormat(QImage.Format_Grayscale8)
     w, h = gray.width(), gray.height()
-    buf = gray.bits()
     bpl = gray.bytesPerLine()
-
-    for y in range(h):
-        row = buf[y * bpl : y * bpl + w]
-        for x in range(w):
-            row[x] = 255 if row[x] else 0
+    buf = gray.bits()
+    arr = np.frombuffer(buf, dtype=np.uint8).reshape((h, bpl))
+    arr[:, :w] = np.where(arr[:, :w] > 0, 255, 0).astype(np.uint8)
 
     return gray
 

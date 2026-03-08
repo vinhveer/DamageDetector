@@ -34,9 +34,13 @@ class MainWindow(
         self.resize(1400, 860)
         self._thread: QtCore.QThread | None = None
         self._worker: WorkerBase | None = None
+        self._io_thread: QtCore.QThread | None = None
+        self._io_worker: QtCore.QObject | None = None
         self._active_stop_btn: QtWidgets.QPushButton | None = None
         self._active_log_widget: QtWidgets.QPlainTextEdit | None = None
         self._progress_dialog: ProcessingDialog | None = None
+        self._io_progress_dialog: QtWidgets.QProgressDialog | None = None
+        self._active_io_job: dict | None = None
         self._post_run_action: dict | None = None
 
         self._state: LoadedState | None = None
@@ -45,6 +49,10 @@ class MainWindow(
         self._current_run_id: str | None = None
         self._current_run_scope: str | None = None
         self._current_run_started_at: str | None = None
+        self._roi_session_run_id: str | None = None
+        self._roi_session_image_path: str | None = None
+        self._roi_session_started_at: str | None = None
+        self._append_results_mode = False
 
         self._overlay_canvas = ImageCanvas(self, render_mode="overlay", editable=True)
         self._image_canvas = ImageCanvas(self, render_mode="image", editable=False)

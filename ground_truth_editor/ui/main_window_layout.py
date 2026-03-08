@@ -4,10 +4,33 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from color_utils import label_color
 from .utils import browse_dir, browse_file
 
 
 class MainWindowLayoutMixin:
+    def _label_color(self, label: str) -> QtGui.QColor:
+        return label_color(label)
+
+    def _detection_key(self, det: dict) -> str:
+        det_id = str(det.get("detection_id") or "").strip()
+        if det_id:
+            return det_id
+        box = det.get("box") or []
+        if isinstance(box, (list, tuple)) and len(box) == 4:
+            box_text = ",".join(str(float(x)) for x in box)
+        else:
+            box_text = ""
+        return "|".join(
+            [
+                str(det.get("run_id") or ""),
+                str(det.get("model_name") or ""),
+                str(det.get("label") or ""),
+                str(det.get("score") or ""),
+                box_text,
+            ]
+        )
+
     def _get_detections_for_image(self, image_path: str) -> list[dict]:
         if not image_path:
             return []
@@ -63,12 +86,14 @@ class MainWindowLayoutMixin:
         self._image_tools_tab = self._build_tab_editor()
         self._mask_tab = self._build_tab_mask()
         self._compare_tab = self._build_tab_compare()
+        self._isolate_tab = self._build_tab_isolate()
 
         self._left_tabs.addTab(self._explorer_tab, "Explorer")
         self._left_tabs.addTab(self._history_tab, "History")
         self._left_tabs.addTab(self._image_tools_tab, "Image Tools")
         self._left_tabs.addTab(self._mask_tab, "Mask")
         self._left_tabs.addTab(self._compare_tab, "Compare")
+        self._left_tabs.addTab(self._isolate_tab, "Isolate")
         layout.addWidget(self._left_tabs, 1)
         return sidebar
 
@@ -107,6 +132,68 @@ class MainWindowLayoutMixin:
         layout.addWidget(self._compare_panel)
         return tab
 
+    def _build_tab_isolate(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget(self)
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        layout.addWidget(QtWidgets.QLabel("Isolated Objects:", tab))
+        
+        self._isolate_list = QtWidgets.QListWidget(tab)
+        self._isolate_list.itemClicked.connect(self._on_isolate_item_clicked)
+        layout.addWidget(self._isolate_list, 1)
+
+        self._btn_refresh_isolate = QtWidgets.QPushButton("Refresh", tab)
+        self._btn_refresh_isolate.clicked.connect(self._populate_isolate_list)
+        layout.addWidget(self._btn_refresh_isolate)
+
+        return tab
+
+    def _populate_isolate_list(self) -> None:
+        if not hasattr(self, "_isolate_list"):
+            return
+        self._isolate_list.clear()
+        if not hasattr(self, "_iter_run_csv_files") or not hasattr(self, "_history_rows_from_csv"):
+            return
+
+        import os
+
+        seen = set()
+        isolate_items = []
+        try:
+            for csv_path in self._iter_run_csv_files():
+                rows = self._history_rows_from_csv(csv_path)
+                for row in rows:
+                    isolate_path = ""
+                    if hasattr(self, "_resolve_results_asset_path"):
+                        isolate_path = self._resolve_results_asset_path(
+                            row.get("isolate_rel") or "",
+                            (row.get("run_id") or ""),
+                        )
+                    if not isolate_path or not os.path.isfile(isolate_path):
+                        continue
+                    key = (row.get("run_id") or "", isolate_path)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    isolate_items.append((row.get("run_id") or "-", isolate_path))
+        except Exception:
+            pass
+
+        for run_id, isolate_path in isolate_items:
+            item = QtWidgets.QListWidgetItem(f"{run_id} - {os.path.basename(isolate_path)}")
+            item.setData(QtCore.Qt.UserRole, isolate_path)
+            self._isolate_list.addItem(item)
+            
+    def _on_isolate_item_clicked(self, item: QtWidgets.QListWidgetItem) -> None:
+        if item is None:
+            return
+        path = item.data(QtCore.Qt.UserRole)
+        import os
+        if path and os.path.isfile(path):
+            self.load_image(path, switch_tab=True)
+
     def _build_tab_history(self) -> QtWidgets.QWidget:
         tab = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(tab)
@@ -144,11 +231,19 @@ class MainWindowLayoutMixin:
         layout.addWidget(self._mask_history_tree, 1)
 
         # Object/Mask List
-        layout.addWidget(QtWidgets.QLabel("Mask List", tab))
+        list_header = QtWidgets.QHBoxLayout()
+        list_header.addWidget(QtWidgets.QLabel("Mask List", tab))
+        list_header.addStretch(1)
+        self._btn_mask_tick_all = QtWidgets.QPushButton("Tick All", tab)
+        self._btn_mask_tick_all.clicked.connect(self._check_all_mask_items)
+        list_header.addWidget(self._btn_mask_tick_all)
+        layout.addLayout(list_header)
         self._object_list = QtWidgets.QListWidget(tab)
         self._object_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._object_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self._object_list.itemSelectionChanged.connect(self._on_object_selection_changed)
         self._object_list.itemChanged.connect(self._on_object_item_changed)
+        self._object_list.customContextMenuRequested.connect(self._show_object_list_context_menu)
         layout.addWidget(self._object_list, 2)
 
         return tab
@@ -156,12 +251,28 @@ class MainWindowLayoutMixin:
     # _build_tab_object removed
 
     def _populate_mask_list(self) -> None:
+        existing_checked: dict[str, bool] = {}
+        if hasattr(self, "_state") and self._state and self._object_list.count() > 0:
+            current_dets = self._get_detections_for_image(self._state.image_path)
+            for i in range(self._object_list.count()):
+                item = self._object_list.item(i)
+                if item is None:
+                    continue
+                idx = int(item.data(QtCore.Qt.UserRole))
+                if 0 <= idx < len(current_dets):
+                    existing_checked[self._detection_key(current_dets[idx])] = (
+                        item.checkState() == QtCore.Qt.CheckState.Checked
+                    )
+
+        blocker = QtCore.QSignalBlocker(self._object_list)
         self._object_list.clear()
         if not self._state:
+            del blocker
             return
 
         dets = self._get_detections_for_image(self._state.image_path)
         if not dets:
+            del blocker
             self._update_composite_mask()
             return
 
@@ -186,43 +297,129 @@ class MainWindowLayoutMixin:
             item = QtWidgets.QListWidgetItem(text)
             item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
             
-            # Check if this item belongs to the latest run (or if we have no run info at all)
-            # This ensures that when we click an image, we see the most recent detection, not a mess of all history.
+            det_key = self._detection_key(det)
             is_latest = (rid == latest_run_id) or (not latest_run_id)
-            item.setCheckState(QtCore.Qt.CheckState.Checked if is_latest else QtCore.Qt.CheckState.Unchecked)
+            checked = det.get("_checked")
+            if checked is None:
+                checked = existing_checked.get(det_key, is_latest)
+            item.setCheckState(QtCore.Qt.CheckState.Checked if checked else QtCore.Qt.CheckState.Unchecked)
             
             item.setData(QtCore.Qt.UserRole, i)
             self._object_list.addItem(item)
 
+        del blocker
         self._update_composite_mask()
 
     def _on_object_item_changed(self, item: QtWidgets.QListWidgetItem) -> None:
+        if self._state and item is not None:
+            dets = self._get_detections_for_image(self._state.image_path)
+            idx = int(item.data(QtCore.Qt.UserRole))
+            if 0 <= idx < len(dets):
+                dets[idx]["_checked"] = item.checkState() == QtCore.Qt.CheckState.Checked
         self._update_composite_mask()
 
     def _on_object_selection_changed(self) -> None:
-        items = self._object_list.selectedItems()
-        if not items:
-            self._overlay_canvas.set_highlight_box(None)
-            self._update_composite_mask()
+        # Just update composite mask to show checked items, 
+        # selection highlight is now disabled since we show boxes 
+        # based on what is checked.
+        pass
+
+    def _check_all_mask_items(self) -> None:
+        if not self._state:
             return
 
-        # Highlight last selected
-
-        item = items[-1]
-        idx = int(item.data(QtCore.Qt.UserRole))
-        if self._state:
-            dets = self._get_detections_for_image(self._state.image_path)
+        dets = self._get_detections_for_image(self._state.image_path)
+        blocker = QtCore.QSignalBlocker(self._object_list)
+        for i in range(self._object_list.count()):
+            item = self._object_list.item(i)
+            if item is None:
+                continue
+            item.setCheckState(QtCore.Qt.CheckState.Checked)
+            idx = int(item.data(QtCore.Qt.UserRole))
             if 0 <= idx < len(dets):
-                det = dets[idx]
-                box = det.get("box")
-                if box:
-                    x1, y1, x2, y2 = box
-                    w = x2 - x1
-                    h = y2 - y1
-                    self._overlay_canvas.set_highlight_box(QtCore.QRectF(x1, y1, w, h))
-                    self._view_tabs.setCurrentIndex(0)
-
+                dets[idx]["_checked"] = True
+        del blocker
         self._update_composite_mask()
+
+    def _show_object_list_context_menu(self, pos) -> None:
+        if not hasattr(self, "_object_list"):
+            return
+        item = self._object_list.itemAt(pos)
+        if item is not None and not item.isSelected():
+            self._object_list.clearSelection()
+            item.setSelected(True)
+
+        selected_items = self._object_list.selectedItems()
+        if not selected_items:
+            return
+
+        menu = QtWidgets.QMenu(self._object_list)
+        label = "Delete Selected Mask(s)" if len(selected_items) > 1 else "Delete Mask"
+        act_delete = menu.addAction(label)
+        chosen = menu.exec(self._object_list.mapToGlobal(pos))
+        if chosen == act_delete:
+            self._delete_selected_mask_items()
+
+    def _delete_selected_mask_items(self) -> None:
+        if not self._state:
+            return
+        selected_items = list(self._object_list.selectedItems())
+        if not selected_items:
+            return
+
+        text = "Delete selected masks?" if len(selected_items) > 1 else "Delete selected mask?"
+        resp = QtWidgets.QMessageBox.question(
+            self,
+            "Delete Mask",
+            text,
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if resp != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        image_path = self._state.image_path
+        current_dets = self._get_detections_for_image(image_path)
+        selected_dets = []
+        selected_keys = set()
+        selected_indices = []
+        for item in selected_items:
+            idx = int(item.data(QtCore.Qt.UserRole))
+            if 0 <= idx < len(current_dets):
+                det = current_dets[idx]
+                selected_dets.append(det)
+                selected_keys.add(self._detection_key(det))
+                selected_indices.append(idx)
+
+        if not selected_dets:
+            return
+
+        if hasattr(self, "_run_with_loading"):
+            def do_delete():
+                for det in selected_dets:
+                    if hasattr(self, "_delete_detection_persisted"):
+                        self._delete_detection_persisted(det)
+            self._run_with_loading("Delete Mask", "Deleting selected mask(s)...", do_delete)
+        else:
+            for det in selected_dets:
+                if hasattr(self, "_delete_detection_persisted"):
+                    self._delete_detection_persisted(det)
+
+        def _filter_dets(store: dict[str, list[dict]]) -> None:
+            dets = list(store.get(image_path, []))
+            dets = [det for det in dets if self._detection_key(det) not in selected_keys]
+            if dets:
+                store[image_path] = dets
+            elif image_path in store:
+                del store[image_path]
+
+        if hasattr(self, "_image_detections"):
+            _filter_dets(self._image_detections)
+        if hasattr(self, "_image_detections_all"):
+            _filter_dets(self._image_detections_all)
+        if hasattr(self, "_history_view_detections"):
+            _filter_dets(self._history_view_detections)
+
+        self._populate_mask_list()
 
     def _update_composite_mask(self) -> None:
         if not self._state:
@@ -230,11 +427,27 @@ class MainWindowLayoutMixin:
 
         dets = self._get_detections_for_image(self._state.image_path)
         if not dets:
+            # Clear everything if no detections exist
+            qimg = QtGui.QImage(self._state.image_w, self._state.image_h, QtGui.QImage.Format.Format_Grayscale8)
+            qimg.fill(0)
+            self._overlay_canvas.set_mask(qimg)
+            self._overlay_canvas.set_overlay_visual(QtGui.QImage())
+            if hasattr(self, "_active_highlight_boxes"):
+                self._active_highlight_boxes = []
+            self._overlay_canvas.set_highlight_boxes([])
+            self._image_canvas.set_highlight_boxes([])
+            if hasattr(self, "_mask_canvas") and getattr(self, "_mask_canvas", None) is not None:
+                self._mask_canvas.set_highlight_boxes([])
+            self._sync_mask_views()
             return
+            
         import numpy as np
         import cv2
 
         merged = np.zeros((self._state.image_h, self._state.image_w), dtype=np.uint8)
+        overlay_rgba = np.zeros((self._state.image_h, self._state.image_w, 4), dtype=np.uint8)
+        
+        active_boxes = []
 
         count = self._object_list.count()
         for i in range(count):
@@ -246,48 +459,88 @@ class MainWindowLayoutMixin:
                 continue
 
             idx = int(item.data(QtCore.Qt.UserRole))
-            if 0 <= idx < len(dets):
+            if idx >= 0 and idx < len(dets):
                 det = dets[idx]
+                
+                # Add to active boxes to show
+                box = det.get("box")
+                label = det.get("label", "")
+                score = det.get("score", 0.0)
+                display_text = f"{label} {score:.2f}" if label else ""
+                
+                if box and len(box) == 4:
+                    from PySide6.QtCore import QRectF
+                    # Ensure coordinates are proper float
+                    hb = QRectF(float(box[0]), float(box[1]), float(box[2]-box[0]), float(box[3]-box[1]))
+                    active_boxes.append((hb, display_text))
+                    
                 mask_b64 = det.get("mask_b64")
-                mask = None
-                if mask_b64:
-                    import base64
-
-                    mask_bytes = base64.b64decode(mask_b64)
-                    arr = np.frombuffer(mask_bytes, np.uint8)
-                    mask = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-                else:
-                    mask_path = det.get("mask_path")
-                    if mask_path:
-                        import os
+                mask = det.get("_mask_cache")
+                if mask is None:
+                    if mask_b64:
                         import base64
 
-                        path = str(mask_path)
-                        if hasattr(self, "_resolve_service_path"):
-                            try:
-                                path = self._resolve_service_path(path)
-                            except Exception:
-                                pass
-                        if os.path.isfile(path):
-                            mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-                            if mask is not None:
-                                ok, png_bytes = cv2.imencode(".png", mask)
-                                if ok:
-                                    det["mask_b64"] = base64.b64encode(png_bytes.tobytes()).decode("ascii")
+                        mask_bytes = base64.b64decode(mask_b64)
+                        arr = np.frombuffer(mask_bytes, np.uint8)
+                        mask = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+                    else:
+                        mask_path = det.get("mask_path")
+                        if mask_path:
+                            import os
+
+                            path = str(mask_path)
+                            if hasattr(self, "_resolve_service_path"):
+                                try:
+                                    path = self._resolve_service_path(path)
+                                except Exception:
+                                    pass
+                            if os.path.isfile(path):
+                                mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
 
                 if mask is not None:
                     if mask.shape != merged.shape:
                         mask = cv2.resize(
                             mask, (self._state.image_w, self._state.image_h), interpolation=cv2.INTER_NEAREST
                         )
+                    det["_mask_cache"] = mask
                     merged = np.maximum(merged, mask)
+                    
+                    # Dùng đúng display_text như box để màu khớp
+                    color = self._label_color(display_text)
+                    mask_on = mask > 0
+                    overlay_rgba[mask_on, 0] = color.red()
+                    overlay_rgba[mask_on, 1] = color.green()
+                    overlay_rgba[mask_on, 2] = color.blue()
+                    overlay_rgba[mask_on, 3] = 255
 
         # Update canvas
-        qimg = QtGui.QImage(
-            merged.data, merged.shape[1], merged.shape[0], merged.strides[0], QtGui.QImage.Format.Format_Grayscale8
-        )
-        # Copy to avoid lifetime issues
+        qimg = QtGui.QImage(self._state.image_w, self._state.image_h, QtGui.QImage.Format.Format_Grayscale8)
+        qimg.fill(0)
+        bpl = qimg.bytesPerLine()
+        ptr = qimg.bits()
+        # Create a numpy view into the QImage's buffer, taking care of row padding (bpl)
+        view = np.frombuffer(ptr, dtype=np.uint8).reshape((self._state.image_h, bpl))
+        # Copy our merged array into the image buffer
+        view[:, :self._state.image_w] = merged
+
+        overlay_qimg = QtGui.QImage(
+            overlay_rgba.data,
+            self._state.image_w,
+            self._state.image_h,
+            overlay_rgba.strides[0],
+            QtGui.QImage.Format.Format_RGBA8888,
+        ).copy()
+
         self._overlay_canvas.set_mask(qimg.copy())
+        self._overlay_canvas.set_overlay_visual(overlay_qimg)
+        
+        if hasattr(self, "_active_highlight_boxes"):
+            self._active_highlight_boxes = active_boxes
+        self._overlay_canvas.set_highlight_boxes(active_boxes)
+        self._image_canvas.set_highlight_boxes(active_boxes)
+        if hasattr(self, "_mask_canvas") and getattr(self, "_mask_canvas", None) is not None:
+            self._mask_canvas.set_highlight_boxes(active_boxes)
+        
         self._sync_mask_views()
 
     def _build_view_tabs(self) -> QtWidgets.QWidget:
