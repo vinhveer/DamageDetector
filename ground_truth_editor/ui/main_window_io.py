@@ -1052,48 +1052,90 @@ class MainWindowIOMixin:
             return
 
         def do_compare():
+            def _match_gt_file(image_name: str, gt_files: list[Path], affix: str) -> Path | None:
+                image_path = Path(str(image_name or ""))
+                image_name_full = image_path.name
+                image_stem = image_path.stem
+                affix = str(affix or "").strip()
+                for gt_file in gt_files:
+                    if gt_file.name == image_name_full or gt_file.stem == image_stem:
+                        return gt_file
+                    if affix and (
+                        gt_file.stem == f"{affix}{image_stem}" or gt_file.stem == f"{image_stem}{affix}"
+                    ):
+                        return gt_file
+                return None
+
+            def _load_pred_mask(rows: list[dict], run_id: str) -> np.ndarray | None:
+                full_mask_rel = str(rows[0].get("full_mask_rel") or "").strip()
+                if full_mask_rel:
+                    full_mask_path = self._resolve_results_asset_path(full_mask_rel, run_id)
+                    if os.path.isfile(full_mask_path):
+                        full_mask = cv2.imread(full_mask_path, cv2.IMREAD_GRAYSCALE)
+                        if full_mask is not None:
+                            return full_mask
+
+                merged_mask = None
+                for row in rows:
+                    mask_rel = str(row.get("mask_rel") or "").strip()
+                    if not mask_rel:
+                        continue
+                    mask_path = self._resolve_results_asset_path(mask_rel, run_id)
+                    if not os.path.isfile(mask_path):
+                        continue
+                    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                    if mask is None:
+                        continue
+                    if merged_mask is None:
+                        merged_mask = mask
+                    else:
+                        if merged_mask.shape != mask.shape:
+                            mask = cv2.resize(
+                                mask,
+                                (merged_mask.shape[1], merged_mask.shape[0]),
+                                interpolation=cv2.INTER_NEAREST,
+                            )
+                        merged_mask = np.maximum(merged_mask, mask)
+                return merged_mask
+
             results_root = Path(self._results_dir)
             run_dirs = []
             for d in results_root.iterdir():
-                 if d.is_dir() and d.name != "models":
-                     if (d / "data" / "data.csv").exists() or list(d.glob("*_lan_quet_workspace.csv")):
-                          run_dirs.append(d)
+                if d.is_dir() and d.name != "models":
+                    if (d / "data" / "data.csv").exists() or list(d.glob("*_lan_quet_workspace.csv")):
+                        run_dirs.append(d)
 
             run_dirs = sorted(run_dirs, reverse=True)
             if not run_dirs:
                 return None, "No runs found."
 
             latest_run = run_dirs[0]
-            mask_dir = latest_run / "mask"
+            data_csv = latest_run / "data" / "data.csv"
+            if not data_csv.is_file():
+                return None, f"No compare data found in latest run ({latest_run.name})."
 
-            if not mask_dir.exists():
-                return None, f"No mask folder in latest run ({latest_run.name})."
+            rows = self._history_rows_from_csv(data_csv)
+            if not rows:
+                return None, f"No detection rows found in latest run ({latest_run.name})."
 
-            pred_masks = list(mask_dir.glob("*.png")) + list(mask_dir.glob("*.jpg")) + list(mask_dir.glob("*.jpeg"))
-            if not pred_masks:
-                return None, "No masks found in latest run."
+            rows_by_image: dict[str, list[dict]] = {}
+            run_id = str(latest_run.name)
+            for row in rows:
+                image_rel = str(row.get("image_rel") or row.get("image_path") or "").strip()
+                if not image_rel:
+                    continue
+                rows_by_image.setdefault(image_rel, []).append(row)
 
             results = []
-            gt_files = list(Path(gt_dir).glob("*.png")) + list(Path(gt_dir).glob("*.jpg"))
-            for p_mask_path in pred_masks:
-                img_name = p_mask_path.name
-                best_match = None
-
-                for gf in gt_files:
-                    if gf.name == img_name or gf.stem == p_mask_path.stem:
-                        best_match = gf
-                        break
-                    if prefix:
-                        if gf.stem == f"{prefix}{p_mask_path.stem}" or gf.stem == f"{p_mask_path.stem}{prefix}":
-                            best_match = gf
-                            break
-
+            gt_root = Path(gt_dir)
+            gt_files = list(gt_root.glob("*.png")) + list(gt_root.glob("*.jpg")) + list(gt_root.glob("*.jpeg"))
+            for image_rel, image_rows in rows_by_image.items():
+                best_match = _match_gt_file(image_rel, gt_files, prefix)
                 if not best_match:
                     continue
 
-                pm_img = cv2.imread(str(p_mask_path), cv2.IMREAD_GRAYSCALE)
+                pm_img = _load_pred_mask(image_rows, run_id)
                 gt_img = cv2.imread(str(best_match), cv2.IMREAD_GRAYSCALE)
-
                 if pm_img is None or gt_img is None:
                     continue
 
@@ -1102,10 +1144,10 @@ class MainWindowIOMixin:
 
                 dice, iou = compute_dice_iou(pm_img, gt_img)
                 results.append({
-                    "image": img_name,
+                    "image": Path(image_rel).name,
                     "gt_mask": best_match.name,
                     "dice": dice,
-                    "iou": iou
+                    "iou": iou,
                 })
 
             return results, None
