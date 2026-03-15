@@ -137,32 +137,26 @@ class BinaryTverskyLoss(nn.Module):
 
 
 def calculate_metric_percase(pred, gt):
-    try: 
-        pred.max() <=1 and pred.min()>=0 and gt.max() <=1 and gt.min()>=0
-    except:
-        print("Please Ensure max(pred) <=1 and min(pred)>=0 and max(gt) <=1 and min(gt)>=0 !!!")
+    pred = np.asarray(pred) > 0
+    gt = np.asarray(gt) > 0
 
-    A = pred.sum() 
-    B = gt.sum() 
+    A = pred.sum()
+    B = gt.sum()
 
     if A > 0 and B > 0:
-
-        AinterB = pred&gt
-        AunionB = (pred | gt) 
-        AinterB = AinterB.sum()
-        AunionB = AunionB.sum()
-        dice = 2*AinterB/(A+B) 
-        iou = AinterB /AunionB
-        precision= AinterB/A
-        recall = AinterB/B
-        
+        inter = np.logical_and(pred, gt).sum()
+        union = np.logical_or(pred, gt).sum()
+        dice = (2 * inter) / (A + B)
+        iou = inter / union if union > 0 else 0.0
+        precision = inter / A
+        recall = inter / B
         return precision, recall, dice, iou
-    elif A >0 and B ==0.0: # For non-crack images
-        return 0.0,0.0,0.0,0.0
+    elif A > 0 and B == 0.0: # For non-crack images
+        return 0.0, 0.0, 0.0, 0.0
     elif A == 0.0 and B == 0.0: # For non-crack images
-        return 1.0,1.0,1.0,1.0
-    elif A ==0.0 and B >0:
-        return 0.0,0.0,0.0,0.0
+        return 1.0, 1.0, 1.0, 1.0
+    elif A == 0.0 and B > 0:
+        return 0.0, 0.0, 0.0, 0.0
 
 
 
