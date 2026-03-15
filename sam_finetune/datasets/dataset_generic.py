@@ -309,13 +309,15 @@ class ValGenerator(object):
         sample = {'image': image, 'label': label > 0.5}
         return sample
 class GenericDataset(Dataset):
-    def __init__(self, base_dir, split="train", transform=None, img_exts=None, mask_exts=None, output_size=None, cache_data=False, patches_per_image=1):
+    def __init__(self, base_dir, split="train", transform=None, img_exts=None, mask_exts=None, output_size=None,
+                 cache_data=False, patches_per_image=1, use_full_image_box: bool = False):
         self.transform = transform  
         self.split = split
         self.data_dir = base_dir
         self.output_size = output_size # Tuple (h, w) or list
         self.cache_data = cache_data
         self.patches_per_image = patches_per_image
+        self.use_full_image_box = bool(use_full_image_box)
         
         self.img_dir = os.path.join(base_dir, "images")
         self.mask_dir = os.path.join(base_dir, "masks")
@@ -496,11 +498,22 @@ class GenericDataset(Dataset):
 
         # Find bounding box
         coords = np.argwhere(mask_np > 0)
-        if len(coords) > 0:
+        h, w = mask_np.shape
+        if self.use_full_image_box:
+            box = np.array([0, 0, w, h], dtype=np.float32)
+            if len(coords) > 0:
+                pos_indices = np.argwhere(mask_np > 0)
+                if self.split == 'train':
+                    pos_pt = pos_indices[np.random.randint(len(pos_indices))]
+                else:
+                    pos_pt = pos_indices[len(pos_indices) // 2]
+                pos_pt = pos_pt[::-1]
+            else:
+                pos_pt = np.array([w // 2, h // 2])
+        elif len(coords) > 0:
             y_min, x_min = coords.min(axis=0)
             y_max, x_max = coords.max(axis=0)
             # Add some jitter/padding safely
-            h, w = mask_np.shape
             if self.split == 'train':
                 pad_x1 = np.random.randint(0, 10)
                 pad_y1 = np.random.randint(0, 10)

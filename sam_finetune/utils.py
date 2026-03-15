@@ -161,7 +161,8 @@ def calculate_metric_percase(pred, gt):
 
 
 def test_single_volume(image, label, net, classes, multimask_output, patch_size=[448, 448], input_size=[224, 224],
-                       test_save_path=None, case=None, z_spacing=1, boxes=None, points=None, threshold_prob: float = 0.5):
+                       test_save_path=None, case=None, z_spacing=1, boxes=None, points=None,
+                       threshold_prob: float = 0.5, use_full_image_box_prompt: bool = False):
     image, label = image.cpu().detach().numpy(), label.squeeze(0).cpu().detach().numpy() # image: 1,c,h,w label: h,w
     if len(image.shape) == 4:
         prediction = np.zeros_like(label)
@@ -169,9 +170,17 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
         if x != patch_size[0] or y != patch_size[1]:
             image = zoom(image, (1,1,patch_size[0] / x, patch_size[1] / y), order=3)  # ndarray   
         inputs = torch.from_numpy(image).float().cuda() 
+        eval_boxes = boxes
+        if use_full_image_box_prompt:
+            full_h, full_w = image.shape[-2:]
+            eval_boxes = torch.tensor(
+                [[0.0, 0.0, float(full_w - 1), float(full_h - 1)]],
+                dtype=torch.float32,
+                device=inputs.device,
+            )
         net.eval()
         with torch.no_grad():
-            outputs = net(inputs, multimask_output, patch_size[0], boxes=boxes, points=points) # inputs 1,c,h,w
+            outputs = net(inputs, multimask_output, patch_size[0], boxes=eval_boxes, points=points) # inputs 1,c,h,w
             output_masks = outputs['masks']
             if output_masks.shape[1] == 1:
                 out = (torch.sigmoid(output_masks) >= float(threshold_prob)).float().squeeze(0).squeeze(0)

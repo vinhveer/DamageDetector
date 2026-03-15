@@ -86,19 +86,29 @@ class MainWindowIOMixin:
             "Loading image..." if str(kind) == "image" else "Loading mask...",
         )
 
+        class IoSignalBroker(QtCore.QObject):
+            finished = QtCore.Signal(object)
+            failed = QtCore.Signal(str)
+            cleanup = QtCore.Signal()
+
         thread = QtCore.QThread(self)
         worker = ImageIoWorker(str(kind), str(path), expected_size)
+        broker = IoSignalBroker(self)
         worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_async_io_finished)
-        worker.failed.connect(self._on_async_io_failed)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(self._cleanup_async_io_job)
+        broker.finished.connect(self._on_async_io_finished, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        broker.failed.connect(self._on_async_io_failed, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        broker.cleanup.connect(self._cleanup_async_io_job, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        thread.started.connect(worker.run, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(broker.finished, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(broker.failed, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        thread.finished.connect(worker.deleteLater, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        thread.finished.connect(thread.deleteLater, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        thread.finished.connect(broker.cleanup, type=QtCore.Qt.ConnectionType.QueuedConnection)
         self._io_thread = thread
         self._io_worker = worker
+        self._io_broker = broker
         thread.start()
 
     @QtCore.Slot(object)
@@ -136,6 +146,7 @@ class MainWindowIOMixin:
     def _cleanup_async_io_job(self) -> None:
         self._io_thread = None
         self._io_worker = None
+        self._io_broker = None
         self._active_io_job = None
 
     def _apply_loaded_image(self, path: str, img: QtGui.QImage, switch_tab: bool = True) -> None:

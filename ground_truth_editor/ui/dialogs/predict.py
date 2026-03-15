@@ -585,25 +585,36 @@ class PredictDialog(QtWidgets.QDialog):
                     except Exception as e:
                         self.failed.emit(str(e))
 
+            class _GuiBroker(QtCore.QObject):
+                log = QtCore.Signal(str)
+                failed = QtCore.Signal(str)
+                done = QtCore.Signal(str)
+                cleanup = QtCore.Signal()
+
             thread = QtCore.QThread(self)
             worker = _DL()
+            broker = _GuiBroker(self)
             worker.moveToThread(thread)
-            thread.started.connect(worker.run)
+            thread.started.connect(worker.run, type=QtCore.Qt.ConnectionType.QueuedConnection)
 
             def _append(s: str) -> None:
                 dlg.log_widget().appendPlainText(str(s))
 
-            worker.log.connect(_append)
-            worker.failed.connect(lambda m: _append(f"FAILED: {m}"))
+            broker.log.connect(_append, type=QtCore.Qt.ConnectionType.QueuedConnection)
+            broker.failed.connect(lambda m: _append(f"FAILED: {m}"), type=QtCore.Qt.ConnectionType.QueuedConnection)
+
+            worker.log.connect(broker.log, type=QtCore.Qt.ConnectionType.QueuedConnection)
+            worker.failed.connect(broker.failed, type=QtCore.Qt.ConnectionType.QueuedConnection)
 
             def _finish(path: str) -> None:
                 dino_ckpt.setText(str(path))
                 set_combo_by_data(dino_cfg, "auto")
                 _append("DONE")
 
-            worker.done.connect(_finish)
-            worker.done.connect(thread.quit)
-            worker.failed.connect(thread.quit)
+            broker.done.connect(_finish, type=QtCore.Qt.ConnectionType.QueuedConnection)
+            worker.done.connect(broker.done, type=QtCore.Qt.ConnectionType.QueuedConnection)
+            worker.done.connect(thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
+            worker.failed.connect(thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
 
             def _cleanup() -> None:
                 dlg.allow_close()
@@ -611,7 +622,8 @@ class PredictDialog(QtWidgets.QDialog):
                 worker.deleteLater()
                 thread.deleteLater()
 
-            thread.finished.connect(_cleanup)
+            broker.cleanup.connect(_cleanup, type=QtCore.Qt.ConnectionType.QueuedConnection)
+            thread.finished.connect(broker.cleanup, type=QtCore.Qt.ConnectionType.QueuedConnection)
             thread.start()
 
         dino_dl_btn.clicked.connect(_download)

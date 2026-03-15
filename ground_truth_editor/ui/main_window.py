@@ -36,6 +36,7 @@ class MainWindow(
         self._worker: WorkerBase | None = None
         self._io_thread: QtCore.QThread | None = None
         self._io_worker: QtCore.QObject | None = None
+        self._io_broker: QtCore.QObject | None = None
         self._active_stop_btn: QtWidgets.QPushButton | None = None
         self._active_log_widget: QtWidgets.QPlainTextEdit | None = None
         self._progress_dialog: ProcessingDialog | None = None

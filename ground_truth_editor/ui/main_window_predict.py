@@ -866,30 +866,36 @@ class MainWindowPredictMixin:
             log = QtCore.Signal(str)
             failed = QtCore.Signal(str)
             finished = QtCore.Signal(object)
+            cleanup = QtCore.Signal()
 
         # Keep a reference to the broker to prevent GC
         self._worker_broker = SignalBroker(self)
-        self._worker_broker.log.connect(self._on_worker_log)
-        self._worker_broker.failed.connect(self._on_worker_failed_slot)
-        self._worker_broker.finished.connect(self._on_worker_finished_slot)
+        self._worker_broker.log.connect(self._on_worker_log, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        self._worker_broker.failed.connect(self._on_worker_failed_slot, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        self._worker_broker.finished.connect(
+            self._on_worker_finished_slot,
+            type=QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+        self._worker_broker.cleanup.connect(self._cleanup_worker, type=QtCore.Qt.ConnectionType.QueuedConnection)
 
         worker.moveToThread(self._thread)
 
-        self._thread.started.connect(worker.run)
+        self._thread.started.connect(worker.run, type=QtCore.Qt.ConnectionType.QueuedConnection)
         
-        worker.log.connect(self._worker_broker.log)
-        worker.failed.connect(self._worker_broker.failed)
-        worker.finished.connect(self._worker_broker.finished)
+        worker.log.connect(self._worker_broker.log, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(self._worker_broker.failed, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(self._worker_broker.finished, type=QtCore.Qt.ConnectionType.QueuedConnection)
 
         # thread.quit can be directly connected since QThread is a proper QObject
         worker.finished.connect(self._thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
         worker.failed.connect(self._thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.finished.connect(self._cleanup_worker)
+        self._thread.finished.connect(self._thread.deleteLater, type=QtCore.Qt.ConnectionType.QueuedConnection)
+        self._thread.finished.connect(self._worker_broker.cleanup, type=QtCore.Qt.ConnectionType.QueuedConnection)
 
         self._set_running(True)
         self._thread.start()
 
+    @QtCore.Slot()
     def _cleanup_worker(self) -> None:
         if self._active_stop_btn is not None:
             self._active_stop_btn.setEnabled(False)

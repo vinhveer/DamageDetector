@@ -83,6 +83,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             near_background_crop_prob=args.near_background_crop_prob,
         ),
         patches_per_image=args.patches_per_image,
+        use_full_image_box=bool(getattr(args, 'train_full_image_box', False)),
     )
     
     print("The length of train set is: {}".format(len(db_train)))
@@ -169,6 +170,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     best_threshold = 0.5
     patience = max_epoch
     patience_counter = 0
+    eval_mode_label = 'full-image' if bool(getattr(args, 'full_image_eval', False)) else 'box-only'
     for epoch_num in iterator:
         model.train()
         for i_batch, sampled_batch in enumerate(trainloader):
@@ -234,22 +236,25 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
 
         val_interval = args.save_interval 
         if epoch_num % val_interval ==0:
-            logging.info(f'{len(valloader)} val iterations per epoch')
+            logging.info(f'{len(valloader)} val iterations per epoch ({eval_mode_label})')
             model.eval()
             box_by_thr = {thr: np.zeros(4, dtype=np.float64) for thr in val_thresholds}
             for i_batch, sampled_batch in tqdm(enumerate(valloader)):
                 image, label, case_name = sampled_batch['image'], sampled_batch['label'], sampled_batch['case_name'][0] # tensor
-                box_only, _ = _prepare_prompts(
-                    sampled_batch,
-                    use_boxes=True,
-                    use_points=False,
-                )
+                box_only = None
+                if not bool(getattr(args, 'full_image_eval', False)):
+                    box_only, _ = _prepare_prompts(
+                        sampled_batch,
+                        use_boxes=True,
+                        use_points=False,
+                    )
 
                 case_logs = []
                 for thr in val_thresholds:
                     metric_box_i = test_single_volume(
                         image, label, model, classes=args.num_classes, multimask_output=multimask_output,
                         patch_size=[args.img_size, args.img_size], test_save_path=None, boxes=box_only, points=None,
+                        use_full_image_box_prompt=bool(getattr(args, 'full_image_eval', False)),
                         threshold_prob=thr,
                     )
                     box_by_thr[thr] += np.array(metric_box_i)
@@ -265,8 +270,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     % (thr, metric_box_by_thr[thr][3])
                 )
             logging.info(
-                'Validation selected threshold %.2f box_only: mean_pr: %f mean_re: %f mean_f1: %f mean_iou : %f'
-                % (selected_thr, metric_box[0], metric_box[1], metric_box[2], metric_box[3])
+                'Validation selected threshold %.2f %s: mean_pr: %f mean_re: %f mean_f1: %f mean_iou : %f'
+                % (selected_thr, eval_mode_label, metric_box[0], metric_box[1], metric_box[2], metric_box[3])
             )
             logging.info("Validation in epoch %d Finished!" % epoch_num)
 
@@ -291,7 +296,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     model.module.save_delta_parameters(save_best_path)
                 with open(os.path.join(snapshot_path, 'best_threshold.txt'), 'w', encoding='utf-8') as f:
                     f.write(f"{best_threshold:.4f}\n")
-                logging.info(f"New best box-only IoU: {best_performance} at threshold {best_threshold:.2f}. Saved best model to {save_best_path}")
+                logging.info(f"New best {eval_mode_label} IoU: {best_performance} at threshold {best_threshold:.2f}. Saved best model to {save_best_path}")
             else:
                 patience_counter += 1
                 logging.info(f"No improvement. Patience: {patience_counter}/{patience}")
