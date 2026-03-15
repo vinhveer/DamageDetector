@@ -93,6 +93,49 @@ class DiceLoss(nn.Module):
         return loss / self.n_classes
 
 
+class BinaryDiceLoss(nn.Module):
+    def __init__(self, smooth: float = 1.0):
+        super().__init__()
+        self.smooth = smooth
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        target = target.float()
+        if target.ndim == 3:
+            target = target.unsqueeze(1)
+
+        probs = probs.reshape(probs.shape[0], -1)
+        target = target.reshape(target.shape[0], -1)
+
+        intersect = (probs * target).sum(dim=1)
+        denom = probs.sum(dim=1) + target.sum(dim=1)
+        dice = (2 * intersect + self.smooth) / (denom + self.smooth)
+        return 1.0 - dice.mean()
+
+
+class BinaryTverskyLoss(nn.Module):
+    def __init__(self, alpha: float = 0.3, beta: float = 0.7, smooth: float = 1.0):
+        super().__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.smooth = smooth
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        target = target.float()
+        if target.ndim == 3:
+            target = target.unsqueeze(1)
+
+        probs = probs.reshape(probs.shape[0], -1)
+        target = target.reshape(target.shape[0], -1)
+
+        tp = (probs * target).sum(dim=1)
+        fp = (probs * (1.0 - target)).sum(dim=1)
+        fn = ((1.0 - probs) * target).sum(dim=1)
+        score = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        return 1.0 - score.mean()
+
+
 def calculate_metric_percase(pred, gt):
     try: 
         pred.max() <=1 and pred.min()>=0 and gt.max() <=1 and gt.min()>=0
@@ -124,7 +167,7 @@ def calculate_metric_percase(pred, gt):
 
 
 def test_single_volume(image, label, net, classes, multimask_output, patch_size=[448, 448], input_size=[224, 224],
-                       test_save_path=None, case=None, z_spacing=1, boxes=None, points=None):
+                       test_save_path=None, case=None, z_spacing=1, boxes=None, points=None, threshold_prob: float = 0.5):
     image, label = image.cpu().detach().numpy(), label.squeeze(0).cpu().detach().numpy() # image: 1,c,h,w label: h,w
     if len(image.shape) == 4:
         prediction = np.zeros_like(label)
@@ -137,8 +180,7 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
             outputs = net(inputs, multimask_output, patch_size[0], boxes=boxes, points=points) # inputs 1,c,h,w
             output_masks = outputs['masks']
             if output_masks.shape[1] == 1:
-                # Binary segmentation: logits > 0 <=> sigmoid > 0.5
-                out = (output_masks > 0).float().squeeze(0).squeeze(0)
+                out = (torch.sigmoid(output_masks) >= float(threshold_prob)).float().squeeze(0).squeeze(0)
             else:
                 out = torch.argmax(torch.softmax(output_masks, dim=1), dim=1).squeeze(0)
             prediction = out.cpu().detach().numpy()# h,w  

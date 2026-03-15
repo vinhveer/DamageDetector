@@ -82,6 +82,7 @@ def _build_sam(
     image_size = image_size
     vit_patch_size = 16
     image_embedding_size = image_size // vit_patch_size  # Divide by 16 here
+    multimask_outputs = int(num_classes) if int(num_classes) > 1 else 0
     sam = Sam(
         image_encoder=ImageEncoderViT(
             depth=encoder_depth,
@@ -104,7 +105,7 @@ def _build_sam(
             mask_in_chans=16,
         ),
         mask_decoder=MaskDecoder(
-            num_multimask_outputs=num_classes,
+            num_multimask_outputs=multimask_outputs,
             transformer=TwoWayTransformer(
                 depth=2,
                 embedding_dim=prompt_embed_dim,

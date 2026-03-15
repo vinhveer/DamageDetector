@@ -56,6 +56,14 @@ parser.add_argument('--use_amp', action='store_true', help='If activated, adopt 
 parser.add_argument('--save_interval', type=int, default=1, help='Save and validation intervals')
 parser.add_argument('--num_workers', type=int, default=8, help='number of dataloader workers')
 parser.add_argument('--patches_per_image', type=int, default=1, help='number of random patches to crop per image per epoch')
+parser.add_argument('--train_use_boxes', type=int, default=1, help='Use box prompts during training')
+parser.add_argument('--train_use_points_prob', type=float, default=0.1, help='Probability of adding GT points during training')
+parser.add_argument('--background_crop_prob', type=float, default=0.2, help='Probability of sampling a random background crop even when crack exists')
+parser.add_argument('--near_background_crop_prob', type=float, default=0.15, help='Probability of sampling a crop near but not centered on the crack')
+parser.add_argument('--tversky_alpha', type=float, default=0.3, help='False-positive weight in Tversky loss')
+parser.add_argument('--tversky_beta', type=float, default=0.7, help='False-negative weight in Tversky loss')
+parser.add_argument('--tversky_weight', type=float, default=0.5, help='Blend weight between Dice and Tversky region losses')
+parser.add_argument('--val_thresholds', type=float, nargs='+', default=[0.35, 0.4, 0.45, 0.5, 0.55, 0.6], help='Candidate probability thresholds for validation model selection')
 
 args = parser.parse_args()
 

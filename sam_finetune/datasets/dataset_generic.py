@@ -22,37 +22,65 @@ def random_rotate(image, label):
     pass
 
 class RandomGenerator(object):
-    def __init__(self, output_size, low_res):
+    def __init__(self, output_size, low_res, background_crop_prob: float = 0.2, near_background_crop_prob: float = 0.15):
         self.output_size = output_size
         self.low_res = low_res
+        self.background_crop_prob = float(background_crop_prob)
+        self.near_background_crop_prob = float(near_background_crop_prob)
         
-        # Define Albumentations pipeline (Refined for Surface Defects)
+        # Stronger but still crack-safe augmentations for field images.
         self.transform = A.Compose([
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
             
-            # Geometric Augmentations (Safe for linear structures)
-            # Removed Elastic/Grid distortion to preserve crack physics
-            A.Affine(scale=(0.8, 1.2), translate_percent=(0.05, 0.05), rotate=(-45, 45), p=0.5),
+            # Mild projective / affine changes to simulate handheld capture angle.
+            A.OneOf([
+                A.Affine(
+                    scale=(0.85, 1.15),
+                    translate_percent=(-0.06, 0.06),
+                    rotate=(-35, 35),
+                    shear=(-6, 6),
+                    interpolation=cv2.INTER_LINEAR,
+                    mask_interpolation=cv2.INTER_NEAREST,
+                    p=1.0,
+                ),
+                A.Perspective(scale=(0.02, 0.05), keep_size=True, fit_output=False, p=1.0),
+            ], p=0.55),
             
-            # Color/Noise Augmentations
+            # Global tone variation from different surfaces and cameras.
             A.OneOf([
                 A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1.0),
                 A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
-                A.RandomGamma(gamma_limit=(80, 120), p=1.0),            
+                A.RandomGamma(gamma_limit=(80, 120), p=1.0),
             ], p=0.5),
+
+            # Local illumination drift and shadows on concrete/steel surfaces.
+            A.OneOf([
+                A.RandomShadow(
+                    shadow_roi=(0.0, 0.0, 1.0, 1.0),
+                    num_shadows_lower=1,
+                    num_shadows_upper=2,
+                    shadow_dimension=4,
+                    p=1.0,
+                ),
+                A.RandomToneCurve(scale=0.15, p=1.0),
+            ], p=0.25),
             
-            # Blur & Noise (Sensor Simulation)
+            # Camera / compression degradation.
+            A.OneOf([
+                A.ImageCompression(quality_lower=45, quality_upper=95, p=1.0),
+                A.Downscale(scale_min=0.6, scale_max=0.9, interpolation=cv2.INTER_LINEAR, p=1.0),
+            ], p=0.3),
+
+            # Blur & noise from focus, motion, and sensor grain.
             A.OneOf([
                 A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
                 A.Blur(blur_limit=3, p=1.0),
                 A.MotionBlur(blur_limit=3, p=1.0),
-            ], p=0.3),
+            ], p=0.35),
             
-            # Removed Weather Effects (Rain/Snow) as they mimic cracks or noise
-            
-            # Occlusion (Optional, keep for robustness against dirt/stains)
+            # Small occlusions help against dirt/stains but should not erase the whole crack.
             A.CoarseDropout(max_holes=5, max_height=32, max_width=32, min_holes=1, min_height=8, min_width=8, fill_value=0, mask_fill_value=0, p=0.2),
         ], is_check_shapes=False)
 
@@ -65,24 +93,11 @@ class RandomGenerator(object):
         if isinstance(label, torch.Tensor):
             label = label.numpy()
             
-        # --- Size Consistency Check ---
-        # Fixes crash if mask dimensions != image dimensions.
-        # CRACK SPECIFIC: Do NOT stretch (resize). Pad with 0 (background) or Crop.
         if image.shape[:2] != label.shape[:2]:
-            h_img, w_img = image.shape[:2]
-            h_lbl, w_lbl = label.shape[:2]
-            
-            # Create a blank mask matching image size
-            new_label = np.zeros((h_img, w_img), dtype=label.dtype)
-            
-            # Determine copy region (min of both dimensions)
-            h_copy = min(h_img, h_lbl)
-            w_copy = min(w_img, w_lbl)
-            
-            # Paste existing label into new buffer (Top-Left alignment)
-            new_label[:h_copy, :w_copy] = label[:h_copy, :w_copy]
-            
-            label = new_label
+            raise ValueError(
+                f"Image/mask size mismatch: image={image.shape[:2]} mask={label.shape[:2]}. "
+                "Fix the dataset instead of silently cropping/padding labels."
+            )
 
         # --- Smart Crop Implementation ---
         # Ensure image has 3 dimensions (H, W, C)
@@ -116,29 +131,30 @@ class RandomGenerator(object):
         y_inds, x_inds = np.where(label > 0)
 
         if len(y_inds) > 0:
-            # Smart Crop (With Random Offset): Avoid Center Bias
-            idx = random.randint(0, len(y_inds) - 1)
-            cy, cx = y_inds[idx], x_inds[idx]
-            
-            # Add significant random offset to center
-            # Can shift up to 40% of the crop size away from center
-            offset_y = random.randint(-int(th * 0.4), int(th * 0.4))
-            offset_x = random.randint(-int(tw * 0.4), int(tw * 0.4))
+            crop_mode = random.random()
+            if crop_mode < self.background_crop_prob:
+                y1 = random.randint(0, max(0, h - th))
+                x1 = random.randint(0, max(0, w - tw))
+            else:
+                idx = random.randint(0, len(y_inds) - 1)
+                cy, cx = y_inds[idx], x_inds[idx]
 
-            cy += offset_y
-            cx += offset_x
+                if crop_mode < self.background_crop_prob + self.near_background_crop_prob:
+                    offset_y = random.randint(-int(th * 0.9), int(th * 0.9))
+                    offset_x = random.randint(-int(tw * 0.9), int(tw * 0.9))
+                else:
+                    offset_y = random.randint(-int(th * 0.4), int(th * 0.4))
+                    offset_x = random.randint(-int(tw * 0.4), int(tw * 0.4))
 
-            # Determine crop coordinates
-            y1 = max(0, cy - th // 2)
-            x1 = max(0, cx - tw // 2)
+                cy += offset_y
+                cx += offset_x
 
-            # Adjust if out of bounds (Shift back if near right/bottom edge)
-            y1 = min(y1, h - th)
-            x1 = min(x1, w - tw)
-            
-            # Final safety clip (shouldn't happen due to logic above but safe)
-            y1 = int(max(0, y1))
-            x1 = int(max(0, x1))
+                y1 = max(0, cy - th // 2)
+                x1 = max(0, cx - tw // 2)
+                y1 = min(y1, h - th)
+                x1 = min(x1, w - tw)
+                y1 = int(max(0, y1))
+                x1 = int(max(0, x1))
         else:
             # Fallback for images without cracks (rare): Random Crop
             y1 = random.randint(0, max(0, h - th))
@@ -231,24 +247,11 @@ class ValGenerator(object):
         if isinstance(label, torch.Tensor):
             label = label.numpy()
             
-        # --- Size Consistency Check ---
-        # Fixes crash if mask dimensions != image dimensions.
         if image.shape[:2] != label.shape[:2]:
-            h_img, w_img = image.shape[:2]
-            h_lbl, w_lbl = label.shape[:2]
-            
-            # Create a blank mask matching image size
-            new_label = np.zeros((h_img, w_img), dtype=label.dtype)
-            
-            # Determine copy region (min of both dimensions)
-            # This effectively crops if larger, or pads with 0 if smaller (implicit in zeros init)
-            h_copy = min(h_img, h_lbl)
-            w_copy = min(w_img, w_lbl)
-            
-            # Paste existing label into new buffer (Top-Left alignment)
-            new_label[:h_copy, :w_copy] = label[:h_copy, :w_copy]
-            
-            label = new_label
+            raise ValueError(
+                f"Image/mask size mismatch: image={image.shape[:2]} mask={label.shape[:2]}. "
+                "Fix the dataset instead of silently cropping/padding labels."
+            )
 
         # --- Smart Crop Implementation (Deterministic for Val) ---
         if len(image.shape) == 2:
@@ -385,6 +388,8 @@ class GenericDataset(Dataset):
     def __getitem__(self, idx):
         # Map augmented index to original image index
         idx = idx // self.patches_per_image
+        img_name = self.sample_list[idx]
+        base_name = os.path.splitext(img_name)[0]
         
         if self.cache_data and idx in self.cached_images:
             image_arr = self.cached_images[idx]
@@ -394,10 +399,7 @@ class GenericDataset(Dataset):
             label = (label_arr / 255.0).astype(np.float32)
         else:
             # Fallback to disk load (or if cache disabled)
-            img_name = self.sample_list[idx]
             filepath_image = os.path.join(self.img_dir, img_name)
-            
-            base_name = os.path.splitext(img_name)[0]
             mask_name = None
             for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
                 # Try exact name match
@@ -565,4 +567,3 @@ class GenericDataset(Dataset):
             'case_name': base_name
         }
         return sample
-

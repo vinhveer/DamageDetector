@@ -96,13 +96,13 @@ class MaskDecoder(nn.Module):
             dense_prompt_embeddings=dense_prompt_embeddings,
         )
 
-        # Select the correct mask or masks for output
-        # if multimask_output:
-        #     mask_slice = slice(1, None)
-        # else:
-        #     mask_slice = slice(0, 1)
-        # masks = masks[:, mask_slice, :, :]
-        # iou_pred = iou_pred[:, mask_slice]
+        # For crack segmentation we train a single binary mask logit.
+        if multimask_output:
+            mask_slice = slice(1, None)
+        else:
+            mask_slice = slice(0, 1)
+        masks = masks[:, mask_slice, :, :]
+        iou_pred = iou_pred[:, mask_slice]
 
         # Prepare output
         return masks, iou_pred

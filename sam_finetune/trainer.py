@@ -7,31 +7,45 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
 from tqdm import tqdm
-from utils import DiceLoss, Focal_loss
-from torchvision import transforms
+from utils import BinaryDiceLoss, BinaryTverskyLoss
 from utils import test_single_volume
 import csv
 
-def calc_loss(outputs, high_res_label_batch, ce_loss, dice_loss, dice_weight:float=0.8):
+def calc_loss(outputs, high_res_label_batch, bce_loss, dice_loss, tversky_loss, dice_weight: float = 0.8, tversky_weight: float = 0.5):
     masks = outputs['masks']
-    
-    # Fix for Focal Loss/Cross Entropy needing 2 channels (Background, Foreground)
-    # SAM output is (B, 1, H, W) -> logits for foreground
-    # We construct (B, 2, H, W) -> [logits_background, logits_foreground]
-    # Where logits_background = -logits_foreground
-    if masks.shape[1] == 1:
-        loss_masks = torch.cat([-masks, masks], dim=1)
-    else:
-        loss_masks = masks
+    if masks.shape[1] != 1:
+        raise ValueError(f"Expected a single binary mask logit, got shape {tuple(masks.shape)}")
 
-    loss_ce = ce_loss(loss_masks, high_res_label_batch[:].long())
-    loss_dice = dice_loss(loss_masks, high_res_label_batch, softmax=True)
-    loss = (1 - dice_weight) * loss_ce + dice_weight * loss_dice
-    return loss, loss_ce, loss_dice
+    targets = high_res_label_batch.float().unsqueeze(1)
+    loss_bce = bce_loss(masks, targets)
+    loss_dice = dice_loss(masks, high_res_label_batch)
+    loss_tversky = tversky_loss(masks, high_res_label_batch)
+    region_loss = (1.0 - tversky_weight) * loss_dice + tversky_weight * loss_tversky
+    loss = (1 - dice_weight) * loss_bce + dice_weight * region_loss
+    return loss, loss_bce, loss_dice, loss_tversky
+
+
+def _prepare_prompts(sampled_batch, *, use_boxes: bool, use_points: bool):
+    box_batch = sampled_batch['box'].cuda() if use_boxes and 'box' in sampled_batch else None
+    if use_points and 'point_coords' in sampled_batch and 'point_labels' in sampled_batch:
+        point_coords_batch = sampled_batch['point_coords'].cuda()
+        point_labels_batch = sampled_batch['point_labels'].cuda()
+        points_batch = (point_coords_batch, point_labels_batch)
+    else:
+        points_batch = None
+    return box_batch, points_batch
+
+
+def _safe_thresholds(args) -> list[float]:
+    values = getattr(args, 'val_thresholds', None) or [0.5]
+    out = []
+    for v in values:
+        v = float(v)
+        if 0.0 < v < 1.0:
+            out.append(v)
+    return sorted(set(out)) or [0.5]
 
 
 def worker_init_fn(worker_id):
@@ -41,7 +55,6 @@ def worker_init_fn(worker_id):
     random.seed(3407 + worker_id)
 
 def trainer_generic(args, model, snapshot_path, multimask_output, low_res): 
-    # from datasets.dataset_khanhha import Khanhha_dataset, RandomGenerator
     from datasets.dataset_generic import GenericDataset, RandomGenerator, ValGenerator
 
     logging.basicConfig(filename=snapshot_path + "/log.txt", level=logging.INFO,
@@ -60,9 +73,17 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     db_val = GenericDataset(base_dir=args.val_path, split="val_vol", 
                             transform=ValGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res]))
 
-    db_train = GenericDataset(base_dir=args.root_path, split="train",
-                               transform=RandomGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res]),
-                               patches_per_image=args.patches_per_image)
+    db_train = GenericDataset(
+        base_dir=args.root_path,
+        split="train",
+        transform=RandomGenerator(
+            output_size=[args.img_size, args.img_size],
+            low_res=[low_res, low_res],
+            background_crop_prob=args.background_crop_prob,
+            near_background_crop_prob=args.near_background_crop_prob,
+        ),
+        patches_per_image=args.patches_per_image,
+    )
     
     print("The length of train set is: {}".format(len(db_train)))
 
@@ -95,13 +116,10 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
 
-    # Weight balancing: Favor 'Crack' (class 1) over 'Background' (class 0)
-    # Use Focal Loss for hard example mining (Better than weighted CE)
-    # alpha=0.25: Down-weight background (class 0)
-    # gamma=2: Focus on hard examples
-    # FIX: Focal Loss expects 2 classes (Background, Foreground), even if model output is binary 1-channel
-    ce_loss = Focal_loss(alpha=0.25, gamma=2, num_classes=2)
-    dice_loss = DiceLoss(num_classes + 1)
+    bce_loss = nn.BCEWithLogitsLoss()
+    dice_loss = BinaryDiceLoss()
+    tversky_loss = BinaryTverskyLoss(alpha=args.tversky_alpha, beta=args.tversky_beta)
+    val_thresholds = _safe_thresholds(args)
     if args.warmup:
         b_lr = base_lr / args.warmup_period
     else:
@@ -148,6 +166,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
 
     iterator = tqdm(range(max_epoch), ncols=70)
     best_performance = 0.0
+    best_threshold = 0.5
     patience = max_epoch
     patience_counter = 0
     for epoch_num in iterator:
@@ -158,22 +177,21 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             image_batch, label_batch = sampled_batch['image'], sampled_batch['label']  # [b, c, h, w], [b, h, w] tensor 
             image_batch, label_batch = image_batch.cuda(), label_batch.cuda()# For crack segmentation, low resolution label is not recommended
 
-            # Extract Prompts
-            if 'box' in sampled_batch:
-                box_batch = sampled_batch['box'].cuda()
-                point_coords_batch = sampled_batch['point_coords'].cuda()
-                point_labels_batch = sampled_batch['point_labels'].cuda()
-                points_batch = (point_coords_batch, point_labels_batch)
-            else:
-                box_batch = None
-                points_batch = None
+            use_points = random.random() < float(getattr(args, 'train_use_points_prob', 0.0))
+            box_batch, points_batch = _prepare_prompts(
+                sampled_batch,
+                use_boxes=bool(getattr(args, 'train_use_boxes', True)),
+                use_points=use_points,
+            )
 
             # assert image_batch.max() <= 1, f'image_batch max: {image_batch.max()}'
 
             if args.use_amp:
                 with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=args.use_amp):
                     outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)
-                    loss, loss_ce, loss_dice = calc_loss(outputs, label_batch, ce_loss, dice_loss, args.dice_param)
+                    loss, loss_bce, loss_dice, loss_tversky = calc_loss(
+                        outputs, label_batch, bce_loss, dice_loss, tversky_loss, args.dice_param, args.tversky_weight
+                    )
                 scaler.scale(loss).backward()
                 
                 # Gradient Clipping for stability
@@ -185,7 +203,9 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 
             else:
                 outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)  
-                loss, loss_ce, loss_dice = calc_loss(outputs, label_batch, ce_loss, dice_loss, args.dice_param)
+                loss, loss_bce, loss_dice, loss_tversky = calc_loss(
+                    outputs, label_batch, bce_loss, dice_loss, tversky_loss, args.dice_param, args.tversky_weight
+                )
                 loss.backward()
                 
                 # Gradient Clipping for stability
@@ -207,50 +227,90 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
 
             iter_num = iter_num + 1
 
-            logging.info('iteration %d : loss : %f, loss_ce: %f, loss_dice: %f  lr: %f' % (iter_num, loss.item(), loss_ce.item(), loss_dice.item(), lr_))
+            logging.info(
+                'iteration %d : loss : %f, loss_bce: %f, loss_dice: %f loss_tversky: %f lr: %f'
+                % (iter_num, loss.item(), loss_bce.item(), loss_dice.item(), loss_tversky.item(), lr_)
+            )
 
         val_interval = args.save_interval 
         if epoch_num % val_interval ==0:
             logging.info(f'{len(valloader)} val iterations per epoch')
             model.eval()
-            metric_list = 0.0
+            oracle_by_thr = {thr: np.zeros(4, dtype=np.float64) for thr in val_thresholds}
+            box_by_thr = {thr: np.zeros(4, dtype=np.float64) for thr in val_thresholds}
             for i_batch, sampled_batch in tqdm(enumerate(valloader)):
                 image, label, case_name = sampled_batch['image'], sampled_batch['label'], sampled_batch['case_name'][0] # tensor
-                
-                # Extract Prompts for Validation
-                if 'box' in sampled_batch:
-                    val_box = sampled_batch['box'].cuda()
-                    val_pt_coords = sampled_batch['point_coords'].cuda()
-                    val_pt_labels = sampled_batch['point_labels'].cuda()
-                    val_points = (val_pt_coords, val_pt_labels)
-                else:
-                    val_box = None
-                    val_points = None
+                oracle_box, oracle_points = _prepare_prompts(
+                    sampled_batch,
+                    use_boxes=True,
+                    use_points=True,
+                )
+                box_only, _ = _prepare_prompts(
+                    sampled_batch,
+                    use_boxes=True,
+                    use_points=False,
+                )
 
-                metric_i = test_single_volume(image, label, model, classes=args.num_classes, multimask_output=multimask_output,
-                                    patch_size=[args.img_size, args.img_size],test_save_path=None, boxes=val_box, points=val_points)
-                metric_list += np.array(metric_i)
-                logging.info('idx %d case %s mean_pr %f mean_re %f mean_f1 %f mean_iou %f' % (
-                                i_batch, case_name, metric_i[0], metric_i[1],metric_i[2], metric_i[3]))
-            metric_list = metric_list / len(db_val)
-            logging.info('Validation performance: mean_pr: %f mean_re: %f mean_f1: %f  mean_iou : %f' % (metric_list[0], metric_list[1],metric_list[2], metric_list[3]))
+                case_logs = []
+                for thr in val_thresholds:
+                    metric_oracle_i = test_single_volume(
+                        image, label, model, classes=args.num_classes, multimask_output=multimask_output,
+                        patch_size=[args.img_size, args.img_size], test_save_path=None, boxes=oracle_box, points=oracle_points,
+                        threshold_prob=thr,
+                    )
+                    metric_box_i = test_single_volume(
+                        image, label, model, classes=args.num_classes, multimask_output=multimask_output,
+                        patch_size=[args.img_size, args.img_size], test_save_path=None, boxes=box_only, points=None,
+                        threshold_prob=thr,
+                    )
+                    oracle_by_thr[thr] += np.array(metric_oracle_i)
+                    box_by_thr[thr] += np.array(metric_box_i)
+                    case_logs.append(f"thr={thr:.2f} oracle_iou={metric_oracle_i[3]:.4f} box_iou={metric_box_i[3]:.4f}")
+                logging.info('idx %d case %s %s' % (i_batch, case_name, ' | '.join(case_logs)))
+
+            metric_oracle_by_thr = {thr: oracle_by_thr[thr] / len(db_val) for thr in val_thresholds}
+            metric_box_by_thr = {thr: box_by_thr[thr] / len(db_val) for thr in val_thresholds}
+            selected_thr = max(val_thresholds, key=lambda thr: (metric_box_by_thr[thr][3], metric_box_by_thr[thr][2]))
+            metric_oracle = metric_oracle_by_thr[selected_thr]
+            metric_box = metric_box_by_thr[selected_thr]
+            for thr in val_thresholds:
+                logging.info(
+                    'Validation threshold %.2f -> oracle_iou: %f box_iou: %f'
+                    % (thr, metric_oracle_by_thr[thr][3], metric_box_by_thr[thr][3])
+                )
+            logging.info(
+                'Validation selected threshold %.2f oracle: mean_pr: %f mean_re: %f mean_f1: %f mean_iou : %f'
+                % (selected_thr, metric_oracle[0], metric_oracle[1], metric_oracle[2], metric_oracle[3])
+            )
+            logging.info(
+                'Validation selected threshold %.2f box_only: mean_pr: %f mean_re: %f mean_f1: %f mean_iou : %f'
+                % (selected_thr, metric_box[0], metric_box[1], metric_box[2], metric_box[3])
+            )
             logging.info("Validation in epoch %d Finished!" % epoch_num)
 
 
             with open(snapshot_path + '/val.csv', 'a', newline='') as f:
                 writercsv = csv.writer(f)
-                writercsv.writerow([epoch_num, metric_list[0], metric_list[1],metric_list[2], metric_list[3]])
+                writercsv.writerow([
+                    epoch_num,
+                    selected_thr,
+                    metric_oracle[0], metric_oracle[1], metric_oracle[2], metric_oracle[3],
+                    metric_box[0], metric_box[1], metric_box[2], metric_box[3],
+                ])
 
-            performance = metric_list[3]
+            performance = metric_box[3]
             if performance > best_performance:
                 best_performance = performance
+                best_threshold = selected_thr
                 patience_counter = 0
                 save_best_path = os.path.join(snapshot_path, 'best_model.pth')
                 try:
                     model.save_delta_parameters(save_best_path)
                 except:
                     model.module.save_delta_parameters(save_best_path)
-                logging.info(f"New best IoU: {best_performance}. Saved best model to {save_best_path}")
+                with open(os.path.join(snapshot_path, 'best_threshold.txt'), 'w', encoding='utf-8') as f:
+                    f.write(f"{best_threshold:.4f}\n")
+                logging.info(f"New best box-only IoU: {best_performance} at threshold {best_threshold:.2f}. Saved best model to {save_best_path}")
             else:
                 patience_counter += 1
                 logging.info(f"No improvement. Patience: {patience_counter}/{patience}")
