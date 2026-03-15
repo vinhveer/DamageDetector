@@ -57,31 +57,25 @@ class RandomGenerator(object):
 
             # Local illumination drift and shadows on concrete/steel surfaces.
             A.OneOf([
-                A.RandomShadow(
-                    shadow_roi=(0.0, 0.0, 1.0, 1.0),
-                    num_shadows_lower=1,
-                    num_shadows_upper=2,
-                    shadow_dimension=4,
-                    p=1.0,
-                ),
+                A.RandomShadow(shadow_roi=(0.0, 0.0, 1.0, 1.0), p=1.0),
                 A.RandomToneCurve(scale=0.15, p=1.0),
             ], p=0.25),
             
             # Camera / compression degradation.
             A.OneOf([
-                A.ImageCompression(quality_lower=45, quality_upper=95, p=1.0),
-                A.Downscale(scale_min=0.6, scale_max=0.9, interpolation=cv2.INTER_LINEAR, p=1.0),
+                A.ImageCompression(p=1.0),
+                A.Downscale(p=1.0),
             ], p=0.3),
 
             # Blur & noise from focus, motion, and sensor grain.
             A.OneOf([
-                A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+                A.GaussNoise(p=1.0),
                 A.Blur(blur_limit=3, p=1.0),
                 A.MotionBlur(blur_limit=3, p=1.0),
             ], p=0.35),
             
             # Small occlusions help against dirt/stains but should not erase the whole crack.
-            A.CoarseDropout(max_holes=5, max_height=32, max_width=32, min_holes=1, min_height=8, min_width=8, fill_value=0, mask_fill_value=0, p=0.2),
+            A.CoarseDropout(p=0.2),
         ], is_check_shapes=False)
 
     def __call__(self, sample):

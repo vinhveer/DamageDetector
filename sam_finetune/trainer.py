@@ -236,15 +236,9 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         if epoch_num % val_interval ==0:
             logging.info(f'{len(valloader)} val iterations per epoch')
             model.eval()
-            oracle_by_thr = {thr: np.zeros(4, dtype=np.float64) for thr in val_thresholds}
             box_by_thr = {thr: np.zeros(4, dtype=np.float64) for thr in val_thresholds}
             for i_batch, sampled_batch in tqdm(enumerate(valloader)):
                 image, label, case_name = sampled_batch['image'], sampled_batch['label'], sampled_batch['case_name'][0] # tensor
-                oracle_box, oracle_points = _prepare_prompts(
-                    sampled_batch,
-                    use_boxes=True,
-                    use_points=True,
-                )
                 box_only, _ = _prepare_prompts(
                     sampled_batch,
                     use_boxes=True,
@@ -253,35 +247,23 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
 
                 case_logs = []
                 for thr in val_thresholds:
-                    metric_oracle_i = test_single_volume(
-                        image, label, model, classes=args.num_classes, multimask_output=multimask_output,
-                        patch_size=[args.img_size, args.img_size], test_save_path=None, boxes=oracle_box, points=oracle_points,
-                        threshold_prob=thr,
-                    )
                     metric_box_i = test_single_volume(
                         image, label, model, classes=args.num_classes, multimask_output=multimask_output,
                         patch_size=[args.img_size, args.img_size], test_save_path=None, boxes=box_only, points=None,
                         threshold_prob=thr,
                     )
-                    oracle_by_thr[thr] += np.array(metric_oracle_i)
                     box_by_thr[thr] += np.array(metric_box_i)
-                    case_logs.append(f"thr={thr:.2f} oracle_iou={metric_oracle_i[3]:.4f} box_iou={metric_box_i[3]:.4f}")
+                    case_logs.append(f"thr={thr:.2f} box_iou={metric_box_i[3]:.4f}")
                 logging.info('idx %d case %s %s' % (i_batch, case_name, ' | '.join(case_logs)))
 
-            metric_oracle_by_thr = {thr: oracle_by_thr[thr] / len(db_val) for thr in val_thresholds}
             metric_box_by_thr = {thr: box_by_thr[thr] / len(db_val) for thr in val_thresholds}
             selected_thr = max(val_thresholds, key=lambda thr: (metric_box_by_thr[thr][3], metric_box_by_thr[thr][2]))
-            metric_oracle = metric_oracle_by_thr[selected_thr]
             metric_box = metric_box_by_thr[selected_thr]
             for thr in val_thresholds:
                 logging.info(
-                    'Validation threshold %.2f -> oracle_iou: %f box_iou: %f'
-                    % (thr, metric_oracle_by_thr[thr][3], metric_box_by_thr[thr][3])
+                    'Validation threshold %.2f -> box_iou: %f'
+                    % (thr, metric_box_by_thr[thr][3])
                 )
-            logging.info(
-                'Validation selected threshold %.2f oracle: mean_pr: %f mean_re: %f mean_f1: %f mean_iou : %f'
-                % (selected_thr, metric_oracle[0], metric_oracle[1], metric_oracle[2], metric_oracle[3])
-            )
             logging.info(
                 'Validation selected threshold %.2f box_only: mean_pr: %f mean_re: %f mean_f1: %f mean_iou : %f'
                 % (selected_thr, metric_box[0], metric_box[1], metric_box[2], metric_box[3])
@@ -294,7 +276,6 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 writercsv.writerow([
                     epoch_num,
                     selected_thr,
-                    metric_oracle[0], metric_oracle[1], metric_oracle[2], metric_oracle[3],
                     metric_box[0], metric_box[1], metric_box[2], metric_box[3],
                 ])
 
