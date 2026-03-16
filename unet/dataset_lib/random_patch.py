@@ -105,7 +105,7 @@ class RandomPatchDataset(Dataset):
         
         # 1. Base crop (Random Crop)
         self.crop_transform = A.Compose([
-            A.PadIfNeeded(min_height=patch_h, min_width=patch_w, border_mode=0, value=0, mask_value=0),
+            A.PadIfNeeded(min_height=patch_h, min_width=patch_w, border_mode=0, fill=0, fill_mask=0),
             A.RandomCrop(height=patch_h, width=patch_w)
         ])
 
@@ -115,7 +115,7 @@ class RandomPatchDataset(Dataset):
             # Matches SAM GenericDataset
             self.aug_transform = A.Compose([
                 # Safe Logic: Pad -> RandomCrop
-                A.PadIfNeeded(min_height=patch_h, min_width=patch_w, border_mode=0, value=0, mask_value=0),
+                A.PadIfNeeded(min_height=patch_h, min_width=patch_w, border_mode=0, fill=0, fill_mask=0),
                 A.RandomCrop(height=patch_h, width=patch_w, p=1.0),
                 
                 A.HorizontalFlip(p=self.aug_prob),
@@ -130,7 +130,13 @@ class RandomPatchDataset(Dataset):
                 A.OneOf([
                     A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05), # Removed alpha_affine
                     A.GridDistortion(p=0.5),
-                    A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
+                    A.OpticalDistortion(
+                        distort_limit=(-0.10, 0.10),
+                        border_mode=0,
+                        fill=0,
+                        fill_mask=0,
+                        p=0.5,
+                    ),
                 ], p=min(1.0, self.aug_prob * 0.6)),
                 
                 # Color/Noise Augmentations
@@ -158,14 +164,11 @@ class RandomPatchDataset(Dataset):
                     p=min(1.0, self.aug_prob * 0.3),
                 ),
                 A.CoarseDropout(
-                    num_holes_limit=(1, 8),
+                    num_holes_range=(1, 8),
                     hole_height_range=(8, 32),
                     hole_width_range=(8, 32),
-                    min_holes=None,
-                    min_height=None,
-                    min_width=None,
-                    fill_value=0,
-                    mask_fill_value=0,
+                    fill=0,
+                    fill_mask=0,
                     p=min(1.0, self.aug_prob * 0.3),
                 ),
             ], is_check_shapes=False)
