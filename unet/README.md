@@ -54,10 +54,11 @@ python train.py --train-images path/to/images --train-masks path/to/masks --val-
 - `--visualize-every`: Visualize every N epochs (0 to disable, default: 0).
 
 #### Preprocessing
-- `--preprocess`: Method: `patch`, `letterbox`, `stretch` (default: `patch`).
+- `--preprocess`: Method: `patch`, `letterbox`, `resize`, `random_crop` (`stretch` is a backward-compatible alias for `resize`; default: `patch`).
 - `--input-size`: Model input size (default: 256).
 - `--patches-per-image`: Number of patches per image (default: 1).
 - `--max-patch-tries`: Max tries to find a patch with crack (default: 5).
+- `--negative-patch-prob`: Probability of keeping a background-only patch in patch mode (default: 0.25).
 - `--val-stride`: Stride for validation patching (default: 0 = input_size).
 
 #### Augmentation
@@ -99,6 +100,7 @@ python train.py --train-images path/to/images --train-masks path/to/masks --val-
 
 #### Metrics & Scheduler
 - `--metric-threshold`: Threshold for metrics (default: 0.5).
+- `--best-model-metric`: Metric used for best checkpoint / early stopping. Supports fixed-threshold or threshold-sweep selection.
 - `--metric-thresholds`: Comma-separated thresholds (default: "").
 - `--scheduler-metric`: Metric for scheduler (default: `loss`).
 - `--scheduler-factor`: Scheduler factor (default: 0.5).

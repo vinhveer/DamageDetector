@@ -42,7 +42,10 @@ def visualize_predictions(model, val_loader, device, epoch, output_dir, thr=0.5)
         for batch in val_loader:
             if batch is None:
                 continue
-            images, masks = batch
+            if isinstance(batch, (tuple, list)) and len(batch) == 3:
+                images, masks, _ = batch
+            else:
+                images, masks = batch
             if images is not None and masks is not None:
                 images = images.to(device)
                 masks = masks.to(device)

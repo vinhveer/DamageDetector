@@ -41,6 +41,8 @@ class TiledDataset(Dataset):
         self.verbose = verbose
         self._cache_size = max(0, int(cache_size))
         self._cache = OrderedDict()
+        self._image_sizes = {}
+        self._padded_sizes = {}
 
         if not os.path.exists(image_dir):
             raise FileNotFoundError(f"Image directory does not exist: {image_dir}")
@@ -84,14 +86,17 @@ class TiledDataset(Dataset):
             img_path = os.path.join(self.image_dir, img_name)
             try:
                 with Image.open(img_path) as im:
-                    w, h = im.size
+                    orig_w, orig_h = im.size
             except Exception as e:
                 if self.verbose:
                     print(f"TiledDataset: skipping unreadable image '{img_name}': {e}")
                 continue
 
+            self._image_sizes[img_name] = (int(orig_w), int(orig_h))
+            w, h = orig_w, orig_h
             w = max(w, patch_w)
             h = max(h, patch_h)
+            self._padded_sizes[img_name] = (int(w), int(h))
 
             xs = list(range(0, max(1, w - patch_w + 1), stride_w))
             ys = list(range(0, max(1, h - patch_h + 1), stride_h))
@@ -145,7 +150,18 @@ class TiledDataset(Dataset):
                 mask = torch.from_numpy(np.array(mask)).unsqueeze(0).float() / 255.0
 
             mask = (mask > 0.5).float()
-            return image, mask
+            metadata = {
+                "image_name": img_name,
+                "x": int(x),
+                "y": int(y),
+                "patch_w": int(patch_w),
+                "patch_h": int(patch_h),
+                "orig_w": int(self._image_sizes[img_name][0]),
+                "orig_h": int(self._image_sizes[img_name][1]),
+                "padded_w": int(self._padded_sizes[img_name][0]),
+                "padded_h": int(self._padded_sizes[img_name][1]),
+            }
+            return image, mask, metadata
         except Exception as e:
             if self.verbose:
                 print(f"TiledDataset error at idx={idx} ({img_name}): {e}")

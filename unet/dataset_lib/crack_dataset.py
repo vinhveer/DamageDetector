@@ -38,7 +38,11 @@ class CrackDataset(Dataset):
         verbose=True,
         cache_data=False,     # NEW: Persistent RAM Cache
         preprocess_mode="letterbox", # NEW: Control sizing strategy
-        patches_per_image=1  # NEW: Number of crops per image per epoch
+        patches_per_image=1,  # NEW: Number of crops per image per epoch
+        aug_prob=0.5,
+        rotate_limit=10.0,
+        brightness_limit=0.2,
+        contrast_limit=0.2,
     ):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
@@ -48,6 +52,10 @@ class CrackDataset(Dataset):
         self.verbose = verbose
         self.cache_data = False 
         self.preprocess_mode = preprocess_mode # Store for __getitem__ logic
+        self.aug_prob = max(0.0, min(1.0, float(aug_prob)))
+        self.rotate_limit = float(rotate_limit)
+        self.brightness_limit = float(brightness_limit)
+        self.contrast_limit = float(contrast_limit)
 
         if cache_data and self.verbose:
              print("Warning: cache_data disabled by default to prevent stability issues.")
@@ -203,25 +211,34 @@ class CrackDataset(Dataset):
         # Sizing is handled manually in __getitem__ via Smart Crop
         if self.augment:
              self.transform = A.Compose([
-                 A.HorizontalFlip(p=0.5),
-                 A.VerticalFlip(p=0.5),
-                 A.RandomRotate90(p=0.5),
+                 A.HorizontalFlip(p=self.aug_prob),
+                 A.VerticalFlip(p=min(1.0, self.aug_prob * 0.7)),
+                 A.RandomRotate90(p=min(1.0, self.aug_prob * 0.5)),
                  
                  # Geometric (Affine)
-                 A.Affine(scale=(0.8, 1.2), translate_percent=(0.1, 0.1), rotate=(-45, 45), p=0.5),
+                 A.Affine(
+                     scale=(0.8, 1.2),
+                     translate_percent=(0.1, 0.1),
+                     rotate=(-self.rotate_limit, self.rotate_limit),
+                     p=self.aug_prob,
+                 ),
                  
                  # Color/Noise (Moderate)
                  A.OneOf([
                     A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=1.0),
-                    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
+                    A.RandomBrightnessContrast(
+                        brightness_limit=self.brightness_limit,
+                        contrast_limit=self.contrast_limit,
+                        p=1.0,
+                    ),
                     A.RandomGamma(gamma_limit=(80, 120), p=1.0),            
-                 ], p=0.5),
+                 ], p=self.aug_prob),
                  
                  A.OneOf([
                     A.GaussNoise(var_limit=(10.0, 30.0), p=1.0),
                     A.Blur(blur_limit=3, p=1.0),
                     A.MotionBlur(blur_limit=3, p=1.0),
-                 ], p=0.2),
+                 ], p=min(1.0, self.aug_prob * 0.4)),
                  
                  # HueSaturationValue (Disabled)
                  # A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
@@ -411,6 +428,5 @@ class CrackDataset(Dataset):
         mask = torch.from_numpy(final_mask).float().unsqueeze(0)       
         
         return image, mask
-
 
 

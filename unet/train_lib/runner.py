@@ -26,6 +26,7 @@ from dataset_lib import (
 from .collate import collate_skip_none
 from .losses import dice_loss, focal_loss_with_logits
 from .training import train_model
+from model_io import build_model_config, save_training_config
 
 
 def _estimate_pos_weight(
@@ -73,6 +74,22 @@ def _estimate_pos_weight(
         weight = (1.0 - pos_ratio) / pos_ratio
     weight = max(float(min_weight), min(float(max_weight), float(weight)))
     return float(weight), float(pos_ratio), int(used)
+
+
+def _resolve_preprocess_mode(mode):
+    mapping = {
+        "stretch": "resize",
+        "resize": "resize",
+        "letterbox": "letterbox",
+        "patch": "patch",
+        "random_crop": "random_crop",
+    }
+    key = str(mode).strip().lower()
+    if key not in mapping:
+        raise ValueError(
+            f"Unsupported preprocess mode '{mode}'. Expected one of: {', '.join(sorted(mapping))}"
+        )
+    return mapping[key]
 
 
 def run_training(args):
@@ -142,8 +159,8 @@ def run_training(args):
         )
 
     # Resolve preprocess modes (train vs val)
-    train_preprocess = getattr(args, "preprocess_train", None) or args.preprocess
-    val_preprocess = getattr(args, "preprocess_val", None) or args.preprocess
+    train_preprocess = _resolve_preprocess_mode(getattr(args, "preprocess_train", None) or args.preprocess)
+    val_preprocess = _resolve_preprocess_mode(getattr(args, "preprocess_val", None) or args.preprocess)
     if rank == 0:
         print(f"Preprocess: train={train_preprocess} | val={val_preprocess}")
 
@@ -181,7 +198,10 @@ def run_training(args):
     # Preprocessing / datasets
     def _build_train_dataset(mode):
         if mode == "patch":
-            image_transform = transforms.Compose([transforms.ToTensor()])
+            image_transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+            ])
             mask_transform = transforms.Compose([transforms.ToTensor()])
             return RandomPatchDataset(
                 image_dir=train_images_path,
@@ -196,6 +216,11 @@ def run_training(args):
                 image_transform=image_transform,
                 mask_transform=mask_transform,
                 verbose=(rank == 0),
+                aug_prob=args.aug_prob,
+                rotate_limit=args.rotate_limit,
+                brightness_limit=args.brightness_limit,
+                contrast_limit=args.contrast_limit,
+                negative_patch_prob=args.negative_patch_prob,
             )
 
         if mode in ["letterbox", "resize", "random_crop"]:
@@ -212,23 +237,12 @@ def run_training(args):
                 cache_data=False,
                 preprocess_mode=mode,
                 patches_per_image=getattr(args, "patches_per_image", 1),
+                aug_prob=args.aug_prob,
+                rotate_limit=args.rotate_limit,
+                brightness_limit=args.brightness_limit,
+                contrast_limit=args.contrast_limit,
             )
-
-        print(f"Warning: Unknown preprocess mode '{mode}', falling back to 'resize' for train.")
-        return CrackDataset(
-            image_dir=train_images_path,
-            mask_dir=train_masks_path,
-            image_filenames=train_names,
-            mask_prefix=args.mask_prefix,
-            mask_index=train_mask_index,
-            augment=not args.no_augment,
-            patch_size=None,
-            output_size=args.input_size,
-            verbose=(rank == 0),
-            cache_data=False,
-            preprocess_mode="resize",
-            patches_per_image=getattr(args, "patches_per_image", 1),
-        )
+        raise ValueError(f"Unsupported train preprocess mode: {mode}")
 
     def _build_val_dataset(mode):
         if mode == "patch":
@@ -266,22 +280,7 @@ def run_training(args):
                 preprocess_mode=mode,
                 patches_per_image=1,
             )
-
-        print(f"Warning: Unknown preprocess mode '{mode}', falling back to 'resize' for val.")
-        return CrackDataset(
-            image_dir=val_images_path,
-            mask_dir=val_masks_path,
-            image_filenames=val_names,
-            mask_prefix=args.mask_prefix,
-            mask_index=val_mask_index,
-            augment=False,
-            patch_size=None,
-            output_size=args.input_size,
-            verbose=(rank == 0),
-            cache_data=False,
-            preprocess_mode="resize",
-            patches_per_image=1,
-        )
+        raise ValueError(f"Unsupported val preprocess mode: {mode}")
 
     train_dataset = _build_train_dataset(train_preprocess)
     val_dataset = _build_val_dataset(val_preprocess)
@@ -353,6 +352,7 @@ def run_training(args):
 
     if rank == 0:
         print(f"Model: Unet (smp) | Encoder: {encoder_name} | Weights: {encoder_weights} | Attention: SCSE")
+    model_config = build_model_config(args)
     model = smp.Unet(
         encoder_name=encoder_name, 
         encoder_weights=encoder_weights, 
@@ -428,10 +428,14 @@ def run_training(args):
             f"pos_weight={args.pos_weight}"
         )
     if rank == 0:
-        print(f"Val metric threshold: {args.metric_threshold} | Scheduler metric: {args.scheduler_metric}")
+        print(
+            f"Val metric threshold: {args.metric_threshold} | Scheduler metric: {args.scheduler_metric} | "
+            f"Best model metric: {args.best_model_metric}"
+        )
 
     train_model._metric_threshold = float(args.metric_threshold)
     train_model._scheduler_metric = args.scheduler_metric
+    train_model._best_model_metric = args.best_model_metric
     train_model._disable_visuals = bool(args.no_visualize)
     train_model._disable_loss_curve = bool(args.no_loss_curve)
     train_model._early_stop_patience = int(args.early_stop_patience)
@@ -459,6 +463,15 @@ def run_training(args):
     
     logging.info(f"Training started. Output dir: {output_dir}")
     logging.info(f"Config: {vars(args)}")
+    if rank == 0:
+        config_path = save_training_config(
+            output_dir,
+            args,
+            model_config=model_config,
+            train_preprocess=train_preprocess,
+            val_preprocess=val_preprocess,
+        )
+        logging.info(f"Saved training config to: {config_path}")
 
     # CSV Writer Init
     csv_path = os.path.join(output_dir, "val_metrics.csv")
@@ -478,6 +491,7 @@ def run_training(args):
             num_epochs=args.epochs,
             device=device,
             output_dir=output_dir,
+            model_config=model_config,
             use_amp=(device.type == "cuda" and not bool(getattr(args, "no_amp", False))),
             csv_path=csv_path,  # Pass CSV path
             grad_accum_steps=getattr(args, "grad_accum_steps", 1),

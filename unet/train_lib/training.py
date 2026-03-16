@@ -31,6 +31,95 @@ def _all_reduce_sum(value, device):
     return float(t.item())
 
 
+def _unpack_batch(batch):
+    if batch is None:
+        return None, None, None
+    if isinstance(batch, (tuple, list)) and len(batch) == 3:
+        return batch[0], batch[1], batch[2]
+    return batch[0], batch[1], None
+
+
+def _compute_reconstructed_metrics(tile_predictions, thresholds, base_threshold):
+    if not tile_predictions:
+        return None
+
+    image_metrics = []
+    threshold_sums = {float(t): {"dice": 0.0, "iou": 0.0} for t in thresholds}
+    base_threshold = float(base_threshold)
+
+    for image_name, payload in tile_predictions.items():
+        prob_sum = payload["prob_sum"]
+        count_sum = payload["count_sum"].clamp_min(1.0)
+        mask_sum = payload["mask_sum"]
+        orig_h = int(payload["orig_h"])
+        orig_w = int(payload["orig_w"])
+
+        prob = (prob_sum / count_sum)[:, :orig_h, :orig_w].unsqueeze(0)
+        target = (mask_sum > 0.5).float()[:, :orig_h, :orig_w].unsqueeze(0)
+
+        base_dice = dice_score_from_prob(prob, target, thr=base_threshold)
+        base_iou = iou_score_from_prob(prob, target, thr=base_threshold)
+        image_metrics.append((base_dice, base_iou))
+
+        for thr in threshold_sums:
+            threshold_sums[thr]["dice"] += dice_score_from_prob(prob, target, thr=thr)
+            threshold_sums[thr]["iou"] += iou_score_from_prob(prob, target, thr=thr)
+
+    image_count = float(len(image_metrics))
+    avg_dice = sum(x[0] for x in image_metrics) / image_count
+    avg_iou = sum(x[1] for x in image_metrics) / image_count
+    for thr in threshold_sums:
+        threshold_sums[thr]["dice_avg"] = threshold_sums[thr]["dice"] / image_count
+        threshold_sums[thr]["iou_avg"] = threshold_sums[thr]["iou"] / image_count
+
+    return {
+        "avg_dice": avg_dice,
+        "avg_iou": avg_iou,
+        "thresholds": threshold_sums,
+        "image_count": int(image_count),
+    }
+
+
+def _gather_reconstructed_tiles(tile_predictions):
+    if not _dist_on():
+        return tile_predictions
+
+    gathered = [None for _ in range(_world_size())]
+    dist.all_gather_object(gathered, tile_predictions)
+
+    if not _is_main():
+        return None
+
+    merged = {}
+    for rank_tiles in gathered:
+        if not rank_tiles:
+            continue
+        for image_name, payload in rank_tiles.items():
+            target = merged.get(image_name)
+            if target is None:
+                merged[image_name] = {
+                    "prob_sum": payload["prob_sum"].clone(),
+                    "count_sum": payload["count_sum"].clone(),
+                    "mask_sum": payload["mask_sum"].clone(),
+                    "orig_h": int(payload["orig_h"]),
+                    "orig_w": int(payload["orig_w"]),
+                }
+                continue
+            target["prob_sum"] += payload["prob_sum"]
+            target["count_sum"] += payload["count_sum"]
+            target["mask_sum"] = torch.maximum(target["mask_sum"], payload["mask_sum"])
+    return merged
+
+
+def _broadcast_optional_metrics(metrics, device):
+    if not _dist_on():
+        return metrics
+
+    payload = [metrics if _is_main() else None]
+    dist.broadcast_object_list(payload, src=0)
+    return payload[0]
+
+
 def _iter_prefetch(loader, device):
     if device.type != "cuda":
         for batch in loader:
@@ -48,11 +137,11 @@ def _iter_prefetch(loader, device):
                 return None
             if batch is None:
                 continue
-            images, masks = batch
+            images, masks, metadata = _unpack_batch(batch)
             with torch.cuda.stream(stream):
                 images = images.to(device, non_blocking=True)
                 masks = masks.to(device, non_blocking=True)
-            return images, masks
+            return images, masks, metadata
 
     next_batch = _next_batch()
     while next_batch is not None:
@@ -65,12 +154,10 @@ def _iter_prefetch(loader, device):
 import csv
 import logging
 
-def _state_dict_for_saving(model):
-    if hasattr(model, "module"):
-        return model.module.state_dict()
-    return model.state_dict()
+from model_io import save_checkpoint
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, csv_path=None, grad_accum_steps=1, use_amp=False):
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, model_config=None, csv_path=None, grad_accum_steps=1, use_amp=False):
     # Ensure the output directory exists.
     os.makedirs(output_dir, exist_ok=True)
 
@@ -85,7 +172,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     disable_visuals = bool(getattr(train_model, "_disable_visuals", False))
     disable_loss_curve = bool(getattr(train_model, "_disable_loss_curve", False))
     best_val_loss = float('inf')
-    best_val_score = -1.0 # Tracks IoU or Dice
+    best_monitor_value = None
+    best_monitor_label = None
     train_losses = []
     val_losses = []
     # Early stopping parameters.
@@ -108,7 +196,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         for i, batch in enumerate(train_pbar):
             if batch is None:
                 continue
-            images, masks = batch
+            images, masks, _ = _unpack_batch(batch)
             if not use_prefetch:
                 images = images.to(device, non_blocking=non_blocking)
                 masks = masks.to(device, non_blocking=non_blocking)
@@ -144,6 +232,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         val_steps = 0
         val_dice_sum = 0.0
         val_iou_sum = 0.0
+        tile_predictions = {}
         val_thr_report = {}
         if hasattr(train_model, "_metric_thresholds"):
             for t in train_model._metric_thresholds:
@@ -155,7 +244,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             for batch in val_pbar:
                 if batch is None:
                     continue
-                images, masks = batch
+                images, masks, metadata = _unpack_batch(batch)
                 if not use_prefetch:
                     images = images.to(device, non_blocking=non_blocking)
                     masks = masks.to(device, non_blocking=non_blocking)
@@ -178,10 +267,55 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                         val_thr_report[t]["dice"] += dice_score_from_prob(prob, masks, thr=t_val)
                         val_thr_report[t]["iou"] += iou_score_from_prob(prob, masks, thr=t_val)
 
+                if metadata:
+                    prob_cpu = prob.detach().float().cpu()
+                    masks_cpu = masks.detach().float().cpu()
+                    for idx, meta in enumerate(metadata):
+                        image_name = meta["image_name"]
+                        padded_h = int(meta["padded_h"])
+                        padded_w = int(meta["padded_w"])
+                        if image_name not in tile_predictions:
+                            tile_predictions[image_name] = {
+                                "prob_sum": torch.zeros((1, padded_h, padded_w), dtype=torch.float32),
+                                "count_sum": torch.zeros((1, padded_h, padded_w), dtype=torch.float32),
+                                "mask_sum": torch.zeros((1, padded_h, padded_w), dtype=torch.float32),
+                                "orig_h": int(meta["orig_h"]),
+                                "orig_w": int(meta["orig_w"]),
+                            }
+                        x = int(meta["x"])
+                        y = int(meta["y"])
+                        patch_h = int(meta["patch_h"])
+                        patch_w = int(meta["patch_w"])
+                        payload = tile_predictions[image_name]
+                        payload["prob_sum"][:, y:y + patch_h, x:x + patch_w] += prob_cpu[idx]
+                        payload["count_sum"][:, y:y + patch_h, x:x + patch_w] += 1.0
+                        payload["mask_sum"][:, y:y + patch_h, x:x + patch_w] = torch.maximum(
+                            payload["mask_sum"][:, y:y + patch_h, x:x + patch_w],
+                            masks_cpu[idx],
+                        )
+
         val_loss_sum = _all_reduce_sum(val_loss, device=device)
         val_steps_sum = _all_reduce_sum(val_steps, device=device)
         val_dice_sum_all = _all_reduce_sum(val_dice_sum, device=device)
         val_iou_sum_all = _all_reduce_sum(val_iou_sum, device=device)
+        metric_threshold = getattr(train_model, "_metric_threshold", 0.5)
+        threshold_values = [metric_threshold]
+        if hasattr(train_model, "_metric_thresholds"):
+            threshold_values.extend(float(t) for t in train_model._metric_thresholds)
+        threshold_values = sorted(set(threshold_values))
+        reconstructed_tile_predictions = _gather_reconstructed_tiles(tile_predictions)
+        reconstructed_metrics = None
+        if reconstructed_tile_predictions:
+            reconstructed_metrics = _compute_reconstructed_metrics(
+                reconstructed_tile_predictions,
+                threshold_values,
+                metric_threshold,
+            )
+        reconstructed_metrics = _broadcast_optional_metrics(reconstructed_metrics, device)
+        sweep_best_iou = avg_val_iou = 0.0 if val_steps == 0 else None
+        sweep_best_dice = avg_val_dice = 0.0 if val_steps == 0 else None
+        sweep_best_iou_thr = metric_threshold
+        sweep_best_dice_thr = metric_threshold
         if val_steps == 0:
             avg_val_loss = float("inf")
             avg_val_dice = 0.0
@@ -190,15 +324,51 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             avg_val_loss = val_loss_sum / max(1.0, val_steps_sum)
             avg_val_dice = val_dice_sum_all / max(1.0, val_steps_sum)
             avg_val_iou = val_iou_sum_all / max(1.0, val_steps_sum)
+            if reconstructed_metrics is not None:
+                avg_val_dice = reconstructed_metrics["avg_dice"]
+                avg_val_iou = reconstructed_metrics["avg_iou"]
+            sweep_best_iou = avg_val_iou
+            sweep_best_dice = avg_val_dice
+            if val_thr_report:
+                for t, report in val_thr_report.items():
+                    if reconstructed_metrics is not None and float(t) in reconstructed_metrics["thresholds"]:
+                        avg_thr_dice = reconstructed_metrics["thresholds"][float(t)]["dice_avg"]
+                        avg_thr_iou = reconstructed_metrics["thresholds"][float(t)]["iou_avg"]
+                    else:
+                        avg_thr_dice = _all_reduce_sum(report["dice"], device=device) / max(1.0, val_steps_sum)
+                        avg_thr_iou = _all_reduce_sum(report["iou"], device=device) / max(1.0, val_steps_sum)
+                    val_thr_report[t]["dice_avg"] = avg_thr_dice
+                    val_thr_report[t]["iou_avg"] = avg_thr_iou
+                    if avg_thr_iou > sweep_best_iou:
+                        sweep_best_iou = avg_thr_iou
+                        sweep_best_iou_thr = float(t)
+                    if avg_thr_dice > sweep_best_dice:
+                        sweep_best_dice = avg_thr_dice
+                        sweep_best_dice_thr = float(t)
         val_losses.append(avg_val_loss)
 
         if is_main:
             logging.info(f"Epoch {epoch+1}/{num_epochs}:")
             logging.info(f"Train Loss: {avg_train_loss:.4f}")
-            thr = getattr(train_model, "_metric_threshold", 0.5)
+            thr = metric_threshold
             logging.info(
                 f"Val Loss: {avg_val_loss:.4f} | Val Dice@{thr}: {avg_val_dice:.4f} | Val IoU@{thr}: {avg_val_iou:.4f}"
             )
+            if reconstructed_metrics is not None:
+                logging.info(
+                    f"Validation used reconstructed full-image metrics over {reconstructed_metrics['image_count']} image(s)."
+                )
+            if val_thr_report:
+                sweep_items = []
+                for t in sorted(val_thr_report.keys(), key=float):
+                    sweep_items.append(
+                        f"{float(t):.2f}:dice={val_thr_report[t]['dice_avg']:.4f},iou={val_thr_report[t]['iou_avg']:.4f}"
+                    )
+                logging.info("Threshold sweep: " + " | ".join(sweep_items))
+                logging.info(
+                    f"Best sweep metrics: IoU={sweep_best_iou:.4f}@{sweep_best_iou_thr:.2f} | "
+                    f"Dice={sweep_best_dice:.4f}@{sweep_best_dice_thr:.2f}"
+                )
 
         # Step the learning-rate scheduler SAFELY
         sched_metric = getattr(train_model, "_scheduler_metric", "loss")
@@ -220,34 +390,70 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 writer = csv.writer(f)
                 writer.writerow([epoch + 1, avg_train_loss, avg_val_loss, avg_val_dice, avg_val_iou, current_lr])
 
+        metrics = {
+            "train_loss": avg_train_loss,
+            "val_loss": avg_val_loss,
+            "val_dice": avg_val_dice,
+            "val_iou": avg_val_iou,
+            "best_iou_sweep": sweep_best_iou,
+            "best_iou_sweep_threshold": sweep_best_iou_thr,
+            "best_dice_sweep": sweep_best_dice,
+            "best_dice_sweep_threshold": sweep_best_dice_thr,
+            "lr": current_lr,
+        }
+
         # Save last model
         if is_main:
             last_model_path = os.path.join(output_dir, "last_model.pth")
-            torch.save(_state_dict_for_saving(model), last_model_path)
+            save_checkpoint(last_model_path, model, model_config, epoch=epoch + 1, metrics=metrics)
         
         # Save epoch model (if configured)
         save_all = getattr(train_model, "_save_all_epochs", True) 
         if save_all and is_main:
             epoch_model_path = os.path.join(output_dir, f"epoch_{epoch+1}.pth")
-            torch.save(_state_dict_for_saving(model), epoch_model_path)
+            save_checkpoint(epoch_model_path, model, model_config, epoch=epoch + 1, metrics=metrics)
 
-        # Save the best model (using IoU as primary)
-        current_perf = avg_val_iou 
-        if val_steps > 0 and current_perf > best_val_score:
-            best_val_score = current_perf
-            best_val_loss = avg_val_loss  
+        best_metric_name = getattr(train_model, "_best_model_metric", "best_iou")
+        metric_candidates = {
+            "best_iou": (avg_val_iou, True, f"Val IoU@{getattr(train_model, '_metric_threshold', 0.5):.2f}"),
+            "best_dice": (avg_val_dice, True, f"Val Dice@{getattr(train_model, '_metric_threshold', 0.5):.2f}"),
+            "best_iou_sweep": (sweep_best_iou, True, f"Best sweep IoU@{sweep_best_iou_thr:.2f}"),
+            "best_dice_sweep": (sweep_best_dice, True, f"Best sweep Dice@{sweep_best_dice_thr:.2f}"),
+            "loss": (avg_val_loss, False, "Val Loss"),
+        }
+        monitor_value, higher_is_better, monitor_label = metric_candidates[best_metric_name]
+        improved = False
+        if val_steps > 0:
+            if best_monitor_value is None:
+                improved = True
+            elif higher_is_better:
+                improved = monitor_value > best_monitor_value
+            else:
+                improved = monitor_value < best_monitor_value
+
+        if improved:
+            best_monitor_value = monitor_value
+            best_monitor_label = monitor_label
+            best_val_loss = avg_val_loss
             counter = 0 
             if is_main:
                 model_path = os.path.join(output_dir, "best_model.pth")
-                torch.save(_state_dict_for_saving(model), model_path)
-                logging.info(f"New best IoU: {current_perf:.4f}. Saved best model to {model_path}!")
+                save_checkpoint(model_path, model, model_config, epoch=epoch + 1, metrics=metrics)
+                logging.info(
+                    f"New best {monitor_label}: {monitor_value:.4f}. Saved best model to {model_path}!"
+                )
         else:
             counter += 1
             if is_main:
-                logging.info(f"Val IoU did not improve. Patience: {counter}/{patience}")
+                logging.info(
+                    f"{best_monitor_label or monitor_label} did not improve. Patience: {counter}/{patience}"
+                )
             if counter >= patience:
                 if is_main:
-                    logging.info(f"Early stopping triggered! No improvement for {patience} epochs.")
+                    logging.info(
+                        f"Early stopping triggered on {best_monitor_label or monitor_label}. "
+                        f"No improvement for {patience} epochs."
+                    )
                 break
 
         # Visualize a few predictions.

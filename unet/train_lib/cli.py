@@ -19,12 +19,19 @@ def build_arg_parser():
     parser.set_defaults(no_visualize=True, no_loss_curve=True)
 
     # Preprocessing
-    parser.add_argument("--preprocess", type=str, default="patch", choices=["patch", "letterbox", "stretch"], help="Preprocessing method")
-    parser.add_argument("--preprocess-train", type=str, default=None, help="Preprocessing method for training (overrides --preprocess)")
-    parser.add_argument("--preprocess-val", type=str, default=None, help="Preprocessing method for validation (overrides --preprocess)")
+    parser.add_argument(
+        "--preprocess",
+        type=str,
+        default="patch",
+        choices=["patch", "letterbox", "resize", "stretch", "random_crop"],
+        help="Preprocessing method. 'stretch' is kept as a backward-compatible alias for 'resize'.",
+    )
+    parser.add_argument("--preprocess-train", type=str, default=None, help="Training preprocessing override: patch, letterbox, resize/stretch, or random_crop")
+    parser.add_argument("--preprocess-val", type=str, default=None, help="Validation preprocessing override: patch, letterbox, resize/stretch, or random_crop")
     parser.add_argument("--input-size", type=int, default=256, help="Input size for the model")
     parser.add_argument("--patches-per-image", type=int, default=1, help="Number of patches per image (for patch mode)")
     parser.add_argument("--max-patch-tries", type=int, default=5, help="Max tries to find a patch with crack")
+    parser.add_argument("--negative-patch-prob", type=float, default=0.25, help="Probability of keeping a background-only patch in patch mode")
     parser.add_argument("--val-stride", type=int, default=0, help="Stride for validation patching (0 = input_size)")
     
     # Augmentation
@@ -66,6 +73,13 @@ def build_arg_parser():
     # Metrics and Scheduler
     parser.add_argument("--metric-threshold", type=float, default=0.5, help="Threshold for metrics")
     parser.add_argument("--metric-thresholds", type=str, default="", help="Comma-separated thresholds")
+    parser.add_argument(
+        "--best-model-metric",
+        type=str,
+        default="best_iou",
+        choices=["best_iou", "best_dice", "best_iou_sweep", "best_dice_sweep", "loss"],
+        help="Metric used for selecting best_model.pth and early stopping.",
+    )
     parser.add_argument("--scheduler-metric", type=str, default="loss", help="Metric for scheduler")
     parser.add_argument("--scheduler-factor", type=float, default=0.5, help="Scheduler factor")
     parser.add_argument("--scheduler-patience", type=int, default=10, help="Scheduler patience")

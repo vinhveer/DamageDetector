@@ -5,7 +5,7 @@ import torch
 
 from ui.qt import QtCore
 
-import segmentation_models_pytorch as smp
+from model_io import load_model_from_checkpoint
 from predict_lib import _find_gt_mask, _safe_basename, predict_image
 
 
@@ -47,28 +47,16 @@ class PredictWorker(QtCore.QObject):
         device = torch.device("cpu")
         self.log.emit(f"Using device: {device}")
 
-        # Use SMP Unet instead of custom Attention UNet
-        # Must match training config: tu-convnext_tiny by default based on user config
-        model = smp.Unet(
-            encoder_name="tu-convnext_tiny",
-            encoder_weights=None, 
-            in_channels=3, 
-            classes=1,
-            decoder_attention_type="scse"
-        )
         try:
-             # Ensure we load with weights_only=False to support older pytorch versions / complex objects if needed, 
-             # though strictly for weights it should be fine.
-             state_dict = torch.load(self.model_path, map_location=device)
-             model.load_state_dict(state_dict)
+             model, model_config = load_model_from_checkpoint(self.model_path, device)
         except Exception as e:
              self.log.emit(f"Error loading model weights: {e}")
-             self.failed.emit(0, f"Failed to load user model. Ensure it matches SMP architecture (tu-convnext_tiny). Error: {e}")
+             self.failed.emit(0, f"Failed to load user model. Error: {e}")
              return
 
-        model = model.to(device)
-        model.eval()
-        self.log.emit(f"Loaded model: {self.model_path}")
+        self.log.emit(
+            f"Loaded model: {self.model_path} | arch={model_config.get('arch')} | encoder={model_config.get('encoder_name')}"
+        )
 
         overlap = (self.input_size // 2) if self.tile_overlap == 0 else self.tile_overlap
 
@@ -158,18 +146,10 @@ class SinglePredictWorker(QtCore.QObject):
             device = torch.device("cpu")
             self.log.emit(f"Using device: {device}")
 
-            model = smp.Unet(
-                encoder_name="tu-convnext_tiny",
-                encoder_weights=None, 
-                in_channels=3, 
-                classes=1,
-                decoder_attention_type="scse"
+            model, model_config = load_model_from_checkpoint(self.model_path, device)
+            self.log.emit(
+                f"Loaded model: {self.model_path} | arch={model_config.get('arch')} | encoder={model_config.get('encoder_name')}"
             )
-            state_dict = torch.load(self.model_path, map_location=device)
-            model.load_state_dict(state_dict)
-            model = model.to(device)
-            model.eval()
-            self.log.emit(f"Loaded model: {self.model_path}")
 
             overlap = (self.input_size // 2) if self.tile_overlap == 0 else self.tile_overlap
             base = os.path.splitext(os.path.basename(self.image_path))[0]

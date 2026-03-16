@@ -36,6 +36,11 @@ class RandomPatchDataset(Dataset):
         p_vflip=0.3,
         p_brightness=0.3,
         p_contrast=0.3,
+        aug_prob=0.5,
+        rotate_limit=30.0,
+        brightness_limit=0.2,
+        contrast_limit=0.2,
+        negative_patch_prob=0.25,
         mask_index=None,
         cache_size=4,
     ):
@@ -54,6 +59,11 @@ class RandomPatchDataset(Dataset):
         self.p_vflip = float(p_vflip)
         self.p_brightness = float(p_brightness)
         self.p_contrast = float(p_contrast)
+        self.aug_prob = max(0.0, min(1.0, float(aug_prob)))
+        self.rotate_limit = float(rotate_limit)
+        self.brightness_limit = float(brightness_limit)
+        self.contrast_limit = float(contrast_limit)
+        self.negative_patch_prob = max(0.0, min(1.0, float(negative_patch_prob)))
         self._cache_size = max(0, int(cache_size))
         self._cache = OrderedDict()
 
@@ -108,30 +118,56 @@ class RandomPatchDataset(Dataset):
                 A.PadIfNeeded(min_height=patch_h, min_width=patch_w, border_mode=0, value=0, mask_value=0),
                 A.RandomCrop(height=patch_h, width=patch_w, p=1.0),
                 
-                A.Affine(scale=(0.9, 1.1), translate_percent=0.0625, rotate=30, p=0.5),
+                A.HorizontalFlip(p=self.aug_prob),
+                A.VerticalFlip(p=min(1.0, self.aug_prob * 0.6)),
+                A.RandomRotate90(p=min(1.0, self.aug_prob * 0.5)),
+                A.Affine(
+                    scale=(0.9, 1.1),
+                    translate_percent=0.0625,
+                    rotate=(-self.rotate_limit, self.rotate_limit),
+                    p=self.aug_prob,
+                ),
                 A.OneOf([
                     A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05), # Removed alpha_affine
                     A.GridDistortion(p=0.5),
                     A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=0.5),
-                ], p=0.3),
+                ], p=min(1.0, self.aug_prob * 0.6)),
                 
                 # Color/Noise Augmentations
                 A.OneOf([
                     A.CLAHE(clip_limit=2),
-                    A.RandomBrightnessContrast(),
+                    A.RandomBrightnessContrast(
+                        brightness_limit=self.brightness_limit,
+                        contrast_limit=self.contrast_limit,
+                    ),
                     A.RandomGamma(),            
-                ], p=0.5),
+                ], p=self.aug_prob),
                 
                 A.OneOf([
                     A.GaussNoise(),
                     A.MotionBlur(blur_limit=3),
-                ], p=0.3),
+                ], p=min(1.0, self.aug_prob * 0.5)),
                 
-                A.HueSaturationValue(p=0.3),
+                A.HueSaturationValue(p=min(1.0, self.aug_prob * 0.3)),
                 
                 # Environmental / Occlusion
-                A.RandomShadow(num_shadows_limit=(1, 3), shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.3),
-                A.CoarseDropout(num_holes_limit=(1, 8), hole_height_range=(8, 32), hole_width_range=(8, 32), min_holes=None, min_height=None, min_width=None, fill_value=0, mask_fill_value=0, p=0.3),
+                A.RandomShadow(
+                    num_shadows_limit=(1, 3),
+                    shadow_dimension=5,
+                    shadow_roi=(0, 0.5, 1, 1),
+                    p=min(1.0, self.aug_prob * 0.3),
+                ),
+                A.CoarseDropout(
+                    num_holes_limit=(1, 8),
+                    hole_height_range=(8, 32),
+                    hole_width_range=(8, 32),
+                    min_holes=None,
+                    min_height=None,
+                    min_width=None,
+                    fill_value=0,
+                    mask_fill_value=0,
+                    p=min(1.0, self.aug_prob * 0.3),
+                ),
             ], is_check_shapes=False)
         else:
             self.aug_transform = None
@@ -183,15 +219,30 @@ class RandomPatchDataset(Dataset):
             image_np = np.array(image_pil)
             mask_np = np.array(mask_pil)
 
-            # 1. Random Crop (Try K times to find crack)
+            # 1. Random Crop with controllable positive/negative balance.
             best_sample = None
-            
+            best_positive = None
+            best_negative = None
+            keep_negative = random.random() < self.negative_patch_prob
+
             for _ in range(max(1, self.max_patch_tries)):
                 cropped = self.crop_transform(image=image_np, mask=mask_np)
-                if np.count_nonzero(cropped['mask']) > 0:
-                    best_sample = cropped
-                    break
-                best_sample = cropped # Fallback to last try
+                has_crack = np.count_nonzero(cropped["mask"]) > 0
+                if has_crack:
+                    best_positive = cropped
+                    if not keep_negative:
+                        best_sample = cropped
+                        break
+                else:
+                    best_negative = cropped
+
+            if best_sample is None:
+                if keep_negative and best_negative is not None:
+                    best_sample = best_negative
+                elif best_positive is not None:
+                    best_sample = best_positive
+                else:
+                    best_sample = best_negative
             
             if best_sample is None:
                 return None
@@ -206,13 +257,21 @@ class RandomPatchDataset(Dataset):
                 mask_np = augmented['mask']
 
             # 3. To Tensor
-            # Image: [H, W, C] -> [C, H, W], float32 [0, 1]
-            image = (image_np.astype(np.float32) / 255.0)
-            image = torch.from_numpy(image).permute(2, 0, 1)
+            if self.image_transform is not None:
+                image = self.image_transform(Image.fromarray(image_np))
+            else:
+                image = torch.from_numpy(image_np.astype(np.float32) / 255.0).permute(2, 0, 1)
+                mean = torch.tensor([0.485, 0.456, 0.406], dtype=image.dtype).view(3, 1, 1)
+                std = torch.tensor([0.229, 0.224, 0.225], dtype=image.dtype).view(3, 1, 1)
+                image = (image - mean) / std
 
             # Mask: [H, W] -> [1, H, W], float32 [0, 1]
-            mask = (mask_np > 127).astype(np.float32)
-            mask = torch.from_numpy(mask).unsqueeze(0)
+            if self.mask_transform is not None:
+                mask = self.mask_transform(Image.fromarray(mask_np))
+                mask = (mask > 0.5).float()
+            else:
+                mask = (mask_np > 127).astype(np.float32)
+                mask = torch.from_numpy(mask).unsqueeze(0)
 
             return image, mask
 
@@ -220,4 +279,3 @@ class RandomPatchDataset(Dataset):
             if self.verbose:
                  print(f"RandomPatchDataset error at idx={idx} ({img_name}): {e}")
             return None
-

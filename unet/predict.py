@@ -2,9 +2,9 @@ import argparse
 import os
 import torch
 
+from model_io import load_model_from_checkpoint
 from predict_lib.core import predict_image
 from predict_lib.folder import predict_folder
-import segmentation_models_pytorch as smp
 
 
 def _build_parser():
@@ -60,20 +60,11 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Build model (Must match training config)
-    model = smp.Unet(
-        encoder_name="tu-convnext_tiny",
-        encoder_weights=None, 
-        in_channels=3, 
-        classes=1,
-        decoder_attention_type="scse"
+    model, model_config = load_model_from_checkpoint(args.model, device)
+    print(
+        "Loaded model: "
+        f"{args.model} | arch={model_config.get('arch')} | encoder={model_config.get('encoder_name')}"
     )
-    
-    state_dict = torch.load(args.model, map_location=device, weights_only=False)
-    model.load_state_dict(state_dict)
-    model.to(device)
-    model.eval()
-    print(f"Loaded model: {args.model}")
 
     overlap = (args.input_size // 2) if args.tile_overlap == 0 else args.tile_overlap
 
