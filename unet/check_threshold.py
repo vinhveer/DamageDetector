@@ -1,9 +1,9 @@
-import torch
+from torch_runtime import torch
 import os
 import argparse
 import numpy as np
 from tqdm import tqdm
-from torch.utils.data import DataLoader
+from torch_runtime import DataLoader
 import segmentation_models_pytorch as smp
 
 # --- Imports logic ---

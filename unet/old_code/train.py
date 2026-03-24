@@ -1,8 +1,7 @@
 import os
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torch.utils.data.dataloader import default_collate
+from torch_runtime import nn, torch
+from torch_runtime import DataLoader
+from torch_runtime import default_collate
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from tqdm import tqdm

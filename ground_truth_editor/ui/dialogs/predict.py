@@ -4,6 +4,8 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from inference_api.editor_bridge import settings_pages_for_mode
+
 from ..utils import browse_dir, browse_file, set_combo_by_data
 
 
@@ -78,7 +80,8 @@ class PredictRunDialog(QtWidgets.QDialog):
         self.rb_sam_only = QtWidgets.QRadioButton("SAM Only (no DINO)", model_group)
         self.rb_sam_only_ft = QtWidgets.QRadioButton("SAM Only + Finetune (no DINO)", model_group)
         self.rb_sam_tiled = QtWidgets.QRadioButton("SAM + DINO Tiled (Crack only)", model_group)
-        self.rb_unet = QtWidgets.QRadioButton("UNet + DINO", model_group)
+        self.rb_unet_only = QtWidgets.QRadioButton("UNet Only", model_group)
+        self.rb_unet_dino = QtWidgets.QRadioButton("UNet + DINO", model_group)
         self.rb_sam_dino.setChecked(True)
 
         mg_layout.addWidget(self.rb_sam_dino)
@@ -86,7 +89,8 @@ class PredictRunDialog(QtWidgets.QDialog):
         mg_layout.addWidget(self.rb_sam_only)
         mg_layout.addWidget(self.rb_sam_only_ft)
         mg_layout.addWidget(self.rb_sam_tiled)
-        mg_layout.addWidget(self.rb_unet)
+        mg_layout.addWidget(self.rb_unet_only)
+        mg_layout.addWidget(self.rb_unet_dino)
         layout.addWidget(model_group)
 
         # Scope Group
@@ -131,8 +135,10 @@ class PredictRunDialog(QtWidgets.QDialog):
             mode = "sam_only_ft"
         elif self.rb_sam_tiled.isChecked():
             mode = "sam_tiled"
-        elif self.rb_unet.isChecked():
-            mode = "unet"
+        elif self.rb_unet_only.isChecked():
+            mode = "unet_only"
+        elif self.rb_unet_dino.isChecked():
+            mode = "unet_dino"
         else:
             mode = "sam_dino"
 
@@ -168,7 +174,10 @@ class PredictDialog(QtWidgets.QDialog):
         root.setSpacing(10)
 
         header = QtWidgets.QLabel(title, self)
-        header.setStyleSheet("font-weight: 600; font-size: 14px;")
+        header_font = header.font()
+        header_font.setBold(True)
+        header_font.setPointSize(max(14, header_font.pointSize()))
+        header.setFont(header_font)
         root.addWidget(header)
 
         self._scope_current: QtWidgets.QRadioButton | None = None
@@ -201,16 +210,7 @@ class PredictDialog(QtWidgets.QDialog):
         self._w: dict[str, QtWidgets.QWidget] = {}
 
         if pages is None:
-            show_sam = self._mode in {"sam_dino", "sam_dino_ft"}
-            show_unet = self._mode == "unet"
-            show_dino = True
-            pages = []
-            if show_sam:
-                pages.append("SAM")
-            if show_dino:
-                pages.append("DINO")
-            if show_unet:
-                pages.append("UNet")
+            pages = settings_pages_for_mode(self._mode)
 
         page_builders = {
             "sam": lambda: self._build_sam_page(settings),
@@ -578,7 +578,7 @@ class PredictDialog(QtWidgets.QDialog):
                 @QtCore.Slot()
                 def run(self) -> None:
                     try:
-                        from predict.dino.download import download_hf_model
+                        from dino.download import download_hf_model
 
                         path = download_hf_model(str(model_id), out_dir, log_fn=self.log.emit)
                         self.done.emit(path)
@@ -700,7 +700,7 @@ class PredictDialog(QtWidgets.QDialog):
 
         input_size = QtWidgets.QSpinBox(page)
         input_size.setRange(64, 4096)
-        input_size.setValue(int(settings.get("unet_input_size", 256)))
+        input_size.setValue(int(settings.get("unet_input_size", 512)))
 
         overlap = QtWidgets.QSpinBox(page)
         overlap.setRange(0, 4096)

@@ -18,7 +18,7 @@ from image_io import (
     save_mask_png_0255,
 )
 
-from .features.predict.workers import ImageIoWorker
+from .io_worker import ImageIoWorker
 from .state import LoadedState
 
 

@@ -1,5 +1,4 @@
-import torch
-import torch.nn.functional as F
+from torch_runtime import F, torch
 
 
 def dice_loss(pred, target):

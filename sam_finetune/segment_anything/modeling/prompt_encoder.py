@@ -5,8 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import numpy as np
-import torch
-from torch import nn
+from torch_runtime import nn, torch
 from typing import Any, Optional, Tuple, Type
 from .common import LayerNorm2d
 

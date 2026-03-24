@@ -1,0 +1,14 @@
+{
+  "run_id": "2026-03-24_11-49-19_sam_dino_0816e5",
+  "workflow": "sam_dino",
+  "status": "done",
+  "error": null,
+  "result": {
+    "detections": [
+      {
+        "label": "crack",
+        "score": 0.9
+      }
+    ]
+  }
+}

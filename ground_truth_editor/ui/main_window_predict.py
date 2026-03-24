@@ -4,29 +4,15 @@ import csv
 import datetime
 import json
 import os
-from dataclasses import replace
 from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
 
 from image_io import ImageIoError, load_image, load_mask
-from predict_sam_dino import SamDinoParams
-from predict_unet import UnetParams
+from inference_api.contracts import InferenceRequest
+from inference_api.editor_bridge import build_editor_request, prediction_title
 
 from .dialogs import PredictRunDialog, ProcessingDialog, IsolateDialog
-from .features.predict.workers import (
-    BatchSamDinoTiledWorker,
-    BatchSamDinoWorker,
-    BatchSamOnlyWorker,
-    BatchUnetWorker,
-    SamDinoIsolateWorker,
-    SamDinoTiledWorker,
-    SamDinoWorker,
-    SamOnlyWorker,
-    UnetDinoWorker,
-    UnetWorker,
-    WorkerBase,
-)
 
 
 class MainWindowPredictMixin:
@@ -40,95 +26,14 @@ class MainWindowPredictMixin:
         repo_root = Path(__file__).resolve().parents[2]
         return str(repo_root / p)
 
-    def _build_sam_dino_params(
-        self,
-        *,
-        output_dir: str | None = None,
-        invert_override: bool | None = None,
-        force_use_delta: bool | None = None,
-    ) -> SamDinoParams:
-        ckpt = self._sd_sam_ckpt.text().strip()
-        if not ckpt:
-            raise ValueError("SAM checkpoint is required.")
+    def _editor_settings(self) -> dict:
+        return self._collect_settings()
 
-        gdino_ckpt = self._sd_gdino_ckpt.text().strip()
-        if not gdino_ckpt:
-            raise ValueError("GroundingDINO checkpoint is required.")
-
-        gdino_lower = gdino_ckpt.lower()
-        if gdino_lower.endswith((".pth", ".pt", ".safetensors", ".bin")) and not os.path.exists(gdino_ckpt):
-            raise ValueError(f"GroundingDINO checkpoint not found: {gdino_ckpt}")
-
-        out_dir = output_dir 
-        if not out_dir:
-            # Use workspace results dir if available
-            res_dir = getattr(self, "_results_dir", None)
-            if res_dir:
-                out_dir = str(res_dir)
-            else:
-                out_dir = "results_sam_dino" # Fallback
-
-        queries = [q.strip() for q in self._sd_queries.text().split(",") if q.strip()]
-        if not queries:
-            raise ValueError("Text queries required (comma-separated).")
-
-        delta_type = "none"
-        delta_ckpt = self._sd_delta_ckpt.text().strip()
-        middle_dim = int(self._sd_middle_dim.value())
-        scaling_factor = float(self._sd_scaling_factor.value())
-        rank = int(self._sd_rank.value())
-        
-        should_use_delta = False
-        if force_use_delta is not None:
-             should_use_delta = force_use_delta
-        else:
-             # Inferred logic: uses delta if path is set (not auto/empty)
-             if delta_ckpt and delta_ckpt.lower() != "auto":
-                 should_use_delta = True
-        
-        if should_use_delta:
-            delta_type = str(self._sd_delta_type.currentText())
-            if not delta_ckpt or delta_ckpt.lower() == "auto":
-                 raise ValueError("Deta checkpoint path is required to use fine-tuned model.")
-            
-            if delta_ckpt.lower().endswith((".pth", ".pt", ".safetensors", ".bin")) and not os.path.exists(delta_ckpt):
-                 raise ValueError(f"Delta checkpoint not found: {delta_ckpt}")
-
-        invert_mask = bool(self._sd_invert.isChecked())
-        if invert_override is not None:
-            invert_mask = bool(invert_override)
-
-        cfg_id = self._sd_gdino_cfg.currentData()
-        if cfg_id is None or not str(cfg_id).strip():
-            raise ValueError("GroundingDINO config is required.")
-
-        params = SamDinoParams(
-            sam_checkpoint=ckpt,
-            sam_model_type=str(self._sd_sam_type.currentText()),
-            delta_type=delta_type,
-            delta_checkpoint=delta_ckpt,
-            middle_dim=middle_dim,
-            scaling_factor=scaling_factor,
-            rank=rank,
-            gdino_checkpoint=gdino_ckpt,
-            gdino_config_id=str(cfg_id),
-            text_queries=queries,
-            box_threshold=float(self._sd_box_thr.value()),
-            text_threshold=float(self._sd_text_thr.value()),
-            max_dets=int(self._sd_max_dets.value()),
-            invert_mask=invert_mask,
-            sam_min_component_area=int(self._sd_min_area.value()),
-            sam_dilate_iters=int(self._sd_dilate.value()),
-            device=str(self._sd_device.currentText()),
-            output_dir=out_dir,
-        )
-
-        roi_box = getattr(self, "_current_roi_box", None)
-        if roi_box is not None:
-            from dataclasses import replace
-            params = replace(params, roi_box=roi_box)
-
-        return params
+    def _default_output_dir(self, mode: str) -> str:
+        res_dir = getattr(self, "_results_dir", None)
+        if res_dir:
+            return str(res_dir)
+        return "results_unet" if str(mode).strip().lower().startswith("unet") else "results_sam_dino"
 
     def _append_log(self, widget: QtWidgets.QPlainTextEdit, text: str) -> None:
         widget.appendPlainText(text)
@@ -640,7 +545,7 @@ class MainWindowPredictMixin:
         self._refresh_ui_state()
 
     def _start_predict_roi(self) -> None:
-        if self._thread is not None:
+        if self._active_job_id is not None:
             QtWidgets.QMessageBox.information(self, "Predict", "Already running. Please wait.")
             return
         if not self._ensure_image_loaded():
@@ -655,7 +560,7 @@ class MainWindowPredictMixin:
         self.statusBar().showMessage("Select ROI for prediction. Esc to cancel.")
 
     def _open_predict_mode_dialog(self) -> None:
-        if self._thread is not None:
+        if self._active_job_id is not None:
             QtWidgets.QMessageBox.information(self, "Predict", "Already running. Please wait.")
             return
 
@@ -672,7 +577,7 @@ class MainWindowPredictMixin:
         QtCore.QTimer.singleShot(50, lambda: self._execute_prediction(mode, scope))
 
     def _predict_folder_dialog(self) -> None:
-        if self._thread is not None:
+        if self._active_job_id is not None:
             QtWidgets.QMessageBox.information(self, "Predict", "Already running. Please wait.")
             return
 
@@ -696,7 +601,7 @@ class MainWindowPredictMixin:
         QtCore.QTimer.singleShot(50, lambda: self._execute_prediction(mode, "folder", folder_images=images))
 
     def _predict_with_scope(self, mode: str) -> None:
-        if self._thread is not None:
+        if self._active_job_id is not None:
             QtWidgets.QMessageBox.information(self, "Predict", "Already running. Please wait.")
             return
         has_image = self._state is not None
@@ -727,19 +632,7 @@ class MainWindowPredictMixin:
 
     def _execute_prediction(self, mode: str, scope: str, *, folder_images: list[str] | None = None) -> None:
         mode = str(mode or "").strip().lower()
-        if mode == "sam_dino_ft":
-            title = "Predict SAM + DINO + Finetune"
-        elif mode == "sam_dino":
-            title = "Predict SAM + DINO"
-        elif mode == "sam_only":
-            title = "Predict SAM Only"
-        elif mode == "sam_only_ft":
-            title = "Predict SAM Only + Finetune"
-        elif mode == "unet":
-            title = "Predict UNet + DINO"
-        else:
-            QtWidgets.QMessageBox.critical(self, "Predict", f"Unknown mode: {mode}")
-            return
+        title = prediction_title(mode)
 
         if not self._ensure_settings_ready(mode):
             return
@@ -774,12 +667,19 @@ class MainWindowPredictMixin:
                 self._run_batch_sam_tiled(images)
             return
 
-        if mode == "unet":
+        if mode == "unet_only":
             if scope == "current":
                 self._run_unet()
             else:
                 self._run_batch_unet(images)
             return
+        if mode == "unet_dino":
+            if scope == "current":
+                self._run_unet_dino()
+            else:
+                self._run_batch_unet_dino(images)
+            return
+        QtWidgets.QMessageBox.critical(self, "Predict", f"Unknown mode: {mode}")
 
     def _ensure_image_loaded(self) -> bool:
         return self._state is not None
@@ -847,56 +747,23 @@ class MainWindowPredictMixin:
         self._progress_dialog = dialog
         return dialog
 
-    def _start_worker(self, worker: WorkerBase, *, title: str, pre_logs: list[str] | None = None) -> None:
-        if self._thread is not None:
+    def _submit_inference_request(self, request: InferenceRequest, *, title: str, pre_logs: list[str] | None = None) -> None:
+        if self._active_job_id is not None:
             return
-        self._thread = QtCore.QThread(self)
-        self._worker = worker
-
         dialog = self._show_processing_dialog(title)
         self._active_log_widget = dialog.log_widget()
         self._active_stop_btn = dialog.stop_button()
         if pre_logs:
             for line in pre_logs:
                 self._append_log(self._active_log_widget, line)
-
-        # Create a broker in the GUI thread to safely route signals.
-        # This bypasses PySide6's metaclass bugs with bound methods on Mixins.
-        class SignalBroker(QtCore.QObject):
-            log = QtCore.Signal(str)
-            failed = QtCore.Signal(str)
-            finished = QtCore.Signal(object)
-            cleanup = QtCore.Signal()
-
-        # Keep a reference to the broker to prevent GC
-        self._worker_broker = SignalBroker(self)
-        self._worker_broker.log.connect(self._on_worker_log, type=QtCore.Qt.ConnectionType.QueuedConnection)
-        self._worker_broker.failed.connect(self._on_worker_failed_slot, type=QtCore.Qt.ConnectionType.QueuedConnection)
-        self._worker_broker.finished.connect(
-            self._on_worker_finished_slot,
-            type=QtCore.Qt.ConnectionType.QueuedConnection,
-        )
-        self._worker_broker.cleanup.connect(self._cleanup_worker, type=QtCore.Qt.ConnectionType.QueuedConnection)
-
-        worker.moveToThread(self._thread)
-
-        self._thread.started.connect(worker.run, type=QtCore.Qt.ConnectionType.QueuedConnection)
-        
-        worker.log.connect(self._worker_broker.log, type=QtCore.Qt.ConnectionType.QueuedConnection)
-        worker.failed.connect(self._worker_broker.failed, type=QtCore.Qt.ConnectionType.QueuedConnection)
-        worker.finished.connect(self._worker_broker.finished, type=QtCore.Qt.ConnectionType.QueuedConnection)
-
-        # thread.quit can be directly connected since QThread is a proper QObject
-        worker.finished.connect(self._thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
-        worker.failed.connect(self._thread.quit, type=QtCore.Qt.ConnectionType.QueuedConnection)
-        self._thread.finished.connect(self._thread.deleteLater, type=QtCore.Qt.ConnectionType.QueuedConnection)
-        self._thread.finished.connect(self._worker_broker.cleanup, type=QtCore.Qt.ConnectionType.QueuedConnection)
-
+        self._active_job_id = self._inference_api.submit(request)
+        self._active_job_workflow = request.workflow
         self._set_running(True)
-        self._thread.start()
+        self._predict_poll_timer.start()
 
     @QtCore.Slot()
-    def _cleanup_worker(self) -> None:
+    def _cleanup_job(self) -> None:
+        self._predict_poll_timer.stop()
         if self._active_stop_btn is not None:
             self._active_stop_btn.setEnabled(False)
         if self._progress_dialog is not None:
@@ -904,94 +771,111 @@ class MainWindowPredictMixin:
             self._progress_dialog.close()
             self._progress_dialog.deleteLater()
             self._progress_dialog = None
-        self._thread = None
-        self._worker = None
+        self._active_job_id = None
+        self._active_job_workflow = None
         self._active_stop_btn = None
         self._active_log_widget = None
         self._reset_run_context()
         self._set_running(False)
 
+    @QtCore.Slot()
+    def _poll_inference_events(self) -> None:
+        job_id = self._active_job_id
+        if not job_id:
+            self._predict_poll_timer.stop()
+            return
+        for event in self._inference_api.drain_events(job_id):
+            if event.type == "progress" and event.message:
+                self._on_worker_log(event.message)
+                continue
+            if event.type == "partial_result" and event.result is not None:
+                details = event.result.to_dict()
+                if details:
+                    image_path = details.get("image_path") or (self._state.image_path if self._state else "")
+                    is_current = bool(self._state) and os.path.normpath(str(image_path)) == os.path.normpath(str(self._state.image_path))
+                    self._store_detections_from_details(details, update_view=is_current, append=False)
+                    if is_current:
+                        self._apply_visual_result(details)
+                continue
+            if event.type == "completed" and event.result is not None:
+                self._on_worker_finished_slot(event.result.to_dict())
+                self._cleanup_job()
+                return
+            if event.type == "failed":
+                self._on_worker_failed_slot(event.error or event.message or "Unknown inference error.")
+                self._cleanup_job()
+                return
+            if event.type == "cancelled":
+                self._on_worker_finished_slot({"stopped": True})
+                self._cleanup_job()
+                return
+
+    def _submit_editor_mode(
+        self,
+        mode: str,
+        *,
+        title: str,
+        image_path: str | None = None,
+        image_paths: list[str] | None = None,
+        roi_box: tuple[int, int, int, int] | None = None,
+        pre_logs: list[str] | None = None,
+        target_labels: list[str] | None = None,
+        outside_value: int | None = None,
+        crop_to_bbox: bool | None = None,
+        max_depth: int | None = None,
+        min_box_px: int | None = None,
+    ) -> dict:
+        request = build_editor_request(
+            mode,
+            self._editor_settings(),
+            image_path=image_path,
+            image_paths=image_paths,
+            roi_box=roi_box,
+            output_dir=self._default_output_dir(mode),
+            target_labels=target_labels,
+            outside_value=outside_value,
+            crop_to_bbox=crop_to_bbox,
+            max_depth=max_depth,
+            min_box_px=min_box_px,
+        )
+        self._submit_inference_request(request, title=title, pre_logs=pre_logs)
+        return dict(request.params)
+
     def _run_unet(self, start_run: bool = True) -> None:
         if not self._ensure_image_loaded():
             QtWidgets.QMessageBox.critical(self, "UNet", "Load an image first.")
             return
-
-        image_path = self._state.image_path
-        model_path = self._unet_model_edit.text().strip()
-        if not model_path:
-            QtWidgets.QMessageBox.critical(self, "UNet", "UNet model is required.")
-            return
-        if not os.path.isfile(model_path):
-            QtWidgets.QMessageBox.critical(self, "UNet", f"UNet model not found: {model_path}")
-            return
-            
-        res_dir = getattr(self, "_results_dir", None)
-        out_dir = str(res_dir) if res_dir else "results_unet"
-
-        unet_params = UnetParams(
-            model_path=model_path,
-            output_dir=out_dir,
-            threshold=float(self._unet_threshold.value()),
-            apply_postprocessing=bool(self._unet_post.isChecked()),
-            mode=str(self._unet_mode.currentText()),
-            input_size=int(self._unet_input_size.value()),
-            tile_overlap=int(self._unet_overlap.value()),
-            tile_batch_size=int(self._unet_tile_batch.value()),
-        )
-
         roi_box = getattr(self, "_current_roi_box", None)
-        if roi_box is not None:
-            unet_params = replace(unet_params, roi_box=roi_box)
-
-        # Check if we should use DINO first
-        # If user explicitly calls "UNet + DINO", they want DINO detection first.
-        # But we need to know if they manually selected a ROI.
-        # Use existing _pending_unet logic? No, let's check if DINO settings are needed.
-        # We assume if no ROI is pending, and the mode is "Predict UNet + DINO" (from dialog context),
-        # we should use DINO.
-        # However, _run_unet is called from _execute_prediction which knows the mode.
-        # _execute_prediction sets 'title' but passes nothing else.
-        # But we know mode="unet" in PredictDialog means "UNet + DINO".
-        # Let's check DINO checkpoint availability.
-
-        # If Manual ROI is active (pending unet), use that.
-        if self._pending_unet:
-            # Already handled by _on_roi_selected
-            return
-
-        # If no pending ROI, we default to DINO detection unless user wants full image.
-        # But wait, UNet can also run on full image.
-        # The user requested "Unet -> DINO run object -> Unet know region".
-        # This implies "UNet + DINO" is THE way this button works now.
-        # So we should run UnetDinoWorker.
-
-        # Ask user? Or just do it?
-        # Let's assume default behavior for "UNet + DINO" button is DINO-guided.
-        # If they want full image, maybe standard UNet running...
-        # But "Predict UNet + DINO" is the label.
-
         try:
-            dino_params = self._build_sam_dino_params()
-        except Exception:
-            dino_params = None
-
-        if dino_params:
-            if start_run:
-                self._begin_run("current", {"unet": unet_params, "dino": dino_params})
-            # Run DINO then UNet
-            worker = UnetDinoWorker(image_path, unet_params, dino_params)
-            self._start_worker(worker, title="UNet + DINO Processing")
+            params = self._submit_editor_mode(
+                "unet_only",
+                title="UNet processing",
+                image_path=self._state.image_path,
+                roi_box=roi_box,
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "UNet", str(e))
             return
-
-        # Fallback to standard UNet (tiled/full)
         if start_run:
-            self._begin_run("current", unet_params)
-        self._pending_unet = (image_path, unet_params)
-        self._view_tabs.setCurrentIndex(0)  # Overlay
-        self._overlay_canvas.set_editable(False)
-        self._overlay_canvas.start_roi_selection()
-        self._set_roi_selecting(True)
-        self.statusBar().showMessage("Select ROI for UNet (or click for full image). DINO params invalid/missing.")
+            self._begin_run("current", params)
+
+    def _run_unet_dino(self, start_run: bool = True) -> None:
+        if not self._ensure_image_loaded():
+            QtWidgets.QMessageBox.critical(self, "UNet + DINO", "Load an image first.")
+            return
+        roi_box = getattr(self, "_current_roi_box", None)
+        try:
+            params = self._submit_editor_mode(
+                "unet_dino",
+                title="UNet + DINO Processing",
+                image_path=self._state.image_path,
+                roi_box=roi_box,
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "UNet + DINO", str(e))
+            return
+        if start_run:
+            self._begin_run("current", params)
 
     @QtCore.Slot(object)
     def _on_roi_selected(self, roi_box_obj) -> None:
@@ -1043,26 +927,6 @@ class MainWindowPredictMixin:
             QtCore.QTimer.singleShot(50, do_run)
             return
 
-        if getattr(self, "_pending_unet", None) is None:
-            return
-        image_path, params = self._pending_unet
-        self._pending_unet = None
-
-        roi_box = roi_box_obj if roi_box_obj is None else tuple(int(x) for x in roi_box_obj)
-        self._overlay_canvas.set_editable(True)
-        self._set_roi_selecting(False)
-
-        log_lines: list[str] = []
-        if roi_box is None:
-            log_lines.append("ROI: full image")
-        else:
-            l, t, r, b = roi_box
-            log_lines.append(f"ROI: left={l}, top={t}, right={r}, bottom={b}")
-
-        params2 = replace(params, roi_box=roi_box)
-        worker = UnetWorker(image_path, params2)
-        self._start_worker(worker, title="UNet processing", pre_logs=log_lines)
-
     @QtCore.Slot()
     def _on_roi_canceled(self) -> None:
         if getattr(self, "_pending_predict_roi", False):
@@ -1073,26 +937,12 @@ class MainWindowPredictMixin:
             self.statusBar().showMessage("ROI selection canceled.", 4000)
             return
 
-        if getattr(self, "_pending_unet", None) is None:
-            return
-        self._pending_unet = None
-        self._overlay_canvas.set_editable(True)
-        self._set_roi_selecting(False)
-        self.statusBar().showMessage("ROI selection canceled.", 4000)
-
     def _isolate_object(self) -> None:
-        if self._thread is not None:
+        if self._active_job_id is not None:
             QtWidgets.QMessageBox.information(self, "Isolate object", "Already running. Please wait.")
             return
         if not self._ensure_image_loaded():
             QtWidgets.QMessageBox.critical(self, "Isolate object", "Load an image first.")
-            return
-
-        try:
-            # Force base SAM+DINO (no delta) for isolation to ensure consistent behavior
-            params = self._build_sam_dino_params(force_use_delta=False)
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Isolate object", str(e))
             return
             
         last_labels = getattr(self, "_isolate_last_labels", "")
@@ -1115,21 +965,21 @@ class MainWindowPredictMixin:
         self._schedule_save_settings()
 
         target_labels = [t.strip() for t in labels_text.split(",") if t.strip()]
-        
-        # If user provided labels, use them as the detection queries for this run.
-        # This ensures we actually look for what we want to isolate.
-        if target_labels:
-            params = replace(params, text_queries=target_labels)
 
         self._post_run_action = {"type": "isolate", "source_image": self._state.image_path}
-        worker = SamDinoIsolateWorker(
-            self._state.image_path,
-            params,
-            target_labels=target_labels,
-            outside_value=outside_value,
-            crop_to_bbox=crop_to_bbox,
-        )
-        self._start_worker(worker, title="Isolate object")
+        try:
+            params = self._submit_editor_mode(
+                "isolate",
+                title="Isolate object",
+                image_path=self._state.image_path,
+                target_labels=target_labels,
+                outside_value=outside_value,
+                crop_to_bbox=crop_to_bbox,
+            )
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Isolate object", str(e))
+            return
+        self._begin_run("current", params)
 
     def _run_sam_dino(self, checked: bool = False, *, force_use_delta: bool | None = None) -> None:
         if not self._ensure_image_loaded():
@@ -1137,15 +987,14 @@ class MainWindowPredictMixin:
             return
 
         try:
-            params = self._build_sam_dino_params(force_use_delta=force_use_delta)
-            self._begin_run("current", params)
+            mode = "sam_dino_ft" if force_use_delta else "sam_dino"
+            params = self._submit_editor_mode(mode, title="SAM + DINO processing", image_path=self._state.image_path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "SAM+DINO", str(e))
             return
 
+        self._begin_run("current", params)
         self._post_run_action = None
-        worker = SamDinoWorker(self._state.image_path, params)
-        self._start_worker(worker, title="SAM + DINO processing")
 
     def _run_batch_unet(self, image_paths: list[str] | None = None) -> None:
         images = image_paths if image_paths is not None else self._folder_images
@@ -1153,34 +1002,25 @@ class MainWindowPredictMixin:
             QtWidgets.QMessageBox.information(self, "Batch UNet", "No images in folder list. Open a folder first.")
             return
 
-        model_path = self._unet_model_edit.text().strip()
-        if not model_path:
-            QtWidgets.QMessageBox.critical(self, "Batch UNet", "UNet model is required.")
+        try:
+            params = self._submit_editor_mode("unet_only", title="Batch UNet Processing", image_paths=list(images))
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Batch UNet", str(e))
             return
-        if not os.path.isfile(model_path):
-             QtWidgets.QMessageBox.critical(self, "Batch UNet", f"UNet model not found: {model_path}")
-             return
-
-        res_dir = getattr(self, "_results_dir", None)
-        out_dir = str(res_dir) if res_dir else "results_unet"
-
-        params = UnetParams(
-            model_path=model_path,
-            output_dir=out_dir,
-            threshold=float(self._unet_threshold.value()),
-            apply_postprocessing=bool(self._unet_post.isChecked()),
-            mode=str(self._unet_mode.currentText()),
-            input_size=int(self._unet_input_size.value()),
-            tile_overlap=int(self._unet_overlap.value()),
-            tile_batch_size=int(self._unet_tile_batch.value()),
-        )
-
-        # Ensure output dir exists
-        os.makedirs(out_dir, exist_ok=True)
 
         self._begin_run("folder", params)
-        worker = BatchUnetWorker(images, params)
-        self._start_worker(worker, title="Batch UNet Processing")
+
+    def _run_batch_unet_dino(self, image_paths: list[str] | None = None) -> None:
+        images = image_paths if image_paths is not None else self._folder_images
+        if not images:
+            QtWidgets.QMessageBox.information(self, "Batch UNet + DINO", "No images in folder list. Open a folder first.")
+            return
+        try:
+            params = self._submit_editor_mode("unet_dino", title="Batch UNet + DINO Processing", image_paths=list(images))
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Batch UNet + DINO", str(e))
+            return
+        self._begin_run("folder", params)
 
     def _run_batch_sam_dino(
         self,
@@ -1194,16 +1034,13 @@ class MainWindowPredictMixin:
             return
 
         try:
-            params = self._build_sam_dino_params(force_use_delta=force_use_delta)
-            self._begin_run("folder", params)
+            mode = "sam_dino_ft" if force_use_delta else "sam_dino"
+            params = self._submit_editor_mode(mode, title="Batch SAM+DINO Processing", image_paths=list(images))
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "SAM+DINO", str(e))
             return
 
-        os.makedirs(params.output_dir, exist_ok=True)
-
-        worker = BatchSamDinoWorker(images, params)
-        self._start_worker(worker, title="Batch SAM+DINO Processing")
+        self._begin_run("folder", params)
 
     def _run_sam_only(self, *, force_use_delta: bool | None = None) -> None:
         if not self._ensure_image_loaded():
@@ -1211,16 +1048,15 @@ class MainWindowPredictMixin:
             return
 
         try:
-            params = self._build_sam_dino_params(force_use_delta=force_use_delta)
-            self._begin_run("current", params)
+            mode = "sam_only_ft" if force_use_delta else "sam_only"
+            label = "SAM Only + Finetune" if force_use_delta else "SAM Only"
+            params = self._submit_editor_mode(mode, title=f"{label} processing", image_path=self._state.image_path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "SAM Only", str(e))
             return
 
+        self._begin_run("current", params)
         self._post_run_action = None
-        worker = SamOnlyWorker(self._state.image_path, params)
-        label = "SAM Only + Finetune" if force_use_delta else "SAM Only"
-        self._start_worker(worker, title=f"{label} processing")
 
     def _run_batch_sam_only(
         self,
@@ -1234,22 +1070,19 @@ class MainWindowPredictMixin:
             return
 
         try:
-            params = self._build_sam_dino_params(force_use_delta=force_use_delta)
-            self._begin_run("folder", params)
+            label = "SAM Only + Finetune" if force_use_delta else "SAM Only"
+            mode = "sam_only_ft" if force_use_delta else "sam_only"
+            params = self._submit_editor_mode(mode, title=f"Batch {label} Processing", image_paths=list(images))
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "SAM Only", str(e))
             return
 
-        os.makedirs(params.output_dir, exist_ok=True)
-
-        label = "SAM Only + Finetune" if force_use_delta else "SAM Only"
-        worker = BatchSamOnlyWorker(images, params)
-        self._start_worker(worker, title=f"Batch {label} Processing")
+        self._begin_run("folder", params)
 
     def _stop_current(self) -> None:
-        if self._worker is None:
+        if self._active_job_id is None:
             return
-        self._worker.stop()
+        self._inference_api.cancel(self._active_job_id)
 
     def _run_sam_tiled(
         self,
@@ -1263,21 +1096,20 @@ class MainWindowPredictMixin:
             return
 
         try:
-            params = self._build_sam_dino_params(force_use_delta=False)
-            self._begin_run("current", params)
+            params = self._submit_editor_mode(
+                "sam_tiled",
+                title=f"SAM+DINO Tiled (target={target_labels or ['crack']})",
+                image_path=self._state.image_path,
+                target_labels=target_labels or ["crack"],
+                max_depth=3,
+                min_box_px=48,
+            )
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "SAM Tiled", str(e))
             return
 
-        labels = target_labels or ["crack"]
+        self._begin_run("current", params)
         self._post_run_action = None
-        worker = SamDinoTiledWorker(
-            self._state.image_path, params,
-            target_labels=labels,
-            tile_size=tile_size,
-            tile_overlap=tile_overlap,
-        )
-        self._start_worker(worker, title=f"SAM+DINO Tiled (target={labels})")
 
     def _run_batch_sam_tiled(
         self,
@@ -1293,18 +1125,17 @@ class MainWindowPredictMixin:
             return
 
         try:
-            params = self._build_sam_dino_params(force_use_delta=False)
-            self._begin_run("folder", params)
+            labels = target_labels or ["crack"]
+            params = self._submit_editor_mode(
+                "sam_tiled",
+                title=f"Batch SAM+DINO Tiled (target={labels})",
+                image_paths=list(images),
+                target_labels=labels,
+                max_depth=3,
+                min_box_px=48,
+            )
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "SAM Tiled", str(e))
             return
 
-        os.makedirs(params.output_dir, exist_ok=True)
-        labels = target_labels or ["crack"]
-        worker = BatchSamDinoTiledWorker(
-            images, params,
-            target_labels=labels,
-            tile_size=tile_size,
-            tile_overlap=tile_overlap,
-        )
-        self._start_worker(worker, title=f"Batch SAM+DINO Tiled (target={labels})")
+        self._begin_run("folder", params)

@@ -1,6 +1,6 @@
 import os
 import argparse
-import torch
+from torch_runtime import torch
 
 from unet.unet_model import UNet
 from predict import predict_image

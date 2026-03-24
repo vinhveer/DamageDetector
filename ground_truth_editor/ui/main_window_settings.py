@@ -5,8 +5,8 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from predict.dino import get_dino_service
-from predict.unet import get_unet_service
+from inference_api import get_inference_api
+from inference_api.editor_bridge import missing_editor_settings, settings_pages_for_mode
 
 from .dialogs import PredictDialog
 
@@ -140,11 +140,7 @@ class MainWindowSettingsMixin:
         except Exception:
             pass
         try:
-            get_unet_service().close()
-        except Exception:
-            pass
-        try:
-            get_dino_service().close()
+            get_inference_api().shutdown()
         except Exception:
             pass
         QtWidgets.QMainWindow.closeEvent(self, event)
@@ -387,8 +383,9 @@ class MainWindowSettingsMixin:
         for a in ["_sd_scaling_factor", "_sd_box_thr", "_sd_text_thr", "_unet_threshold"]:
             _connect_dspin(a)
 
-    def _open_model_settings_dialog(self, initial_page: str | None = None) -> bool:
+    def _open_model_settings_dialog(self, initial_page: str | None = None, *, mode: str | None = None) -> bool:
         current = self._collect_settings()
+        pages = ["SAM", "DINO", "UNet"] if not mode or str(mode).strip().lower() == "settings" else settings_pages_for_mode(mode)
         dlg = PredictDialog(
             self,
             title="Model Settings",
@@ -397,7 +394,7 @@ class MainWindowSettingsMixin:
             has_image=True,
             has_folder=True,
             show_scope=False,
-            pages=["SAM", "DINO", "UNet"],
+            pages=pages,
             ok_text="Apply",
             initial_page=initial_page,
         )
@@ -412,81 +409,7 @@ class MainWindowSettingsMixin:
         return True
 
     def _missing_settings_for_mode(self, mode: str) -> tuple[str, str] | None:
-        mode = str(mode or "").strip().lower()
-
-        if mode in {"sam_dino", "sam_dino_ft"}:
-            sam_ckpt = self._sd_sam_ckpt.text().strip()
-            if not sam_ckpt or not os.path.isfile(sam_ckpt):
-                return ("SAM", "SAM checkpoint is required (file not found).")
-
-            gdino_ckpt = self._sd_gdino_ckpt.text().strip()
-            if not gdino_ckpt:
-                return ("DINO", "GroundingDINO checkpoint is required.")
-            lower = gdino_ckpt.lower()
-            if lower.endswith((".pth", ".pt", ".safetensors", ".bin")) and not os.path.exists(gdino_ckpt):
-                return ("DINO", f"GroundingDINO checkpoint not found: {gdino_ckpt}")
-
-            if mode == "sam_dino_ft":
-                delta_ckpt = self._sd_delta_ckpt.text().strip()
-                if not delta_ckpt:
-                    return ("SAM", "Delta checkpoint is required (set to 'auto' or choose a file).")
-                dl = delta_ckpt.lower()
-                if dl != "auto" and dl.endswith((".pth", ".pt", ".safetensors", ".bin")) and not os.path.exists(
-                    delta_ckpt
-                ):
-                    return ("SAM", f"Delta checkpoint not found: {delta_ckpt}")
-
-            return None
-
-        if mode in {"sam_only", "sam_only_ft"}:
-            # SAM Only does NOT need GroundingDINO
-            sam_ckpt = self._sd_sam_ckpt.text().strip()
-            if not sam_ckpt or not os.path.isfile(sam_ckpt):
-                return ("SAM", "SAM checkpoint is required (file not found).")
-
-            if mode == "sam_only_ft":
-                delta_ckpt = self._sd_delta_ckpt.text().strip()
-                if not delta_ckpt:
-                    return ("SAM", "Delta checkpoint is required (set to 'auto' or choose a file).")
-                dl = delta_ckpt.lower()
-                if dl != "auto" and dl.endswith((".pth", ".pt", ".safetensors", ".bin")) and not os.path.exists(
-                    delta_ckpt
-                ):
-                    return ("SAM", f"Delta checkpoint not found: {delta_ckpt}")
-
-            return None
-
-        if mode == "unet":
-            model_path = self._unet_model_edit.text().strip()
-            if not model_path or not os.path.isfile(model_path):
-                return ("UNet", "UNet model is required (file not found).")
-
-            gdino_ckpt = self._sd_gdino_ckpt.text().strip()
-            if not gdino_ckpt:
-                return ("DINO", "GroundingDINO checkpoint is required for UNet+DINO.")
-            if not os.path.exists(gdino_ckpt):
-                lower = gdino_ckpt.lower()
-                if lower.endswith((".pth", ".pt", ".safetensors", ".bin")):
-                    return ("DINO", f"GroundingDINO checkpoint not found: {gdino_ckpt}")
-
-            return None
-
-        if mode == "sam_tiled":
-            # Recursive zoom-in mode: needs SAM + GDINO, no delta
-            sam_ckpt = self._sd_sam_ckpt.text().strip()
-            if not sam_ckpt or not os.path.isfile(sam_ckpt):
-                return ("SAM", "SAM checkpoint is required (file not found).")
-
-            gdino_ckpt = self._sd_gdino_ckpt.text().strip()
-            if not gdino_ckpt:
-                return ("DINO", "GroundingDINO checkpoint is required.")
-            lower = gdino_ckpt.lower()
-            if lower.endswith((".pth", ".pt", ".safetensors", ".bin")) and not os.path.exists(gdino_ckpt):
-                return ("DINO", f"GroundingDINO checkpoint not found: {gdino_ckpt}")
-
-            return None
-
-        return ("SAM", f"Unknown predict mode: {mode}")
+        return missing_editor_settings(mode, self._collect_settings())
 
     def _ensure_settings_ready(self, mode: str) -> bool:
         missing = self._missing_settings_for_mode(mode)
@@ -495,7 +418,7 @@ class MainWindowSettingsMixin:
 
         initial_page, msg = missing
         QtWidgets.QMessageBox.information(self, "Model settings required", msg)
-        if not self._open_model_settings_dialog(initial_page):
+        if not self._open_model_settings_dialog(initial_page, mode=mode):
             return False
 
         missing2 = self._missing_settings_for_mode(mode)

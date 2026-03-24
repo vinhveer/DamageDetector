@@ -1,8 +1,9 @@
 import json
 import os
 
-import torch
 import segmentation_models_pytorch as smp
+
+from torch_runtime import get_torch
 
 
 DEFAULT_MODEL_CONFIG = {
@@ -37,6 +38,7 @@ def _checkpoint_payload(model, model_config, epoch=None, metrics=None):
 
 
 def save_checkpoint(path, model, model_config, epoch=None, metrics=None):
+    torch = get_torch()
     torch.save(_checkpoint_payload(model, model_config, epoch=epoch, metrics=metrics), path)
 
 
@@ -68,6 +70,7 @@ def save_training_config(output_dir, args, *, model_config=None, train_preproces
 
 
 def load_model_config_from_path(model_path):
+    torch = get_torch()
     checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
     _, checkpoint_config = extract_state_dict_and_config(checkpoint)
     merged = dict(DEFAULT_MODEL_CONFIG)
@@ -83,7 +86,16 @@ def load_model_config_from_path(model_path):
     return merged
 
 
+def load_training_config_from_path(model_path):
+    sidecar_path = _sidecar_config_path(model_path)
+    if not os.path.exists(sidecar_path):
+        return None
+    with open(sidecar_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def load_model_from_checkpoint(model_path, device, *, strict=True):
+    torch = get_torch()
     model_config = load_model_config_from_path(model_path)
     model = smp.Unet(
         encoder_name=model_config["encoder_name"],

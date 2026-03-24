@@ -13,7 +13,7 @@ except ModuleNotFoundError as e:
         "  pip install PySide6==6.7.3"
     ) from e
 
-import torch
+from torch_runtime import torch
 import numpy as np
 
 from unet.unet_model import UNet

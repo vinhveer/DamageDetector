@@ -29,7 +29,9 @@ class CompareDialog(QtWidgets.QDialog):
         
         # Hint label
         hint = QtWidgets.QLabel("If image is 'hello.jpg' and mask is 'hellomask.jpg', enter 'mask' here.")
-        hint.setStyleSheet("color: gray; font-size: 11px;")
+        hint_font = hint.font()
+        hint_font.setPointSize(max(9, hint_font.pointSize() - 1))
+        hint.setFont(hint_font)
         layout.addWidget(hint)
 
         # Buttons

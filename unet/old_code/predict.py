@@ -1,10 +1,10 @@
 import os
 import math
-import torch
+from torch_runtime import torch
 import numpy as np
 from PIL import Image, ImageFilter  # PIL image filtering
 from PIL import ImageDraw, ImageFont
-import torch.nn.functional as F
+from torch_runtime import F
 try:
     import matplotlib
 

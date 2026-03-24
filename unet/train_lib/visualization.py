@@ -1,7 +1,7 @@
 import os
 
 import numpy as np
-import torch
+from torch_runtime import torch
 
 try:
     import matplotlib

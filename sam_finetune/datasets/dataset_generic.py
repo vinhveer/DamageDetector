@@ -1,9 +1,9 @@
 import os
 import random
 import numpy as np
-import torch
+from torch_runtime import torch
 
-from torch.utils.data import Dataset
+from torch_runtime import Dataset
 from PIL import Image
 import glob
 import cv2

@@ -10,7 +10,7 @@ This project implements crack segmentation using an improved U-Net architecture 
 
 ## Project Structure
 
-```
+```javascript
 dataset_lib/         # Dataset loading and preprocessing (modular)
 train.py             # Training entrypoint
 predict.py           # Predict a single image or a folder
@@ -41,6 +41,7 @@ python train.py --train-images path/to/images --train-masks path/to/masks --val-
 ### Arguments
 
 #### Dataset Paths (Required)
+
 - `--train-images`: Path to training images folder.
 - `--train-masks`: Path to training masks folder.
 - `--val-images`: Path to validation images folder.
@@ -48,20 +49,23 @@ python train.py --train-images path/to/images --train-masks path/to/masks --val-
 - `--mask-prefix`: Prefix for mask files (default: `auto`).
 
 #### Output & Logging
+
 - `--output-dir`: Directory to save results (default: `output_results`).
 - `--visualize`: Enable visualization (default: disabled).
 - `--loss-curve`: Enable loss curve plotting (default: disabled).
 - `--visualize-every`: Visualize every N epochs (0 to disable, default: 0).
 
 #### Preprocessing
+
 - `--preprocess`: Method: `patch`, `letterbox`, `resize`, `random_crop` (`stretch` is a backward-compatible alias for `resize`; default: `patch`).
 - `--input-size`: Model input size (default: 256).
 - `--patches-per-image`: Number of patches per image (default: 1).
 - `--max-patch-tries`: Max tries to find a patch with crack (default: 5).
 - `--negative-patch-prob`: Probability of keeping a background-only patch in patch mode (default: 0.25).
-- `--val-stride`: Stride for validation patching (default: 0 = input_size).
+- `--val-stride`: Stride for validation patching (default: 0 = input\_size).
 
 #### Augmentation
+
 - `--no-augment`: Disable augmentation.
 - `--aug-prob`: Augmentation probability (default: 0.5).
 - `--rotate-limit`: Rotation limit in degrees (default: 10).
@@ -69,11 +73,13 @@ python train.py --train-images path/to/images --train-masks path/to/masks --val-
 - `--contrast-limit`: Contrast limit (default: 0.2).
 
 #### Caching
+
 - `--cache-data`: Cache data in memory (default: false).
 - `--cache-dir`: Directory to cache preprocessed images.
 - `--cache-rebuild`: Rebuild cache.
 
 #### Training Hyperparameters
+
 - `--batch-size`: Batch size (default: 16).
 - `--epochs`: Number of epochs (default: 80).
 - `--learning-rate`: Learning rate (default: 0.0005).
@@ -87,10 +93,12 @@ python train.py --train-images path/to/images --train-masks path/to/masks --val-
 - `--pin-memory`: Enable pin memory (default: disabled).
 
 #### Model
+
 - `--encoder-name`: Encoder name (default: `efficientnet-b4`).
 - `--encoder-weights`: Encoder weights (default: `imagenet`).
 
 #### Loss Weights
+
 - `--pos-weight`: Positive class weight (default: 5.0).
 - `--bce-weight`: BCE loss weight (default: 0.4).
 - `--dice-weight`: Dice loss weight (default: 0.6).
@@ -99,6 +107,7 @@ python train.py --train-images path/to/images --train-masks path/to/masks --val-
 - `--focal-gamma`: Focal loss gamma (default: 2.0).
 
 #### Metrics & Scheduler
+
 - `--metric-threshold`: Threshold for metrics (default: 0.5).
 - `--best-model-metric`: Metric used for best checkpoint / early stopping. Supports fixed-threshold or threshold-sweep selection.
 - `--metric-thresholds`: Comma-separated thresholds (default: "").
@@ -106,7 +115,7 @@ python train.py --train-images path/to/images --train-masks path/to/masks --val-
 - `--scheduler-factor`: Scheduler factor (default: 0.5).
 - `--scheduler-patience`: Scheduler patience (default: 10).
 - `--scheduler-t0`: Scheduler T0 (default: 10).
-- `--scheduler-tmult`: Scheduler T_mult (default: 2).
+- `--scheduler-tmult`: Scheduler T\_mult (default: 2).
 
 ## Prediction
 
@@ -179,6 +188,7 @@ python compare_result.py --pred-dir compare/result_unet --gt-dir compare_test_da
 ```
 
 ## Example Train Command (Kaggle)
-```
+
+```javascript
 !torchrun --standalone --nproc_per_node=2 unet/train.py --train-images "/kaggle/input/datasets/vinhnquntu/crack500croped/crack500_crop/train/images" --train-masks "/kaggle/input/datasets/vinhnquntu/crack500croped/crack500_crop/train/masks" --val-images "/kaggle/input/datasets/vinhnquntu/crack500croped/crack500_crop/val/images" --val-masks "/kaggle/input/datasets/vinhnquntu/crack500croped/crack500_crop/val/masks" --output-dir output_results_p4000 --preprocess letterbox --preprocess-train random_crop --preprocess-val patch --input-size 512 --patches-per-image 4 --encoder-name tu-convnext_tiny --encoder-weights imagenet --batch-size 4 --grad-accum-steps 4 --epochs 100 --seed 42 --aug-prob 0.5 --rotate-limit 10 --brightness-limit 0.2 --contrast-limit 0.2 --pos-weight 2.0 --pos-weight-min 2.0 --pos-weight-max 20.0 --pos-weight-sample 200 --bce-weight 1.0 --dice-weight 0.5 --focal-weight 0.5 --focal-alpha 0.25 --focal-gamma 2.0 --metric-threshold 0.5 --metric-thresholds "0.2,0.3,0.4,0.5,0.6" --scheduler-metric loss --learning-rate 0.0001 --weight-decay 0.01 --scheduler-t0 10 --scheduler-tmult 2 --early-stop-patience 100 --num-workers 2 --pin-memory --prefetch-factor 8
 ```

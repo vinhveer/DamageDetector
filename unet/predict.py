@@ -1,6 +1,6 @@
 import argparse
 import os
-import torch
+from torch_runtime import torch
 
 from model_io import load_model_from_checkpoint
 from predict_lib.core import predict_image

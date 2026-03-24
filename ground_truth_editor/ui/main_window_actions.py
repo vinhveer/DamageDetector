@@ -59,8 +59,20 @@ class MainWindowActionsMixin:
         self._act_predict_sam_dino_ft = QtGui.QAction("Predict SAM + DINO + Finetune", self)
         self._act_predict_sam_dino_ft.triggered.connect(lambda: self._predict_with_scope("sam_dino_ft"))
 
+        self._act_predict_sam_only = QtGui.QAction("Predict SAM Only", self)
+        self._act_predict_sam_only.triggered.connect(lambda: self._predict_with_scope("sam_only"))
+
+        self._act_predict_sam_only_ft = QtGui.QAction("Predict SAM Only + Finetune", self)
+        self._act_predict_sam_only_ft.triggered.connect(lambda: self._predict_with_scope("sam_only_ft"))
+
+        self._act_predict_sam_tiled = QtGui.QAction("Predict SAM + DINO Tiled", self)
+        self._act_predict_sam_tiled.triggered.connect(lambda: self._predict_with_scope("sam_tiled"))
+
+        self._act_predict_unet_only = QtGui.QAction("Predict UNet Only", self)
+        self._act_predict_unet_only.triggered.connect(lambda: self._predict_with_scope("unet_only"))
+
         self._act_predict_unet_dino = QtGui.QAction("Predict UNet + DINO", self)
-        self._act_predict_unet_dino.triggered.connect(lambda: self._predict_with_scope("unet"))
+        self._act_predict_unet_dino.triggered.connect(lambda: self._predict_with_scope("unet_dino"))
 
         self._act_prev_image = QtGui.QAction("Previous Image", self)
         self._act_prev_image.setShortcut(QtGui.QKeySequence("PgUp"))
@@ -161,6 +173,10 @@ class MainWindowActionsMixin:
         run.addSeparator()
         run.addAction(self._act_predict_sam_dino)
         run.addAction(self._act_predict_sam_dino_ft)
+        run.addAction(self._act_predict_sam_only)
+        run.addAction(self._act_predict_sam_only_ft)
+        run.addAction(self._act_predict_sam_tiled)
+        run.addAction(self._act_predict_unet_only)
         run.addAction(self._act_predict_unet_dino)
         run.addSeparator()
         run.addAction(self._act_compare_tool)
@@ -191,7 +207,7 @@ class MainWindowActionsMixin:
         return self._explorer_panel.visible_count()
 
     def _refresh_ui_state(self) -> None:
-        running = self._thread is not None
+        running = self._active_job_id is not None
         has_image = self._state is not None
         has_folder = bool(self._folder_images)
         has_mask = bool(self._overlay_canvas.canvas_state().mask_loaded)
@@ -218,6 +234,10 @@ class MainWindowActionsMixin:
         can_predict = can_interact and (has_image or has_folder)
         self._act_predict_sam_dino.setEnabled(can_predict)
         self._act_predict_sam_dino_ft.setEnabled(can_predict)
+        self._act_predict_sam_only.setEnabled(can_predict)
+        self._act_predict_sam_only_ft.setEnabled(can_predict)
+        self._act_predict_sam_tiled.setEnabled(can_predict)
+        self._act_predict_unet_only.setEnabled(can_predict)
         self._act_predict_unet_dino.setEnabled(can_predict)
         self._act_predict_roi.setEnabled(can_interact and has_image)
         self._act_view_history_folder.setEnabled(can_interact)
@@ -232,8 +252,28 @@ class MainWindowActionsMixin:
     def _set_running(self, running: bool) -> None:
         self._unet_run_btn.setEnabled(not running)
         self._unet_batch_btn.setEnabled(not running)
+        if hasattr(self, "_unet_dino_run_btn"):
+            self._unet_dino_run_btn.setEnabled(not running)
+        if hasattr(self, "_unet_dino_batch_btn"):
+            self._unet_dino_batch_btn.setEnabled(not running)
         self._sd_run_btn.setEnabled(not running)
         self._sd_batch_btn.setEnabled(not running)
+        if hasattr(self, "_sd_ft_run_btn"):
+            self._sd_ft_run_btn.setEnabled(not running)
+        if hasattr(self, "_sd_ft_batch_btn"):
+            self._sd_ft_batch_btn.setEnabled(not running)
+        if hasattr(self, "_sam_only_run_btn"):
+            self._sam_only_run_btn.setEnabled(not running)
+        if hasattr(self, "_sam_only_batch_btn"):
+            self._sam_only_batch_btn.setEnabled(not running)
+        if hasattr(self, "_sam_only_ft_run_btn"):
+            self._sam_only_ft_run_btn.setEnabled(not running)
+        if hasattr(self, "_sam_only_ft_batch_btn"):
+            self._sam_only_ft_batch_btn.setEnabled(not running)
+        if hasattr(self, "_sam_tiled_run_btn"):
+            self._sam_tiled_run_btn.setEnabled(not running)
+        if hasattr(self, "_sam_tiled_batch_btn"):
+            self._sam_tiled_batch_btn.setEnabled(not running)
         if hasattr(self, "_sd_isolate_btn"):
             self._sd_isolate_btn.setEnabled(not running)
         if self._active_stop_btn is not None:
@@ -245,15 +285,35 @@ class MainWindowActionsMixin:
         self._roi_selecting = bool(selecting)
         if selecting:
             self._unet_run_btn.setEnabled(False)
+            if hasattr(self, "_unet_dino_run_btn"):
+                self._unet_dino_run_btn.setEnabled(False)
             self._sd_run_btn.setEnabled(False)
+            if hasattr(self, "_sd_ft_run_btn"):
+                self._sd_ft_run_btn.setEnabled(False)
+            if hasattr(self, "_sam_only_run_btn"):
+                self._sam_only_run_btn.setEnabled(False)
+            if hasattr(self, "_sam_only_ft_run_btn"):
+                self._sam_only_ft_run_btn.setEnabled(False)
+            if hasattr(self, "_sam_tiled_run_btn"):
+                self._sam_tiled_run_btn.setEnabled(False)
             if hasattr(self, "_sd_isolate_btn"):
                 self._sd_isolate_btn.setEnabled(False)
             self.statusBar().showMessage("Select ROI: drag on Overlay tab. Esc = cancel. Click = full image.")
         else:
             self.statusBar().clearMessage()
-            if self._thread is None:
+            if self._active_job_id is None:
                 self._unet_run_btn.setEnabled(True)
+                if hasattr(self, "_unet_dino_run_btn"):
+                    self._unet_dino_run_btn.setEnabled(True)
                 self._sd_run_btn.setEnabled(True)
+                if hasattr(self, "_sd_ft_run_btn"):
+                    self._sd_ft_run_btn.setEnabled(True)
+                if hasattr(self, "_sam_only_run_btn"):
+                    self._sam_only_run_btn.setEnabled(True)
+                if hasattr(self, "_sam_only_ft_run_btn"):
+                    self._sam_only_ft_run_btn.setEnabled(True)
+                if hasattr(self, "_sam_tiled_run_btn"):
+                    self._sam_tiled_run_btn.setEnabled(True)
                 if hasattr(self, "_sd_isolate_btn"):
                     self._sd_isolate_btn.setEnabled(True)
         self._refresh_ui_state()

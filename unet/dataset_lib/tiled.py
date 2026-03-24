@@ -1,10 +1,10 @@
 import os
 
 import numpy as np
-import torch
+from torch_runtime import torch
 from PIL import Image
 from collections import OrderedDict
-from torch.utils.data import Dataset
+from torch_runtime import Dataset
 
 from .utils import _normalize_patch_size, _pad_to_min_size, build_mask_index, find_mask_path
 

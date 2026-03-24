@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+import datetime as _dt
+import json
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from editor_app.domain.models import RunContext, RunSummary
+
+
+class RunStorageService:
+    def create_run(self, *, results_root: Path, workflow: str, scope: str) -> RunContext:
+        created_at = _dt.datetime.now().isoformat(timespec="seconds")
+        stamp = _dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        run_id = f"{stamp}_{workflow}_{uuid4().hex[:6]}"
+        run_dir = results_root / run_id
+        output_dir = run_dir / "outputs"
+        data_dir = run_dir / "data"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        ctx = RunContext(
+            run_id=run_id,
+            workflow=str(workflow),
+            scope=str(scope),
+            run_dir=run_dir,
+            output_dir=output_dir,
+            data_dir=data_dir,
+            created_at=created_at,
+        )
+        self._write_json(
+            run_dir / "run.json",
+            {
+                "run_id": run_id,
+                "workflow": workflow,
+                "scope": scope,
+                "created_at": created_at,
+                "run_dir": str(run_dir),
+                "output_dir": str(output_dir),
+                "status": "queued",
+            },
+        )
+        return ctx
+
+    def write_request(self, run: RunContext, request_data: dict[str, Any]) -> None:
+        self._write_json(run.run_dir / "request.json", request_data)
+
+    def append_event(self, run: RunContext, event_data: dict[str, Any]) -> None:
+        events_path = run.data_dir / "events.jsonl"
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event_data, ensure_ascii=True, default=str) + "\n")
+        message = str(event_data.get("message") or "").strip()
+        if message:
+            with (run.run_dir / "logs.txt").open("a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+
+    def write_result(self, run: RunContext, *, status: str, payload: dict[str, Any] | None, error: str | None = None) -> None:
+        result_payload = {
+            "run_id": run.run_id,
+            "workflow": run.workflow,
+            "status": str(status),
+            "error": error,
+            "result": dict(payload or {}),
+        }
+        self._write_json(run.run_dir / "result.json", result_payload)
+        self._write_json(
+            run.run_dir / "run.json",
+            {
+                "run_id": run.run_id,
+                "workflow": run.workflow,
+                "scope": run.scope,
+                "created_at": run.created_at,
+                "run_dir": str(run.run_dir),
+                "output_dir": str(run.output_dir),
+                "status": str(status),
+                "error": error,
+            },
+        )
+
+        detections = []
+        if payload:
+            if isinstance(payload.get("detections"), list):
+                detections = list(payload.get("detections") or [])
+            elif isinstance(payload.get("results"), list):
+                for item in payload.get("results") or []:
+                    if isinstance(item, dict):
+                        for det in item.get("detections") or []:
+                            detections.append(dict(det))
+        self._write_json(run.data_dir / "detections.json", detections)
+
+    def list_runs(self, results_root: Path) -> list[RunSummary]:
+        if not results_root.is_dir():
+            return []
+        runs: list[RunSummary] = []
+        for run_dir in sorted(results_root.iterdir(), reverse=True):
+            if not run_dir.is_dir():
+                continue
+            run_json = run_dir / "run.json"
+            if not run_json.is_file():
+                continue
+            try:
+                payload = json.loads(run_json.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            runs.append(
+                RunSummary(
+                    run_id=str(payload.get("run_id") or run_dir.name),
+                    workflow=str(payload.get("workflow") or ""),
+                    status=str(payload.get("status") or "unknown"),
+                    created_at=str(payload.get("created_at") or ""),
+                    run_dir=str(run_dir),
+                    request_path=str(run_dir / "request.json") if (run_dir / "request.json").is_file() else None,
+                    result_path=str(run_dir / "result.json") if (run_dir / "result.json").is_file() else None,
+                    log_path=str(run_dir / "logs.txt") if (run_dir / "logs.txt").is_file() else None,
+                )
+            )
+        return runs
+
+    def load_run_bundle(self, run_dir: Path) -> dict[str, Any]:
+        bundle: dict[str, Any] = {
+            "run_dir": str(run_dir),
+            "run": {},
+            "request": {},
+            "result": {},
+            "detections": [],
+        }
+        for key, name in (("run", "run.json"), ("request", "request.json"), ("result", "result.json"), ("detections", "data/detections.json")):
+            path = run_dir / name
+            if not path.is_file():
+                continue
+            try:
+                bundle[key] = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                bundle[key] = {} if key != "detections" else []
+        return bundle
+
+    def list_result_items(self, run_dir: Path) -> list[dict[str, Any]]:
+        bundle = self.load_run_bundle(run_dir)
+        result_payload = dict(bundle.get("result") or {})
+        payload = dict(result_payload.get("result") or {})
+        items: list[dict[str, Any]] = []
+        if isinstance(payload.get("results"), list):
+            for index, item in enumerate(payload.get("results") or []):
+                if not isinstance(item, dict):
+                    continue
+                entry = dict(item)
+                entry.setdefault("_item_index", index)
+                entry.setdefault("_run_dir", str(run_dir))
+                items.append(entry)
+            return items
+        if payload:
+            payload = dict(payload)
+            payload.setdefault("_item_index", 0)
+            payload.setdefault("_run_dir", str(run_dir))
+            items.append(payload)
+        return items
+
+    def list_isolate_items(self, results_root: Path) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for run in self.list_runs(results_root):
+            run_dir = Path(run.run_dir)
+            for item in self.list_result_items(run_dir):
+                isolate_path = str(item.get("isolate_path") or "").strip()
+                if not isolate_path:
+                    continue
+                items.append(
+                    {
+                        "run_id": run.run_id,
+                        "workflow": run.workflow,
+                        "status": run.status,
+                        "created_at": run.created_at,
+                        "run_dir": run.run_dir,
+                        "image_path": str(item.get("image_path") or ""),
+                        "isolate_path": isolate_path,
+                        "mask_path": str(item.get("mask_path") or ""),
+                    }
+                )
+        return items
+
+    def _write_json(self, path: Path, payload: Any) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, default=str) + "\n", encoding="utf-8")

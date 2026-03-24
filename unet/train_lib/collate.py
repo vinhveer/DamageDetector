@@ -1,4 +1,4 @@
-from torch.utils.data.dataloader import default_collate
+from torch_runtime import default_collate
 
 
 def collate_skip_none(batch):

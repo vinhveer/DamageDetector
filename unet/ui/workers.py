@@ -1,7 +1,7 @@
 import os
 import traceback
 
-import torch
+from torch_runtime import torch
 
 from ui.qt import QtCore
 

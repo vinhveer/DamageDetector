@@ -1,7 +1,6 @@
 import os
 
-import torch
-import torch.distributed as dist
+from torch_runtime import dist, torch
 from tqdm import tqdm
 
 from .metrics import dice_score_from_prob, iou_score_from_prob

@@ -4,7 +4,7 @@
 import os
 import cv2
 import numpy as np
-import torch
+from torch_runtime import torch
 from segment_anything import sam_model_registry, SamPredictor, SamAutomaticMaskGenerator
 
 # ====== CẤU HÌNH ======

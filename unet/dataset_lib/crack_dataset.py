@@ -1,11 +1,11 @@
 import os
 import random
 import numpy as np
-import torch
+from torch_runtime import torch
 import cv2
 import albumentations as A
 from PIL import Image
-from torch.utils.data import Dataset
+from torch_runtime import Dataset
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 

@@ -1,8 +1,8 @@
 import numpy as np
-import torch
+from torch_runtime import torch
 from scipy.ndimage import zoom
-import torch.nn as nn
-import torch.nn.functional as F
+from torch_runtime import nn
+from torch_runtime import F
 from PIL import Image
 
 class Focal_loss(nn.Module):

@@ -5,12 +5,11 @@ from pathlib import Path
 from PySide6 import QtCore, QtWidgets
 
 from canvas import ImageCanvas
-from predict_unet import UnetParams
+from inference_api import get_inference_api
 
 from .dialogs import ProcessingDialog
 from .features.explorer import ExplorerPanel
 from .features.image_tools import ImageToolsPanel
-from .features.predict.workers import WorkerBase
 from .main_window_actions import MainWindowActionsMixin
 from .main_window_io import MainWindowIOMixin
 from .main_window_layout import MainWindowLayoutMixin
@@ -32,8 +31,12 @@ class MainWindow(
         super().__init__()
 
         self.resize(1400, 860)
-        self._thread: QtCore.QThread | None = None
-        self._worker: WorkerBase | None = None
+        self._inference_api = get_inference_api()
+        self._active_job_id: str | None = None
+        self._active_job_workflow: str | None = None
+        self._predict_poll_timer = QtCore.QTimer(self)
+        self._predict_poll_timer.setInterval(120)
+        self._predict_poll_timer.timeout.connect(self._poll_inference_events)
         self._io_thread: QtCore.QThread | None = None
         self._io_worker: QtCore.QObject | None = None
         self._io_broker: QtCore.QObject | None = None
@@ -46,7 +49,6 @@ class MainWindow(
 
         self._state: LoadedState | None = None
         self._mask_path: Path | None = None
-        self._pending_unet: tuple[str, UnetParams] | None = None
         self._current_run_id: str | None = None
         self._current_run_scope: str | None = None
         self._current_run_started_at: str | None = None

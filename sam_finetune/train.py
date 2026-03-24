@@ -2,8 +2,7 @@ import argparse
 import os
 import random
 import numpy as np
-import torch
-import torch.backends.cudnn as cudnn
+from torch_runtime import cudnn, torch
 from importlib import import_module
 from segment_anything import sam_model_registry
 from trainer import trainer_generic

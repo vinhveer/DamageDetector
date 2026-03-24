@@ -4,10 +4,8 @@ import os
 import random
 import sys
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch_runtime import nn, optim, torch
+from torch_runtime import DataLoader
 from tqdm import tqdm
 from utils import BinaryDiceLoss, BinaryTverskyLoss
 from utils import test_single_volume

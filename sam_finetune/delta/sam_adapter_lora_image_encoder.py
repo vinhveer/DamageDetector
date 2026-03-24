@@ -1,7 +1,6 @@
 import math
-import torch
-import torch.nn as nn
-from torch.nn.parameter import Parameter
+from torch_runtime import nn, torch
+from torch_runtime import Parameter
 from segment_anything.modeling import Sam
 
 

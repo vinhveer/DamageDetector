@@ -6,11 +6,9 @@ import random
 from datetime import datetime
 
 import cv2
-import torch
-import torch.nn as nn
-import torch.distributed as dist
-from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data import DataLoader
+from torch_runtime import dist, nn, torch
+from torch_runtime import DistributedSampler
+from torch_runtime import DataLoader
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from PIL import Image

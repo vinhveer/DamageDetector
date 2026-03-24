@@ -1,4 +1,4 @@
-import torch
+from torch_runtime import torch
 
 
 def dice_score(pred_logits, target, thr=0.5, eps=1e-6):

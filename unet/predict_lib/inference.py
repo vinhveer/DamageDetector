@@ -1,11 +1,11 @@
 import math
 
 import numpy as np
-import torch
-import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
+
+from torch_runtime import get_torch, get_torch_nn_functional
 
 from .preprocess import _letterbox_with_params
 from .types import StopRequested
@@ -21,6 +21,8 @@ def _predict_tiled(
     *,
     stop_checker=None,
 ):
+    torch = get_torch()
+    F = get_torch_nn_functional()
     if tile_size <= 0:
         raise ValueError("tile_size must be > 0")
     if overlap < 0 or overlap >= tile_size:
@@ -107,6 +109,7 @@ def predict_probabilities(
     stop_checker=None,
 ):
     """Return a float32 probability map (H, W) in [0, 1]."""
+    torch = get_torch()
     model.eval()
     mode = str(mode).lower()
     input_size = int(input_size)

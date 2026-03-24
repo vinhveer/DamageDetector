@@ -4,9 +4,9 @@ import logging
 import argparse
 import random
 import numpy as np
-import torch
-from torch.utils.data import DataLoader
-import torch.backends.cudnn as cudnn
+from torch_runtime import torch
+from torch_runtime import DataLoader
+from torch_runtime import cudnn
 from importlib import import_module
 
 from utils import test_single_volume

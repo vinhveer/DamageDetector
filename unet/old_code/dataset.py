@@ -2,10 +2,9 @@ import os
 import random
 
 import numpy as np
-import torch
-import torch.nn as nn
+from torch_runtime import nn, torch
 from PIL import Image, ImageEnhance, ImageOps
-from torch.utils.data import Dataset
+from torch_runtime import Dataset
 
 """
 Data pipeline utilities:
