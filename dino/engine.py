@@ -24,6 +24,10 @@ class DinoParams:
     device: str = "auto"
     output_dir: str = "results_dino"
     roi_box: tuple[int, int, int, int] | None = None
+    nms_iou_threshold: float = 0.5
+    parent_contain_threshold: float = 0.7
+    recursive_min_box_px: int = 48
+    recursive_max_depth: int = 3
 
 
 @dataclass(frozen=True)
@@ -573,6 +577,10 @@ class DinoRunner:
                 device=params.device,
                 output_dir=params.output_dir,
                 roi_box=None,
+                nms_iou_threshold=params.nms_iou_threshold,
+                parent_contain_threshold=params.parent_contain_threshold,
+                recursive_min_box_px=params.recursive_min_box_px,
+                recursive_max_depth=params.recursive_max_depth,
             )
             func = getattr(self, func_name)
             result = dict(func(tmp_path, sub_params, **kwargs) or {})
@@ -685,8 +693,13 @@ class DinoRunner:
             return {"image_path": str(image_path), "output_dir": params.output_dir, "dets": 0, "detections": []}
         bridge_x1, bridge_y1 = int(nonzero_x.min()), int(nonzero_y.min())
         bridge_x2, bridge_y2 = int(nonzero_x.max()), int(nonzero_y.max())
+        effective_max_depth = int(max_depth if max_depth is not None else params.recursive_max_depth)
+        effective_min_box_px = int(min_box_px if min_box_px is not None else params.recursive_min_box_px)
         if log_fn is not None:
-            log_fn(f"Bridge ROI: ({bridge_x1},{bridge_y1})-({bridge_x2},{bridge_y2}), size={bridge_x2-bridge_x1}x{bridge_y2-bridge_y1}. max_depth={max_depth}")
+            log_fn(
+                f"Bridge ROI: ({bridge_x1},{bridge_y1})-({bridge_x2},{bridge_y2}), "
+                f"size={bridge_x2-bridge_x1}x{bridge_y2-bridge_y1}. max_depth={effective_max_depth}"
+            )
         processor, gdino, device = self.ensure_model_loaded(params, log_fn=log_fn)
         detections = _recursive_zoom_detect(
             rgb,
@@ -696,8 +709,8 @@ class DinoRunner:
             float(params.box_threshold),
             float(params.text_threshold),
             current_depth=0,
-            max_depth=int(max_depth),
-            min_box_px=int(min_box_px),
+            max_depth=effective_max_depth,
+            min_box_px=effective_min_box_px,
             stop_checker=stop_checker,
             log_fn=log_fn,
         )
@@ -710,10 +723,10 @@ class DinoRunner:
                 continue
             kept.append((box, label, score))
         before_cf = len(kept)
-        kept = _filter_parent_boxes(kept, contain_thresh=0.7)
+        kept = _filter_parent_boxes(kept, contain_thresh=float(params.parent_contain_threshold))
         if log_fn is not None and len(kept) < before_cf:
             log_fn(f"Containment filter: removed {before_cf - len(kept)} parent box(es), {len(kept)} boxes remain.")
-        kept = _nms_boxes(kept, iou_threshold=0.5)
+        kept = _nms_boxes(kept, iou_threshold=float(params.nms_iou_threshold))
         if int(params.max_dets) > 0:
             kept = kept[: int(params.max_dets)]
         payload = [

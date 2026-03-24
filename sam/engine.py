@@ -23,6 +23,20 @@ class SamParams:
     device: str = "auto"
     output_dir: str = "results_sam"
     roi_box: tuple[int, int, int, int] | None = None
+    task_group: str = "crack_only"
+    more_damage_max_masks: int = 8
+    sam_auto_profile: str = "auto"
+    sam_points_per_side: int = -1
+    sam_points_per_batch: int = -1
+    sam_pred_iou_thresh: float = -1.0
+    sam_stability_score_thresh: float = -1.0
+    sam_stability_score_offset: float = -1.0
+    sam_box_nms_thresh: float = -1.0
+    sam_crop_n_layers: int = -1
+    sam_crop_overlap_ratio: float = -1.0
+    sam_crop_nms_thresh: float = -1.0
+    sam_crop_n_points_downscale_factor: int = -1
+    sam_min_mask_region_area: int = -1
 
 
 class SamRunner:
@@ -98,6 +112,20 @@ class SamRunner:
                 device=params.device,
                 output_dir=params.output_dir,
                 roi_box=None,
+                task_group=params.task_group,
+                more_damage_max_masks=params.more_damage_max_masks,
+                sam_auto_profile=params.sam_auto_profile,
+                sam_points_per_side=params.sam_points_per_side,
+                sam_points_per_batch=params.sam_points_per_batch,
+                sam_pred_iou_thresh=params.sam_pred_iou_thresh,
+                sam_stability_score_thresh=params.sam_stability_score_thresh,
+                sam_stability_score_offset=params.sam_stability_score_offset,
+                sam_box_nms_thresh=params.sam_box_nms_thresh,
+                sam_crop_n_layers=params.sam_crop_n_layers,
+                sam_crop_overlap_ratio=params.sam_crop_overlap_ratio,
+                sam_crop_nms_thresh=params.sam_crop_nms_thresh,
+                sam_crop_n_points_downscale_factor=params.sam_crop_n_points_downscale_factor,
+                sam_min_mask_region_area=params.sam_min_mask_region_area,
             )
             func = getattr(self, func_name)
             result = dict(func(tmp_path, sub_params, **kwargs) or {})
@@ -200,13 +228,30 @@ def _process_one_image_sam_only(
     if stop_checker is not None and stop_checker():
         return {"stopped": True}
 
-    if str(device).lower() == "mps":
+    requested_profile = str(params.sam_auto_profile or "auto").strip().lower()
+    if requested_profile and requested_profile != "auto":
+        profile = requested_profile.upper()
+    elif str(device).lower() == "mps":
         profile = "FAST"
     elif str(device).lower() == "cpu":
         profile = "QUALITY"
     else:
         profile = "ULTRA"
-    auto_gen = make_sam_auto_mask_generator(getattr(predictor, "model"), profile=profile)
+    auto_gen = make_sam_auto_mask_generator(
+        getattr(predictor, "model"),
+        profile=profile,
+        points_per_side=params.sam_points_per_side,
+        points_per_batch=params.sam_points_per_batch,
+        pred_iou_thresh=params.sam_pred_iou_thresh,
+        stability_score_thresh=params.sam_stability_score_thresh,
+        stability_score_offset=params.sam_stability_score_offset,
+        box_nms_thresh=params.sam_box_nms_thresh,
+        crop_n_layers=params.sam_crop_n_layers,
+        crop_overlap_ratio=params.sam_crop_overlap_ratio,
+        crop_nms_thresh=params.sam_crop_nms_thresh,
+        crop_n_points_downscale_factor=params.sam_crop_n_points_downscale_factor,
+        min_mask_region_area=params.sam_min_mask_region_area,
+    )
     if log_fn is not None:
         log_fn(f"SAM only auto-mask mode: profile={profile}")
     masks_info = auto_gen.generate(rgb)
@@ -218,57 +263,89 @@ def _process_one_image_sam_only(
         log_fn(f"SAM only auto-mask mode: generated {len(masks_info)} masks")
 
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    task_group = str(params.task_group or "crack_only").strip().lower()
     rng = np.random.default_rng(int(params.seed))
     disp = bgr.copy()
     merged = np.zeros((h_img, w_img), dtype=np.uint8)
-    ranked_masks: list[tuple[float, np.ndarray, dict[str, float], float, float]] = []
-    for info in masks_info:
-        if stop_checker is not None and stop_checker():
-            return {"stopped": True}
-        seg = info.get("segmentation")
-        if seg is None:
-            continue
-        mask = seg.astype(np.uint8)
-        stats = _mask_stats(mask, (h_img, w_img))
-        if stats is None:
-            continue
-        stability = float(info.get("stability_score", 0.0))
-        shape_score = score_mask_for_crack(mask, stability, (h_img, w_img))
-        darkness_score = score_mask_darkness(mask, gray)
-        ranked_masks.append((shape_score + 0.35 * darkness_score, mask, stats, stability, darkness_score))
-    ranked_masks.sort(key=lambda x: x[0], reverse=True)
+    if task_group == "more_damage":
+        ranked_masks: list[tuple[float, np.ndarray]] = []
+        for info in masks_info:
+            if stop_checker is not None and stop_checker():
+                return {"stopped": True}
+            seg = info.get("segmentation")
+            if seg is None:
+                continue
+            mask = seg.astype(np.uint8)
+            if int(np.count_nonzero(mask)) <= 0:
+                continue
+            predicted_iou = float(info.get("predicted_iou", 0.0))
+            stability = float(info.get("stability_score", 0.0))
+            ranked_masks.append((predicted_iou + 0.2 * stability, mask))
+        ranked_masks.sort(key=lambda item: item[0], reverse=True)
+        kept_damage = ranked_masks[: max(1, int(params.more_damage_max_masks))]
+        if log_fn is not None:
+            log_fn(f"SAM only auto-mask mode: kept {len(kept_damage)} damage masks")
+        for _score, chosen in kept_damage:
+            if params.invert_mask:
+                chosen = (1 - chosen).astype(np.uint8)
+            chosen = filter_small_components(chosen, int(params.sam_min_component_area))
+            if int(params.sam_dilate_iters) > 0 and int(np.count_nonzero(chosen)) > 0:
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                chosen = cv2.dilate(chosen.astype(np.uint8), kernel, iterations=int(params.sam_dilate_iters)).astype(np.uint8)
+            if int(np.count_nonzero(chosen)) == 0:
+                continue
+            merged = np.maximum(merged, chosen)
+            color = rng.integers(0, 255, (3,), dtype=np.uint8)
+            disp = overlay_mask(disp, chosen, color=color, alpha=float(params.overlay_alpha))
+    else:
+        ranked_masks: list[tuple[float, np.ndarray, dict[str, float], float, float]] = []
+        for info in masks_info:
+            if stop_checker is not None and stop_checker():
+                return {"stopped": True}
+            seg = info.get("segmentation")
+            if seg is None:
+                continue
+            mask = seg.astype(np.uint8)
+            stats = _mask_stats(mask, (h_img, w_img))
+            if stats is None:
+                continue
+            stability = float(info.get("stability_score", 0.0))
+            shape_score = score_mask_for_crack(mask, stability, (h_img, w_img))
+            darkness_score = score_mask_darkness(mask, gray)
+            ranked_masks.append((shape_score + 0.35 * darkness_score, mask, stats, stability, darkness_score))
+        ranked_masks.sort(key=lambda x: x[0], reverse=True)
 
-    kept = []
-    for score, mask, stats, stability, darkness_score in ranked_masks:
-        if stats["image_ratio"] > 0.12:
-            continue
-        if stats["fill_ratio"] > 0.55 and stats["image_ratio"] > 0.02:
-            continue
-        if stats["elongation"] < 1.8 and stats["thinness"] < 2.2:
-            continue
-        if darkness_score < 6.0 and stats["elongation"] < 3.0:
-            continue
-        if darkness_score < 3.0:
-            continue
-        kept.append((score, mask, stats, stability, darkness_score))
-        if len(kept) >= 12:
-            break
+        kept = []
+        for score, mask, stats, stability, darkness_score in ranked_masks:
+            if stats["image_ratio"] > 0.12:
+                continue
+            if stats["fill_ratio"] > 0.55 and stats["image_ratio"] > 0.02:
+                continue
+            if stats["elongation"] < 1.8 and stats["thinness"] < 2.2:
+                continue
+            if darkness_score < 6.0 and stats["elongation"] < 3.0:
+                continue
+            if darkness_score < 3.0:
+                continue
+            kept.append((score, mask, stats, stability, darkness_score))
+            if len(kept) >= 12:
+                break
 
-    if log_fn is not None:
-        log_fn(f"SAM only auto-mask mode: kept {len(kept)} crack-like masks")
+        if log_fn is not None:
+            log_fn(f"SAM only auto-mask mode: kept {len(kept)} crack-like masks")
 
-    for _score, chosen, _stats, _stability, _darkness in kept:
-        if params.invert_mask:
-            chosen = (1 - chosen).astype(np.uint8)
-        chosen = filter_small_components(chosen, int(params.sam_min_component_area))
-        if int(params.sam_dilate_iters) > 0 and int(np.count_nonzero(chosen)) > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-            chosen = cv2.dilate(chosen.astype(np.uint8), kernel, iterations=int(params.sam_dilate_iters)).astype(np.uint8)
-        if int(np.count_nonzero(chosen)) == 0:
-            continue
-        merged = np.maximum(merged, chosen)
-        color = rng.integers(0, 255, (3,), dtype=np.uint8)
-        disp = overlay_mask(disp, chosen, color=color, alpha=float(params.overlay_alpha))
+        for _score, chosen, _stats, _stability, _darkness in kept:
+            if params.invert_mask:
+                chosen = (1 - chosen).astype(np.uint8)
+            chosen = filter_small_components(chosen, int(params.sam_min_component_area))
+            if int(params.sam_dilate_iters) > 0 and int(np.count_nonzero(chosen)) > 0:
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                chosen = cv2.dilate(chosen.astype(np.uint8), kernel, iterations=int(params.sam_dilate_iters)).astype(np.uint8)
+            if int(np.count_nonzero(chosen)) == 0:
+                continue
+            merged = np.maximum(merged, chosen)
+            color = rng.integers(0, 255, (3,), dtype=np.uint8)
+            disp = overlay_mask(disp, chosen, color=color, alpha=float(params.overlay_alpha))
 
     if int(np.count_nonzero(merged)) == 0:
         cv2.imwrite(overlay_path, bgr)
@@ -280,7 +357,7 @@ def _process_one_image_sam_only(
     bbox = _mask_bbox(merged) or (0, 0, w_img, h_img)
     detections = [
         {
-            "label": "CrackMask",
+            "label": "DamageMask" if task_group == "more_damage" else "CrackMask",
             "score": 1.0,
             "box": [float(bbox[0]), float(bbox[1]), float(bbox[2] - 1), float(bbox[3] - 1)],
             "mask_b64": mask_b64,
@@ -361,7 +438,7 @@ def _segment_boxes_with_predictor(
         masks, scores, _ = predictor.predict(box=input_box, multimask_output=True)
         if masks is None or len(masks) == 0:
             continue
-        prefer_crack = "crack" in label.lower()
+        prefer_crack = str(params.task_group or "crack_only").strip().lower() != "more_damage" and ("crack" in label.lower())
         chosen = select_sam_mask(masks, scores, (h_img, w_img), prefer_crack=prefer_crack).astype(np.uint8)
         if params.invert_mask:
             chosen = (1 - chosen).astype(np.uint8)

@@ -28,6 +28,20 @@ class SamFinetuneParams:
     device: str = "auto"
     output_dir: str = "results_sam_finetune"
     roi_box: tuple[int, int, int, int] | None = None
+    task_group: str = "crack_only"
+    more_damage_max_masks: int = 8
+    sam_auto_profile: str = "auto"
+    sam_points_per_side: int = -1
+    sam_points_per_batch: int = -1
+    sam_pred_iou_thresh: float = -1.0
+    sam_stability_score_thresh: float = -1.0
+    sam_stability_score_offset: float = -1.0
+    sam_box_nms_thresh: float = -1.0
+    sam_crop_n_layers: int = -1
+    sam_crop_overlap_ratio: float = -1.0
+    sam_crop_nms_thresh: float = -1.0
+    sam_crop_n_points_downscale_factor: int = -1
+    sam_min_mask_region_area: int = -1
 
 
 class SamFinetuneRunner:
@@ -56,14 +70,12 @@ class SamFinetuneRunner:
         if fallback is not None and log_fn is not None:
             log_fn(fallback)
         delta_type = str(params.delta_type or "").strip().lower()
-        if delta_type not in {"adapter", "lora", "both"}:
-            raise ValueError("delta_type must be adapter, lora, or both")
+        if delta_type != "lora":
+            raise ValueError("SAM Finetune supports LoRA only.")
         delta_path = resolve_best_delta_checkpoint(delta_type, str(params.delta_checkpoint or "auto"))
         inferred = infer_delta_type_from_path(delta_path)
         if inferred is not None and inferred != delta_type:
-            if log_fn is not None:
-                log_fn(f"WARN: delta_type={delta_type} but checkpoint looks like {inferred}. Auto-switching to {inferred}.")
-            delta_type = inferred
+            raise ValueError(f"LoRA checkpoint mismatch: checkpoint looks like {inferred}, expected lora.")
         delta_sig = (
             delta_type,
             delta_path,
@@ -138,6 +150,20 @@ class SamFinetuneRunner:
                 device=params.device,
                 output_dir=params.output_dir,
                 roi_box=None,
+                task_group=params.task_group,
+                more_damage_max_masks=params.more_damage_max_masks,
+                sam_auto_profile=params.sam_auto_profile,
+                sam_points_per_side=params.sam_points_per_side,
+                sam_points_per_batch=params.sam_points_per_batch,
+                sam_pred_iou_thresh=params.sam_pred_iou_thresh,
+                sam_stability_score_thresh=params.sam_stability_score_thresh,
+                sam_stability_score_offset=params.sam_stability_score_offset,
+                sam_box_nms_thresh=params.sam_box_nms_thresh,
+                sam_crop_n_layers=params.sam_crop_n_layers,
+                sam_crop_overlap_ratio=params.sam_crop_overlap_ratio,
+                sam_crop_nms_thresh=params.sam_crop_nms_thresh,
+                sam_crop_n_points_downscale_factor=params.sam_crop_n_points_downscale_factor,
+                sam_min_mask_region_area=params.sam_min_mask_region_area,
             )
             func = getattr(self, func_name)
             result = dict(func(tmp_path, sub_params, **kwargs) or {})
@@ -254,6 +280,20 @@ class SamFinetuneRunner:
             device=params.device,
             output_dir=params.output_dir,
             roi_box=None,
+            task_group=params.task_group,
+            more_damage_max_masks=params.more_damage_max_masks,
+            sam_auto_profile=params.sam_auto_profile,
+            sam_points_per_side=params.sam_points_per_side,
+            sam_points_per_batch=params.sam_points_per_batch,
+            sam_pred_iou_thresh=params.sam_pred_iou_thresh,
+            sam_stability_score_thresh=params.sam_stability_score_thresh,
+            sam_stability_score_offset=params.sam_stability_score_offset,
+            sam_box_nms_thresh=params.sam_box_nms_thresh,
+            sam_crop_n_layers=params.sam_crop_n_layers,
+            sam_crop_overlap_ratio=params.sam_crop_overlap_ratio,
+            sam_crop_nms_thresh=params.sam_crop_nms_thresh,
+            sam_crop_n_points_downscale_factor=params.sam_crop_n_points_downscale_factor,
+            sam_min_mask_region_area=params.sam_min_mask_region_area,
         )
         return _segment_boxes_with_predictor(
             image_path=image_path,

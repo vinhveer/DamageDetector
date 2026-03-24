@@ -38,6 +38,11 @@ class InferenceApi:
         return job_id
 
     def cancel(self, job_id: str) -> None:
+        with self._lock:
+            if job_id in self._jobs:
+                self._cancelled.add(job_id)
+
+    def terminate(self, job_id: str) -> None:
         service_names: list[str] = []
         with self._lock:
             if job_id in self._jobs:

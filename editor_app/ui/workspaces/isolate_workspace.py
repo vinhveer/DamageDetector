@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6 import QtCore, QtWidgets
 
 
@@ -46,9 +48,8 @@ class IsolateWorkspace(QtWidgets.QWidget):
     def set_items(self, items: list[dict]) -> None:
         self._list.clear()
         for item_data in items:
-            image_name = item_data.get("image_path") or ""
-            image_name = image_name.split("/")[-1].split("\\")[-1]
-            isolate_name = str(item_data.get("isolate_path") or "").split("/")[-1].split("\\")[-1]
+            image_name = Path(str(item_data.get("image_path") or "")).name
+            isolate_name = Path(str(item_data.get("isolate_path") or "")).name
             item = QtWidgets.QTreeWidgetItem(
                 [
                     str(item_data.get("run_id") or ""),

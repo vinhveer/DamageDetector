@@ -26,6 +26,10 @@ class JobRecord:
     workflow: str
     scope: str
     status: str
+    task_group: str = ""
+    segmentation_model: str = ""
+    detection_model: str = ""
+    resolved_workflow: str = ""
     image_path: str | None = None
     image_paths: list[str] = field(default_factory=list)
     run_dir: str = ""
@@ -49,6 +53,9 @@ class RunSummary:
     status: str
     created_at: str
     run_dir: str
+    task_group: str = ""
+    segmentation_model: str = ""
+    detection_model: str = ""
     request_path: str | None = None
     result_path: str | None = None
     log_path: str | None = None

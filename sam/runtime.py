@@ -150,56 +150,90 @@ def select_sam_mask(
     return masks[int(best_idx)].astype(np.uint8)
 
 
-def make_sam_auto_mask_generator(sam_model: Any, profile: str = "ULTRA") -> SamAutomaticMaskGenerator:
+def make_sam_auto_mask_generator(
+    sam_model: Any,
+    profile: str = "ULTRA",
+    *,
+    points_per_side: int = -1,
+    points_per_batch: int = -1,
+    pred_iou_thresh: float = -1.0,
+    stability_score_thresh: float = -1.0,
+    stability_score_offset: float = -1.0,
+    box_nms_thresh: float = -1.0,
+    crop_n_layers: int = -1,
+    crop_overlap_ratio: float = -1.0,
+    crop_nms_thresh: float = -1.0,
+    crop_n_points_downscale_factor: int = -1,
+    min_mask_region_area: int = -1,
+) -> SamAutomaticMaskGenerator:
     upper = str(profile or "ULTRA").strip().upper()
     if upper == "FAST":
-        generator = SamAutomaticMaskGenerator(
-            model=sam_model,
-            points_per_side=16,
-            points_per_batch=64,
-            pred_iou_thresh=0.9,
-            stability_score_thresh=0.9,
-            stability_score_offset=0.95,
-            box_nms_thresh=0.7,
-            crop_n_layers=0,
-            crop_overlap_ratio=0.45,
-            crop_nms_thresh=0.7,
-            crop_n_points_downscale_factor=2,
-            min_mask_region_area=120,
-            output_mode="binary_mask",
-        )
+        config = {
+            "points_per_side": 16,
+            "points_per_batch": 64,
+            "pred_iou_thresh": 0.9,
+            "stability_score_thresh": 0.9,
+            "stability_score_offset": 0.95,
+            "box_nms_thresh": 0.7,
+            "crop_n_layers": 0,
+            "crop_overlap_ratio": 0.45,
+            "crop_nms_thresh": 0.7,
+            "crop_n_points_downscale_factor": 2,
+            "min_mask_region_area": 120,
+        }
     elif upper == "QUALITY":
-        generator = SamAutomaticMaskGenerator(
-            model=sam_model,
-            points_per_side=24,
-            points_per_batch=64,
-            pred_iou_thresh=0.92,
-            stability_score_thresh=0.92,
-            stability_score_offset=0.95,
-            box_nms_thresh=0.7,
-            crop_n_layers=1,
-            crop_overlap_ratio=0.5,
-            crop_nms_thresh=0.7,
-            crop_n_points_downscale_factor=2,
-            min_mask_region_area=80,
-            output_mode="binary_mask",
-        )
+        config = {
+            "points_per_side": 24,
+            "points_per_batch": 64,
+            "pred_iou_thresh": 0.92,
+            "stability_score_thresh": 0.92,
+            "stability_score_offset": 0.95,
+            "box_nms_thresh": 0.7,
+            "crop_n_layers": 1,
+            "crop_overlap_ratio": 0.5,
+            "crop_nms_thresh": 0.7,
+            "crop_n_points_downscale_factor": 2,
+            "min_mask_region_area": 80,
+        }
     else:
-        generator = SamAutomaticMaskGenerator(
-            model=sam_model,
-            points_per_side=32,
-            points_per_batch=128,
-            pred_iou_thresh=0.94,
-            stability_score_thresh=0.94,
-            stability_score_offset=0.95,
-            box_nms_thresh=0.7,
-            crop_n_layers=2,
-            crop_overlap_ratio=0.55,
-            crop_nms_thresh=0.7,
-            crop_n_points_downscale_factor=2,
-            min_mask_region_area=40,
-            output_mode="binary_mask",
-        )
+        config = {
+            "points_per_side": 32,
+            "points_per_batch": 128,
+            "pred_iou_thresh": 0.94,
+            "stability_score_thresh": 0.94,
+            "stability_score_offset": 0.95,
+            "box_nms_thresh": 0.7,
+            "crop_n_layers": 2,
+            "crop_overlap_ratio": 0.55,
+            "crop_nms_thresh": 0.7,
+            "crop_n_points_downscale_factor": 2,
+            "min_mask_region_area": 40,
+        }
+
+    overrides = {
+        "points_per_side": int(points_per_side),
+        "points_per_batch": int(points_per_batch),
+        "pred_iou_thresh": float(pred_iou_thresh),
+        "stability_score_thresh": float(stability_score_thresh),
+        "stability_score_offset": float(stability_score_offset),
+        "box_nms_thresh": float(box_nms_thresh),
+        "crop_n_layers": int(crop_n_layers),
+        "crop_overlap_ratio": float(crop_overlap_ratio),
+        "crop_nms_thresh": float(crop_nms_thresh),
+        "crop_n_points_downscale_factor": int(crop_n_points_downscale_factor),
+        "min_mask_region_area": int(min_mask_region_area),
+    }
+    for key, value in overrides.items():
+        if isinstance(value, int) and value >= 0:
+            config[key] = value
+        elif isinstance(value, float) and value >= 0.0:
+            config[key] = value
+
+    generator = SamAutomaticMaskGenerator(
+        model=sam_model,
+        output_mode="binary_mask",
+        **config,
+    )
 
     generator.point_grids = [np.asarray(grid, dtype=np.float32) for grid in generator.point_grids]
     original_apply_coords = generator.predictor.transform.apply_coords

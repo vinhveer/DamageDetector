@@ -394,82 +394,101 @@ def _run_unet_dino(ctx: WorkflowContext) -> InferenceResult:
     return ctx.completed(payload)
 
 
+def _run_sam_only(ctx: WorkflowContext) -> InferenceResult:
+    params = dict(ctx.request.params.get("sam") or {})
+    return _run_single_or_batch(ctx=ctx, service_name="sam", service_getter=get_sam_service, params=params)
+
+
+def _run_sam_only_ft(ctx: WorkflowContext) -> InferenceResult:
+    params = dict(ctx.request.params.get("sam") or {})
+    return _run_single_or_batch(ctx=ctx, service_name="sam_finetune", service_getter=get_sam_finetune_service, params=params)
+
+
+def _run_sam_tiled(ctx: WorkflowContext) -> InferenceResult:
+    sam_params = dict(ctx.request.params.get("sam") or {})
+    dino_params = dict(ctx.request.params.get("dino") or {})
+    target_labels = list(ctx.request.params.get("target_labels") or ["crack"])
+    max_depth = int(ctx.request.params.get("max_depth") or 3)
+    min_box_px = int(ctx.request.params.get("min_box_px") or 48)
+    ctx.log("Warming up DINO...")
+    ctx.call_service("dino", get_dino_service, "warmup", {"params": dino_params})
+    ctx.log("Warming up sam...")
+    ctx.call_service("sam", get_sam_service, "warmup", {"params": sam_params})
+    if ctx.request.image_paths:
+        results = []
+        total = len(ctx.request.image_paths)
+        ctx.log(f"Batch SAM+DINO Tiled: {total} images")
+        for idx, path in enumerate(ctx.request.image_paths):
+            if ctx.stop_checker():
+                return ctx.completed({"stopped": True})
+            ctx.log(f"[{idx+1}/{total}] {path}")
+            res = _run_sam_tiled_single(
+                ctx,
+                image_path=str(path),
+                dino_params=dino_params,
+                sam_params=sam_params,
+                target_labels=target_labels,
+                max_depth=max_depth,
+                min_box_px=min_box_px,
+            )
+            if isinstance(res, dict) and "image_path" not in res:
+                res["image_path"] = str(path)
+            results.append(res)
+        return ctx.completed({"batch_done": True, "results": results})
+    payload = _run_sam_tiled_single(
+        ctx,
+        image_path=str(ctx.request.image_path or ""),
+        dino_params=dino_params,
+        sam_params=sam_params,
+        target_labels=target_labels,
+        max_depth=max_depth,
+        min_box_px=min_box_px,
+    )
+    return ctx.completed(dict(payload or {}))
+
+
+def _run_isolate(ctx: WorkflowContext) -> InferenceResult:
+    sam_params = dict(ctx.request.params.get("sam") or {})
+    dino_params = dict(ctx.request.params.get("dino") or {})
+    target_labels = list(ctx.request.params.get("target_labels") or [])
+    outside_value = int(ctx.request.params.get("outside_value") or 0)
+    crop_to_bbox = bool(ctx.request.params.get("crop_to_bbox") or False)
+    ctx.log("Warming up DINO...")
+    ctx.call_service("dino", get_dino_service, "warmup", {"params": dino_params})
+    ctx.log("Warming up sam...")
+    ctx.call_service("sam", get_sam_service, "warmup", {"params": sam_params})
+    payload = _run_isolate_single(
+        ctx,
+        image_path=str(ctx.request.image_path or ""),
+        dino_params=dino_params,
+        sam_params=sam_params,
+        target_labels=target_labels,
+        outside_value=outside_value,
+        crop_to_bbox=crop_to_bbox,
+    )
+    return ctx.completed(dict(payload or {}))
+
+
+_WORKFLOW_HANDLERS: dict[str, Callable[[WorkflowContext], InferenceResult]] = {
+    "sam_dino": lambda ctx: _run_sam_dino_workflow(ctx, sam_service_name="sam", sam_getter=get_sam_service),
+    "sam_dino_ft": lambda ctx: _run_sam_dino_workflow(ctx, sam_service_name="sam_finetune", sam_getter=get_sam_finetune_service),
+    "sam_only": _run_sam_only,
+    "sam_only_ft": _run_sam_only_ft,
+    "sam_tiled": _run_sam_tiled,
+    "isolate": _run_isolate,
+    "unet_only": lambda ctx: _run_single_or_batch(
+        ctx=ctx,
+        service_name="unet",
+        service_getter=get_unet_service,
+        params=dict(ctx.request.params.get("unet") or {}),
+    ),
+    "unet_dino": _run_unet_dino,
+}
+
+
 def run_workflow(ctx: WorkflowContext) -> InferenceResult:
     workflow = str(ctx.request.workflow or "").strip().lower()
-    if workflow == "sam_dino":
-        return _run_sam_dino_workflow(ctx, sam_service_name="sam", sam_getter=get_sam_service)
-    if workflow == "sam_dino_ft":
-        return _run_sam_dino_workflow(ctx, sam_service_name="sam_finetune", sam_getter=get_sam_finetune_service)
-    if workflow == "sam_only":
-        params = dict(ctx.request.params.get("sam") or {})
-        return _run_single_or_batch(ctx=ctx, service_name="sam", service_getter=get_sam_service, params=params)
-    if workflow == "sam_only_ft":
-        params = dict(ctx.request.params.get("sam") or {})
-        return _run_single_or_batch(ctx=ctx, service_name="sam_finetune", service_getter=get_sam_finetune_service, params=params)
-    if workflow == "sam_tiled":
-        sam_params = dict(ctx.request.params.get("sam") or {})
-        dino_params = dict(ctx.request.params.get("dino") or {})
-        target_labels = list(ctx.request.params.get("target_labels") or ["crack"])
-        max_depth = int(ctx.request.params.get("max_depth") or 3)
-        min_box_px = int(ctx.request.params.get("min_box_px") or 48)
-        ctx.log("Warming up DINO...")
-        ctx.call_service("dino", get_dino_service, "warmup", {"params": dino_params})
-        ctx.log("Warming up sam...")
-        ctx.call_service("sam", get_sam_service, "warmup", {"params": sam_params})
-        if ctx.request.image_paths:
-            results = []
-            total = len(ctx.request.image_paths)
-            ctx.log(f"Batch SAM+DINO Tiled: {total} images")
-            for idx, path in enumerate(ctx.request.image_paths):
-                if ctx.stop_checker():
-                    return ctx.completed({"stopped": True})
-                ctx.log(f"[{idx+1}/{total}] {path}")
-                res = _run_sam_tiled_single(
-                    ctx,
-                    image_path=str(path),
-                    dino_params=dino_params,
-                    sam_params=sam_params,
-                    target_labels=target_labels,
-                    max_depth=max_depth,
-                    min_box_px=min_box_px,
-                )
-                if isinstance(res, dict) and "image_path" not in res:
-                    res["image_path"] = str(path)
-                results.append(res)
-            return ctx.completed({"batch_done": True, "results": results})
-        payload = _run_sam_tiled_single(
-            ctx,
-            image_path=str(ctx.request.image_path or ""),
-            dino_params=dino_params,
-            sam_params=sam_params,
-            target_labels=target_labels,
-            max_depth=max_depth,
-            min_box_px=min_box_px,
-        )
-        return ctx.completed(dict(payload or {}))
-    if workflow == "isolate":
-        sam_params = dict(ctx.request.params.get("sam") or {})
-        dino_params = dict(ctx.request.params.get("dino") or {})
-        target_labels = list(ctx.request.params.get("target_labels") or [])
-        outside_value = int(ctx.request.params.get("outside_value") or 0)
-        crop_to_bbox = bool(ctx.request.params.get("crop_to_bbox") or False)
-        ctx.log("Warming up DINO...")
-        ctx.call_service("dino", get_dino_service, "warmup", {"params": dino_params})
-        ctx.log("Warming up sam...")
-        ctx.call_service("sam", get_sam_service, "warmup", {"params": sam_params})
-        payload = _run_isolate_single(
-            ctx,
-            image_path=str(ctx.request.image_path or ""),
-            dino_params=dino_params,
-            sam_params=sam_params,
-            target_labels=target_labels,
-            outside_value=outside_value,
-            crop_to_bbox=crop_to_bbox,
-        )
-        return ctx.completed(dict(payload or {}))
-    if workflow == "unet_only":
-        params = dict(ctx.request.params.get("unet") or {})
-        return _run_single_or_batch(ctx=ctx, service_name="unet", service_getter=get_unet_service, params=params)
-    if workflow == "unet_dino":
-        return _run_unet_dino(ctx)
-    raise ValueError(f"Unknown workflow: {ctx.request.workflow}")
+    handler = _WORKFLOW_HANDLERS.get(workflow)
+    if handler is None:
+        raise ValueError(f"Unknown workflow: {ctx.request.workflow}")
+    return handler(ctx)

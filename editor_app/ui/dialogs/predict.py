@@ -2,9 +2,21 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from inference_api.editor_bridge import settings_pages_for_mode
-
-from editor_app.ui.components.prediction_forms import DinoSettingsForm, SamSettingsForm, UnetSettingsForm
+from inference_api.prediction_models import (
+    DETECTION_DINO,
+    DETECTION_LABELS,
+    DETECTION_NONE,
+    SEGMENTATION_LABELS,
+    SEGMENTATION_SAM,
+    SEGMENTATION_SAM_LORA,
+    SEGMENTATION_UNET,
+    SCOPE_CURRENT,
+    SCOPE_FOLDER,
+    TASK_GROUP_CRACK_ONLY,
+    TASK_GROUP_LABELS,
+    TASK_GROUP_MORE_DAMAGE,
+    PredictionConfig,
+)
 
 
 class ProcessingDialog(QtWidgets.QDialog):
@@ -48,47 +60,68 @@ class ProcessingDialog(QtWidgets.QDialog):
 
 
 class PredictRunDialog(QtWidgets.QDialog):
-    def __init__(self, parent: QtWidgets.QWidget | None, *, has_image: bool, has_folder: bool) -> None:
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        *,
+        has_image: bool,
+        has_folder: bool,
+        default_config: PredictionConfig | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Run Prediction")
         self.setModal(True)
-        self.resize(420, 340)
+        self.resize(520, 520)
+        self._default = (default_config or PredictionConfig(
+            task_group=TASK_GROUP_CRACK_ONLY,
+            segmentation_model=SEGMENTATION_SAM,
+            detection_model=DETECTION_DINO,
+            scope=SCOPE_CURRENT if has_image else SCOPE_FOLDER,
+        )).normalized()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
 
-        self._mode_buttons: dict[str, QtWidgets.QRadioButton] = {}
-        model_group = QtWidgets.QGroupBox("Workflow", self)
-        model_layout = QtWidgets.QVBoxLayout(model_group)
-        for mode, label in (
-            ("sam_dino", "SAM + DINO"),
-            ("sam_dino_ft", "SAM + DINO + Finetune"),
-            ("sam_only", "SAM Only"),
-            ("sam_only_ft", "SAM Only + Finetune"),
-            ("sam_tiled", "SAM + DINO Tiled"),
-            ("unet_only", "UNet Only"),
-            ("unet_dino", "UNet + DINO"),
-        ):
-            button = QtWidgets.QRadioButton(label, model_group)
-            self._mode_buttons[mode] = button
-            model_layout.addWidget(button)
-        self._mode_buttons["sam_dino"].setChecked(True)
-        layout.addWidget(model_group)
+        self._task_buttons = self._build_radio_group(
+            layout,
+            title="Prediction Type",
+            entries=[
+                (TASK_GROUP_CRACK_ONLY, TASK_GROUP_LABELS[TASK_GROUP_CRACK_ONLY]),
+                (TASK_GROUP_MORE_DAMAGE, TASK_GROUP_LABELS[TASK_GROUP_MORE_DAMAGE]),
+            ],
+        )
+        self._seg_buttons = self._build_radio_group(
+            layout,
+            title="Choose Segmentation Model",
+            entries=[
+                (SEGMENTATION_SAM, SEGMENTATION_LABELS[SEGMENTATION_SAM]),
+                (SEGMENTATION_SAM_LORA, SEGMENTATION_LABELS[SEGMENTATION_SAM_LORA]),
+                (SEGMENTATION_UNET, SEGMENTATION_LABELS[SEGMENTATION_UNET]),
+            ],
+        )
+        self._detect_buttons = self._build_radio_group(
+            layout,
+            title="Choose Object Detection Model",
+            entries=[
+                (DETECTION_DINO, DETECTION_LABELS[DETECTION_DINO]),
+                (DETECTION_NONE, DETECTION_LABELS[DETECTION_NONE]),
+            ],
+        )
 
-        self._scope_current = QtWidgets.QRadioButton("Current Image", self)
-        self._scope_folder = QtWidgets.QRadioButton("Whole Folder", self)
+        self._scope_current = QtWidgets.QRadioButton("Current image", self)
+        self._scope_folder = QtWidgets.QRadioButton("Whole folder", self)
         scope_group = QtWidgets.QGroupBox("Scope", self)
         scope_layout = QtWidgets.QVBoxLayout(scope_group)
         self._scope_current.setEnabled(has_image)
         self._scope_folder.setEnabled(has_folder)
-        if has_image:
-            self._scope_current.setChecked(True)
-        else:
-            self._scope_folder.setChecked(True)
         scope_layout.addWidget(self._scope_current)
         scope_layout.addWidget(self._scope_folder)
         layout.addWidget(scope_group)
+
+        self._hint = QtWidgets.QLabel(self)
+        self._hint.setWordWrap(True)
+        layout.addWidget(self._hint)
 
         layout.addStretch(1)
         buttons = QtWidgets.QDialogButtonBox(
@@ -100,102 +133,67 @@ class PredictRunDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def get_result(self) -> tuple[str, str]:
-        mode = next((key for key, button in self._mode_buttons.items() if button.isChecked()), "sam_dino")
-        return mode, ("folder" if self._scope_folder.isChecked() else "current")
+        self._set_checked(self._task_buttons, self._default.task_group)
+        self._set_checked(self._seg_buttons, self._default.segmentation_model)
+        self._set_checked(self._detect_buttons, self._default.detection_model)
+        if self._default.scope == SCOPE_FOLDER and has_folder:
+            self._scope_folder.setChecked(True)
+        elif has_image:
+            self._scope_current.setChecked(True)
+        else:
+            self._scope_folder.setChecked(True)
 
+        for button in [*self._task_buttons.values(), *self._seg_buttons.values(), *self._detect_buttons.values()]:
+            button.toggled.connect(self._sync_state)
+        self._sync_state()
 
-class PredictDialog(QtWidgets.QDialog):
-    def __init__(
+    def _build_radio_group(
         self,
-        parent: QtWidgets.QWidget | None,
+        layout: QtWidgets.QVBoxLayout,
         *,
         title: str,
-        mode: str,
-        settings: dict,
-        has_image: bool,
-        has_folder: bool,
-        show_scope: bool = True,
-        pages: list[str] | None = None,
-        ok_text: str = "Run",
-        initial_page: str | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.resize(860, 720)
-        self._show_scope = bool(show_scope)
-        self._widgets: dict[str, QtWidgets.QWidget] = {}
+        entries: list[tuple[str, str]],
+    ) -> dict[str, QtWidgets.QRadioButton]:
+        group = QtWidgets.QGroupBox(title, self)
+        group_layout = QtWidgets.QVBoxLayout(group)
+        buttons: dict[str, QtWidgets.QRadioButton] = {}
+        for key, label in entries:
+            button = QtWidgets.QRadioButton(label, group)
+            buttons[key] = button
+            group_layout.addWidget(button)
+        layout.addWidget(group)
+        return buttons
 
-        root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
-        root.addWidget(QtWidgets.QLabel(title, self))
+    def _set_checked(self, buttons: dict[str, QtWidgets.QRadioButton], key: str) -> None:
+        if key in buttons:
+            buttons[key].setChecked(True)
 
-        self._scope_current: QtWidgets.QRadioButton | None = None
-        self._scope_folder: QtWidgets.QRadioButton | None = None
-        if self._show_scope:
-            scope_group = QtWidgets.QGroupBox("Scope", self)
-            scope_layout = QtWidgets.QHBoxLayout(scope_group)
-            self._scope_current = QtWidgets.QRadioButton("Current image", scope_group)
-            self._scope_folder = QtWidgets.QRadioButton("Whole folder", scope_group)
-            self._scope_current.setEnabled(bool(has_image))
-            self._scope_folder.setEnabled(bool(has_folder))
-            if has_image:
-                self._scope_current.setChecked(True)
-            else:
-                self._scope_folder.setChecked(True)
-            scope_layout.addWidget(self._scope_current)
-            scope_layout.addWidget(self._scope_folder)
-            scope_layout.addStretch(1)
-            root.addWidget(scope_group)
+    def _checked_key(self, buttons: dict[str, QtWidgets.QRadioButton], fallback: str) -> str:
+        for key, button in buttons.items():
+            if button.isChecked():
+                return key
+        return fallback
 
-        tabs = QtWidgets.QTabWidget(self)
-        tabs.setDocumentMode(True)
-        root.addWidget(tabs, 1)
+    def _sync_state(self) -> None:
+        task_group = self._checked_key(self._task_buttons, TASK_GROUP_CRACK_ONLY)
+        more_damage = task_group == TASK_GROUP_MORE_DAMAGE
+        self._seg_buttons[SEGMENTATION_SAM_LORA].setEnabled(not more_damage)
+        self._seg_buttons[SEGMENTATION_UNET].setEnabled(not more_damage)
+        if more_damage and (
+            self._seg_buttons[SEGMENTATION_SAM_LORA].isChecked()
+            or self._seg_buttons[SEGMENTATION_UNET].isChecked()
+        ):
+            self._seg_buttons[SEGMENTATION_SAM].setChecked(True)
+        if more_damage:
+            self._hint.setText("More damage currently supports SAM with optional DINO detection.")
+        else:
+            self._hint.setText("Crack-only supports SAM, SAM Finetune with LoRA, or UNet, with or without DINO.")
 
-        for page in (pages or settings_pages_for_mode(str(mode).strip().lower())):
-            key = str(page or "").strip().lower()
-            if key == "sam":
-                tabs.addTab(SamSettingsForm(settings, self._widgets, tabs), "sam")
-            elif key == "dino":
-                tabs.addTab(DinoSettingsForm(settings, self._widgets, tabs), "dino")
-            elif key == "unet":
-                tabs.addTab(UnetSettingsForm(settings, self._widgets, tabs), "unet")
-
-        if initial_page:
-            want = str(initial_page).strip().lower()
-            for index in range(tabs.count()):
-                if tabs.tabText(index).strip().lower() == want:
-                    tabs.setCurrentIndex(index)
-                    break
-
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
-            self,
+    def get_result(self) -> PredictionConfig:
+        scope = SCOPE_FOLDER if self._scope_folder.isChecked() else SCOPE_CURRENT
+        return PredictionConfig(
+            task_group=self._checked_key(self._task_buttons, TASK_GROUP_CRACK_ONLY),
+            segmentation_model=self._checked_key(self._seg_buttons, SEGMENTATION_SAM),
+            detection_model=self._checked_key(self._detect_buttons, DETECTION_DINO),
+            scope=scope,
         )
-        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(str(ok_text or "Run"))
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-
-    def selected_scope(self) -> str:
-        if not self._show_scope or self._scope_folder is None:
-            return "current"
-        return "folder" if self._scope_folder.isChecked() else "current"
-
-    def settings_dict(self) -> dict:
-        out: dict = {}
-        for key, widget in self._widgets.items():
-            if isinstance(widget, QtWidgets.QLineEdit):
-                out[key] = widget.text().strip()
-            elif isinstance(widget, QtWidgets.QCheckBox):
-                out[key] = widget.isChecked()
-            elif isinstance(widget, QtWidgets.QSpinBox):
-                out[key] = int(widget.value())
-            elif isinstance(widget, QtWidgets.QDoubleSpinBox):
-                out[key] = float(widget.value())
-            elif isinstance(widget, QtWidgets.QComboBox):
-                value = widget.currentData()
-                out[key] = value if value is not None else widget.currentText()
-        return out

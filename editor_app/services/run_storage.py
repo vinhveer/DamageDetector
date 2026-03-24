@@ -10,15 +10,13 @@ from editor_app.domain.models import RunContext, RunSummary
 
 
 class RunStorageService:
-    def create_run(self, *, results_root: Path, workflow: str, scope: str) -> RunContext:
+    def plan_run(self, *, results_root: Path, workflow: str, scope: str) -> RunContext:
         created_at = _dt.datetime.now().isoformat(timespec="seconds")
         stamp = _dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         run_id = f"{stamp}_{workflow}_{uuid4().hex[:6]}"
         run_dir = results_root / run_id
         output_dir = run_dir / "outputs"
         data_dir = run_dir / "data"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        data_dir.mkdir(parents=True, exist_ok=True)
         ctx = RunContext(
             run_id=run_id,
             workflow=str(workflow),
@@ -28,18 +26,35 @@ class RunStorageService:
             data_dir=data_dir,
             created_at=created_at,
         )
-        self._write_json(
-            run_dir / "run.json",
-            {
-                "run_id": run_id,
-                "workflow": workflow,
-                "scope": scope,
-                "created_at": created_at,
-                "run_dir": str(run_dir),
-                "output_dir": str(output_dir),
-                "status": "queued",
-            },
-        )
+        return ctx
+
+    def materialize_run(
+        self,
+        run: RunContext,
+        *,
+        status: str = "queued",
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        run.output_dir.mkdir(parents=True, exist_ok=True)
+        run.data_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "run_id": run.run_id,
+            "workflow": run.workflow,
+            "scope": run.scope,
+            "created_at": run.created_at,
+            "run_dir": str(run.run_dir),
+            "output_dir": str(run.output_dir),
+            "status": str(status),
+            "error": error,
+        }
+        if metadata:
+            payload.update(dict(metadata))
+        self._write_json(run.run_dir / "run.json", payload)
+
+    def create_run(self, *, results_root: Path, workflow: str, scope: str) -> RunContext:
+        ctx = self.plan_run(results_root=results_root, workflow=workflow, scope=scope)
+        self.materialize_run(ctx)
         return ctx
 
     def write_request(self, run: RunContext, request_data: dict[str, Any]) -> None:
@@ -54,7 +69,15 @@ class RunStorageService:
             with (run.run_dir / "logs.txt").open("a", encoding="utf-8") as handle:
                 handle.write(message + "\n")
 
-    def write_result(self, run: RunContext, *, status: str, payload: dict[str, Any] | None, error: str | None = None) -> None:
+    def write_result(
+        self,
+        run: RunContext,
+        *,
+        status: str,
+        payload: dict[str, Any] | None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         result_payload = {
             "run_id": run.run_id,
             "workflow": run.workflow,
@@ -63,8 +86,14 @@ class RunStorageService:
             "result": dict(payload or {}),
         }
         self._write_json(run.run_dir / "result.json", result_payload)
-        self._write_json(
-            run.run_dir / "run.json",
+        run_meta: dict[str, Any] = {}
+        run_json_path = run.run_dir / "run.json"
+        if run_json_path.is_file():
+            try:
+                run_meta = json.loads(run_json_path.read_text(encoding="utf-8"))
+            except Exception:
+                run_meta = {}
+        run_meta.update(
             {
                 "run_id": run.run_id,
                 "workflow": run.workflow,
@@ -74,8 +103,11 @@ class RunStorageService:
                 "output_dir": str(run.output_dir),
                 "status": str(status),
                 "error": error,
-            },
+            }
         )
+        if metadata:
+            run_meta.update(dict(metadata))
+        self._write_json(run.run_dir / "run.json", run_meta)
 
         detections = []
         if payload:
@@ -109,6 +141,9 @@ class RunStorageService:
                     status=str(payload.get("status") or "unknown"),
                     created_at=str(payload.get("created_at") or ""),
                     run_dir=str(run_dir),
+                    task_group=str(payload.get("task_group") or ""),
+                    segmentation_model=str(payload.get("segmentation_model") or ""),
+                    detection_model=str(payload.get("detection_model") or ""),
                     request_path=str(run_dir / "request.json") if (run_dir / "request.json").is_file() else None,
                     result_path=str(run_dir / "result.json") if (run_dir / "result.json").is_file() else None,
                     log_path=str(run_dir / "logs.txt") if (run_dir / "logs.txt").is_file() else None,

@@ -11,10 +11,11 @@ from editor_app.domain.models import RunSummary
 class HistoryWorkspace(QtWidgets.QWidget):
     openRunRequested = QtCore.Signal(str)
     loadItemRequested = QtCore.Signal(object)
+    runSelected = QtCore.Signal(str)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self._run_bundle_by_dir: dict[str, dict] = {}
+        self._selected_run_dir: str | None = None
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
@@ -67,11 +68,17 @@ class HistoryWorkspace(QtWidgets.QWidget):
         self._run_summary_form = self._detail_stack_layout(self._run_summary_group)
         self._run_id_value = self._value_label()
         self._workflow_value = self._value_label()
+        self._task_group_value = self._value_label()
+        self._segmentation_value = self._value_label()
+        self._detection_value = self._value_label()
         self._status_value = self._value_label()
         self._created_value = self._value_label()
         self._scope_value = self._value_label()
         self._add_detail_stack_row(self._run_summary_form, "Run ID", self._run_id_value)
         self._add_detail_stack_row(self._run_summary_form, "Workflow", self._workflow_value)
+        self._add_detail_stack_row(self._run_summary_form, "Prediction Type", self._task_group_value)
+        self._add_detail_stack_row(self._run_summary_form, "Segmentation Model", self._segmentation_value)
+        self._add_detail_stack_row(self._run_summary_form, "Object Detection Model", self._detection_value)
         self._add_detail_stack_row(self._run_summary_form, "Status", self._status_value)
         self._add_detail_stack_row(self._run_summary_form, "Created", self._created_value)
         self._add_detail_stack_row(self._run_summary_form, "Scope", self._scope_value)
@@ -126,6 +133,7 @@ class HistoryWorkspace(QtWidgets.QWidget):
         root.addWidget(splitter, 1)
         self._run_items_by_dir: dict[str, list[dict]] = {}
         self._load_btn.setEnabled(False)
+        self._open_btn.setEnabled(False)
 
     def refresh_button(self) -> QtWidgets.QPushButton:
         return self._refresh_btn
@@ -133,12 +141,8 @@ class HistoryWorkspace(QtWidgets.QWidget):
     def set_runs(
         self,
         runs: list[RunSummary],
-        *,
-        run_items_by_dir: dict[str, list[dict]] | None = None,
-        run_bundles_by_dir: dict[str, dict] | None = None,
     ) -> None:
-        self._run_items_by_dir = dict(run_items_by_dir or {})
-        self._run_bundle_by_dir = dict(run_bundles_by_dir or {})
+        current_run_dir = self._selected_run_dir
         self._run_list.clear()
         self._item_list.clear()
         for run in runs:
@@ -153,8 +157,12 @@ class HistoryWorkspace(QtWidgets.QWidget):
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, run.run_dir)
             self._style_status_item(item, run.status)
             self._run_list.addTopLevelItem(item)
+            if current_run_dir and str(run.run_dir) == current_run_dir:
+                self._run_list.setCurrentItem(item)
         self._subtitle.setText(f"{len(runs)} runs available")
-        if self._run_list.topLevelItemCount() > 0:
+        if self._run_list.currentItem() is not None:
+            self._show_selected_run()
+        elif self._run_list.topLevelItemCount() > 0:
             self._run_list.setCurrentItem(self._run_list.topLevelItem(0))
         else:
             self._clear_details()
@@ -163,12 +171,21 @@ class HistoryWorkspace(QtWidgets.QWidget):
         item = self._run_list.currentItem()
         if item is None:
             self._item_list.clear()
+            self._selected_run_dir = None
             self._clear_details()
             return
-        run_dir = Path(str(item.data(0, QtCore.Qt.ItemDataRole.UserRole) or ""))
+        run_dir = str(item.data(0, QtCore.Qt.ItemDataRole.UserRole) or "")
+        self._selected_run_dir = run_dir or None
+        self.runSelected.emit(run_dir)
+
+    def set_selected_run_details(self, run_dir: str, *, bundle: dict | None = None, items: list[dict] | None = None) -> None:
+        normalized = str(run_dir or "").strip()
+        if not normalized or normalized != str(self._selected_run_dir or ""):
+            return
+        run_path = Path(normalized)
         self._item_list.clear()
-        items = list(self._run_items_by_dir.get(str(run_dir), []))
-        for entry in items:
+        rows = list(items or [])
+        for entry in rows:
             image_path = str(entry.get("image_path") or "")
             image_name = Path(image_path).name if image_path else f"item_{entry.get('_item_index', 0)}"
             has_mask = "yes" if entry.get("mask_path") else ""
@@ -180,17 +197,25 @@ class HistoryWorkspace(QtWidgets.QWidget):
         if self._item_list.topLevelItemCount() > 0:
             self._item_list.setCurrentItem(self._item_list.topLevelItem(0))
             self._load_btn.setEnabled(True)
-        bundle = dict(self._run_bundle_by_dir.get(str(run_dir)) or {})
+        else:
+            self._load_btn.setEnabled(False)
+        self._open_btn.setEnabled(True)
+        bundle = dict(bundle or {})
         run_meta = dict(bundle.get("run") or {})
         request_meta = dict(bundle.get("request") or {})
-        self._run_id_value.setText(str(run_meta.get("run_id") or run_dir.name))
-        self._workflow_value.setText(str(run_meta.get("workflow") or "-"))
+        selection = dict(request_meta.get("selection") or {})
+        resolved = dict(request_meta.get("resolved") or {})
+        self._run_id_value.setText(str(run_meta.get("run_id") or run_path.name))
+        self._workflow_value.setText(str(resolved.get("workflow") or run_meta.get("resolved_workflow") or run_meta.get("workflow") or "-"))
+        self._task_group_value.setText(str(selection.get("task_group_label") or selection.get("task_group") or run_meta.get("task_group") or "-"))
+        self._segmentation_value.setText(str(selection.get("segmentation_model_label") or selection.get("segmentation_model") or run_meta.get("segmentation_model") or "-"))
+        self._detection_value.setText(str(selection.get("detection_model_label") or selection.get("detection_model") or run_meta.get("detection_model") or "-"))
         self._set_status_label(str(run_meta.get("status") or "-"))
         self._created_value.setText(str(run_meta.get("created_at") or "-"))
         self._scope_value.setText(str(run_meta.get("scope") or "-"))
-        self._run_dir_value.setText(str(run_meta.get("run_dir") or run_dir))
-        self._output_dir_value.setText(str(run_meta.get("output_dir") or (run_dir / "outputs")))
-        self._items_value.setText(str(len(items)))
+        self._run_dir_value.setText(str(run_meta.get("run_dir") or run_path))
+        self._output_dir_value.setText(str(run_meta.get("output_dir") or (run_path / "outputs")))
+        self._items_value.setText(str(len(rows)))
         self._request_value.setPlainText(self._format_request_payload(request_meta))
 
     def _show_selected_item(self) -> None:
@@ -281,8 +306,12 @@ class HistoryWorkspace(QtWidgets.QWidget):
             return str(payload)
 
     def _clear_details(self) -> None:
+        self._selected_run_dir = None
         self._run_id_value.setText("-")
         self._workflow_value.setText("-")
+        self._task_group_value.setText("-")
+        self._segmentation_value.setText("-")
+        self._detection_value.setText("-")
         self._created_value.setText("-")
         self._scope_value.setText("-")
         self._set_status_label("-")
@@ -291,3 +320,4 @@ class HistoryWorkspace(QtWidgets.QWidget):
         self._items_value.setText("0")
         self._request_value.setPlainText("")
         self._load_btn.setEnabled(False)
+        self._open_btn.setEnabled(False)

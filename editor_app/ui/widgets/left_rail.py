@@ -66,7 +66,11 @@ class LeftRail(QtWidgets.QWidget):
         current_id = self.current_job_id()
         self._job_list.clear()
         for job in jobs:
-            item = QtWidgets.QTreeWidgetItem([job.run_id, job.workflow, job.status])
+            selection = dict(job.request_data.get("selection") or {})
+            seg = str(selection.get("segmentation_model_label") or job.segmentation_model or "").strip()
+            det = str(selection.get("detection_model_label") or job.detection_model or "").strip()
+            workflow_label = " + ".join(part for part in (seg, det) if part) or job.resolved_workflow or job.workflow
+            item = QtWidgets.QTreeWidgetItem([job.run_id, str(workflow_label), job.status])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, job.job_id)
             item.setToolTip(0, job.run_dir)
             self._job_list.addTopLevelItem(item)

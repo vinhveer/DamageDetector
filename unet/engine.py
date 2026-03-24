@@ -21,6 +21,7 @@ class UnetParams:
     tile_batch_size: int = 4
     device: str = "auto"
     roi_box: tuple[int, int, int, int] | None = None
+    task_group: str = "crack_only"
 
 
 class UnetRunner:

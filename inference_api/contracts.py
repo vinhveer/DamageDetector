@@ -35,6 +35,8 @@ class InferenceRequest:
     image_paths: list[str] | None = None
     roi_box: tuple[int, int, int, int] | None = None
     params: dict[str, Any] = field(default_factory=dict)
+    selection: dict[str, Any] = field(default_factory=dict)
+    resolved: dict[str, Any] = field(default_factory=dict)
     client_tag: str | None = None
     source: str | None = None
 

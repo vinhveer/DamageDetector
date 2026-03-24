@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 
 class ExplorerPanel(QtWidgets.QWidget):
@@ -117,10 +119,15 @@ class ExplorerPanel(QtWidgets.QWidget):
             self._reveal(path)
 
     def _reveal(self, path: str) -> None:
+        file_path = Path(path)
+        folder = str(file_path.parent)
         if os.name == "nt":
-            subprocess.run(["explorer", "/select,", os.path.normpath(path)], check=False)
+            subprocess.run(["explorer", "/select,", os.path.normpath(str(file_path))], check=False)
             return
         if sys.platform == "darwin":
-            subprocess.run(["open", "-R", path], check=False)
+            subprocess.run(["open", "-R", str(file_path)], check=False)
             return
-        subprocess.run(["xdg-open", os.path.dirname(path)], check=False)
+        if shutil.which("xdg-open"):
+            subprocess.run(["xdg-open", folder], check=False)
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
