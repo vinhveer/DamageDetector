@@ -548,7 +548,11 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     device=image_batch.device,
                 )
             else:
-                box_batch, points_batch, prompt_counts = _prepare_hybrid_prompts(sampled_batch, device=image_batch.device)
+                box_batch, points_batch, prompt_counts = _prepare_hybrid_prompts(
+                    sampled_batch,
+                    device=image_batch.device,
+                    prompt_policy=prompt_policy,
+                )
                 for key, value in prompt_counts.items():
                     epoch_prompt_counts[key] += int(value)
 
