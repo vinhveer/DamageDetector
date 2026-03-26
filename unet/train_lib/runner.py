@@ -478,8 +478,13 @@ def run_training(args):
             datefmt="%Y-%m-%d %H:%M:%S",
             force=True,
         )
-        if not any(isinstance(h, logging.StreamHandler) for h in logging.getLogger().handlers):
-            logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+        logger = logging.getLogger()
+        has_stdout_handler = any(
+            isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+            for h in logger.handlers
+        )
+        if not has_stdout_handler:
+            logger.addHandler(logging.StreamHandler(sys.stdout))
     else:
         logging.disable(logging.CRITICAL)
     
