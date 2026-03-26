@@ -232,7 +232,7 @@ def run_training(args):
                 patch_size=None,
                 output_size=args.input_size,
                 verbose=(rank == 0),
-                cache_data=False,
+                cache_data=bool(args.cache_data),
                 preprocess_mode=mode,
                 patches_per_image=getattr(args, "patches_per_image", 1),
                 aug_prob=args.aug_prob,
@@ -274,7 +274,7 @@ def run_training(args):
                 patch_size=None,
                 output_size=args.input_size,
                 verbose=(rank == 0),
-                cache_data=False,
+                cache_data=bool(args.cache_data),
                 preprocess_mode=mode,
                 patches_per_image=1,
             )
@@ -365,26 +365,35 @@ def run_training(args):
             device_ids=[local_rank],
             output_device=local_rank,
             broadcast_buffers=False,
-            find_unused_parameters=True,
+            find_unused_parameters=False,
         )
 
     # Loss + optimizer.
     pos_weight = torch.tensor([float(args.pos_weight)], device=device)
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    def criterion(pred, target):
-        loss = 0.0
+    def criterion(pred, target, return_components=False):
+        loss = torch.zeros((), device=pred.device, dtype=pred.dtype)
+        components = {}
         bce_weight = float(args.bce_weight)
         dice_weight = float(args.dice_weight)
         focal_weight = float(getattr(args, "focal_weight", 0.0))
         if bce_weight > 0:
-            loss += bce_weight * bce(pred, target)
+            loss_bce = bce(pred, target)
+            loss += bce_weight * loss_bce
+            components["loss_bce"] = loss_bce
         if dice_weight > 0:
-            loss += dice_weight * dice_loss(pred, target)
+            loss_dice = dice_loss(pred, target)
+            loss += dice_weight * loss_dice
+            components["loss_dice"] = loss_dice
         if focal_weight > 0:
             alpha = float(getattr(args, "focal_alpha", 0.25))
             gamma = float(getattr(args, "focal_gamma", 2.0))
-            loss += focal_weight * focal_loss_with_logits(pred, target, alpha=alpha, gamma=gamma)
+            loss_focal = focal_loss_with_logits(pred, target, alpha=alpha, gamma=gamma)
+            loss += focal_weight * loss_focal
+            components["loss_focal"] = loss_focal
+        if return_components:
+            return loss, components
         return loss
 
     # Optimizer: AdamW is generally better than Adam for SOTA models
@@ -438,6 +447,8 @@ def run_training(args):
     train_model._disable_loss_curve = bool(args.no_loss_curve)
     train_model._early_stop_patience = int(args.early_stop_patience)
     train_model._visualize_every = int(args.visualize_every)
+    train_model._log_every = int(getattr(args, "log_every", 1))
+    train_model._save_all_epochs = bool(getattr(args, "save_all_epochs", False))
     if args.metric_thresholds.strip():
         train_model._metric_thresholds = [
             float(x.strip()) for x in args.metric_thresholds.split(",") if x.strip()

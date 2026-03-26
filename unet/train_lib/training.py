@@ -30,12 +30,33 @@ def _all_reduce_sum(value, device):
     return float(t.item())
 
 
+def _dist_any(flag, device):
+    t = torch.tensor(1 if flag else 0, device=device, dtype=torch.int32)
+    if _dist_on():
+        dist.all_reduce(t, op=dist.ReduceOp.MAX)
+    return bool(int(t.item()))
+
+
 def _unpack_batch(batch):
     if batch is None:
         return None, None, None
     if isinstance(batch, (tuple, list)) and len(batch) == 3:
         return batch[0], batch[1], batch[2]
     return batch[0], batch[1], None
+
+
+def _call_criterion(criterion, outputs, masks, *, return_components=False):
+    if return_components:
+        try:
+            loss_out = criterion(outputs, masks, return_components=True)
+        except TypeError:
+            loss_out = criterion(outputs, masks)
+    else:
+        loss_out = criterion(outputs, masks)
+
+    if isinstance(loss_out, tuple) and len(loss_out) == 2:
+        return loss_out[0], loss_out[1]
+    return loss_out, {}
 
 
 def _compute_reconstructed_metrics(tile_predictions, thresholds, base_threshold):
@@ -178,6 +199,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     # Early stopping parameters.
     patience = int(getattr(train_model, "_early_stop_patience", 15))
     counter = 0
+    iter_num = 0
 
     for epoch in range(num_epochs):
         if hasattr(getattr(train_loader, "sampler", None), "set_epoch"):
@@ -203,19 +225,38 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             # Forward pass with AMP
             with torch.amp.autocast('cuda', enabled=use_cuda):
                 outputs = model(images)
-                loss = criterion(outputs, masks)
-                loss = loss / grad_accum_steps
+                loss, loss_components = _call_criterion(criterion, outputs, masks, return_components=True)
+                loss_to_backprop = loss / grad_accum_steps
 
             # Backward pass with Scaler
-            scaler.scale(loss).backward()
+            scaler.scale(loss_to_backprop).backward()
             
             if (i + 1) % grad_accum_steps == 0 or (i + 1) == len(train_loader):
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
 
-            train_loss += loss.item() * grad_accum_steps
+            train_loss += loss.item()
             train_steps += 1
+            iter_num += 1
+
+            log_every = int(getattr(train_model, "_log_every", 1))
+            if is_main and log_every > 0 and (iter_num % log_every == 0):
+                current_lr = optimizer.param_groups[0]["lr"]
+                loss_bce = float(loss_components.get("loss_bce", torch.tensor(0.0)).item())
+                loss_dice = float(loss_components.get("loss_dice", torch.tensor(0.0)).item())
+                loss_focal = float(loss_components.get("loss_focal", torch.tensor(0.0)).item())
+                logging.info(
+                    "iteration %d : loss : %.6f, loss_bce: %.6f, loss_dice: %.6f, loss_focal: %.6f lr: %.7f"
+                    % (
+                        iter_num,
+                        loss.item(),
+                        loss_bce,
+                        loss_dice,
+                        loss_focal,
+                        current_lr,
+                    )
+                )
 
         train_loss_sum = _all_reduce_sum(train_loss, device=device)
         train_steps_sum = _all_reduce_sum(train_steps, device=device)
@@ -232,6 +273,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         val_dice_sum = 0.0
         val_iou_sum = 0.0
         tile_predictions = {}
+        has_tile_metadata = False
         val_thr_report = {}
         if hasattr(train_model, "_metric_thresholds"):
             for t in train_model._metric_thresholds:
@@ -251,7 +293,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 # AMp for validation too
                 with torch.amp.autocast('cuda', enabled=use_cuda):
                     outputs = model(images)
-                    loss = criterion(outputs, masks)
+                    loss, _ = _call_criterion(criterion, outputs, masks, return_components=False)
 
                 val_loss += loss.item()
                 val_steps += 1
@@ -267,6 +309,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                         val_thr_report[t]["iou"] += iou_score_from_prob(prob, masks, thr=t_val)
 
                 if metadata:
+                    has_tile_metadata = True
                     prob_cpu = prob.detach().float().cpu()
                     masks_cpu = masks.detach().float().cpu()
                     for idx, meta in enumerate(metadata):
@@ -302,15 +345,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         if hasattr(train_model, "_metric_thresholds"):
             threshold_values.extend(float(t) for t in train_model._metric_thresholds)
         threshold_values = sorted(set(threshold_values))
-        reconstructed_tile_predictions = _gather_reconstructed_tiles(tile_predictions)
         reconstructed_metrics = None
-        if reconstructed_tile_predictions:
-            reconstructed_metrics = _compute_reconstructed_metrics(
-                reconstructed_tile_predictions,
-                threshold_values,
-                metric_threshold,
-            )
-        reconstructed_metrics = _broadcast_optional_metrics(reconstructed_metrics, device)
+        if _dist_any(has_tile_metadata, device):
+            reconstructed_tile_predictions = _gather_reconstructed_tiles(tile_predictions)
+            if reconstructed_tile_predictions:
+                reconstructed_metrics = _compute_reconstructed_metrics(
+                    reconstructed_tile_predictions,
+                    threshold_values,
+                    metric_threshold,
+                )
+            reconstructed_metrics = _broadcast_optional_metrics(reconstructed_metrics, device)
         sweep_best_iou = avg_val_iou = 0.0 if val_steps == 0 else None
         sweep_best_dice = avg_val_dice = 0.0 if val_steps == 0 else None
         sweep_best_iou_thr = metric_threshold
@@ -407,7 +451,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             save_checkpoint(last_model_path, model, model_config, epoch=epoch + 1, metrics=metrics)
         
         # Save epoch model (if configured)
-        save_all = getattr(train_model, "_save_all_epochs", True) 
+        save_all = getattr(train_model, "_save_all_epochs", False)
         if save_all and is_main:
             epoch_model_path = os.path.join(output_dir, f"epoch_{epoch+1}.pth")
             save_checkpoint(epoch_model_path, model, model_config, epoch=epoch + 1, metrics=metrics)

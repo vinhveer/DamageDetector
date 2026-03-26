@@ -50,7 +50,7 @@ class CrackDataset(Dataset):
         self.augment = augment
         self.output_size = int(output_size)
         self.verbose = verbose
-        self.cache_data = False 
+        self.cache_data = bool(cache_data)
         self.preprocess_mode = preprocess_mode # Store for __getitem__ logic
         self.aug_prob = max(0.0, min(1.0, float(aug_prob)))
         self.rotate_limit = float(rotate_limit)
@@ -58,7 +58,7 @@ class CrackDataset(Dataset):
         self.contrast_limit = float(contrast_limit)
 
         if cache_data and self.verbose:
-             print("Warning: cache_data disabled by default to prevent stability issues.")
+             print("CrackDataset: cache_data enabled. This may increase RAM usage significantly.")
 
         # Check dirs
         if not os.path.exists(image_dir):
@@ -428,5 +428,4 @@ class CrackDataset(Dataset):
         mask = torch.from_numpy(final_mask).float().unsqueeze(0)       
         
         return image, mask
-
 

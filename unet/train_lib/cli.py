@@ -16,6 +16,8 @@ def build_arg_parser():
     parser.add_argument("--visualize", dest="no_visualize", action="store_false", help="Enable visualization (default: disabled)")
     parser.add_argument("--loss-curve", dest="no_loss_curve", action="store_false", help="Enable loss curve plotting (default: disabled)")
     parser.add_argument("--visualize-every", type=int, default=0, help="Visualize every N epochs (0 to disable)")
+    parser.add_argument("--log-every", type=int, default=1, help="Log training metrics every N iterations (1 = every iteration, 0 = disable iteration logs)")
+    parser.add_argument("--save-all-epochs", action="store_true", help="Save an additional checkpoint for every epoch")
     parser.set_defaults(no_visualize=True, no_loss_curve=True)
 
     # Preprocessing

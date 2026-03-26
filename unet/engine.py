@@ -16,7 +16,7 @@ class UnetParams:
     threshold: float = 0.5
     apply_postprocessing: bool = True
     mode: str = "tile"
-    input_size: int = 256
+    input_size: int = 512
     tile_overlap: int = 0
     tile_batch_size: int = 4
     device: str = "auto"
