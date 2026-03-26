@@ -136,6 +136,32 @@ class BinaryTverskyLoss(nn.Module):
         return 1.0 - score.mean()
 
 
+class BinaryFocalWithLogitsLoss(nn.Module):
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "mean"):
+        super().__init__()
+        self.alpha = float(alpha)
+        self.gamma = float(gamma)
+        self.reduction = str(reduction)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        target = target.float()
+        if target.ndim == 3:
+            target = target.unsqueeze(1)
+
+        probs = torch.sigmoid(logits)
+        pt = probs * target + (1.0 - probs) * (1.0 - target)
+        alpha_t = self.alpha * target + (1.0 - self.alpha) * (1.0 - target)
+        focal_weight = alpha_t * torch.pow(torch.clamp(1.0 - pt, min=0.0), self.gamma)
+        bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+        loss = focal_weight * bce
+
+        if self.reduction == "sum":
+            return loss.sum()
+        if self.reduction == "none":
+            return loss
+        return loss.mean()
+
+
 def calculate_metric_percase(pred, gt):
     pred = np.asarray(pred) > 0
     gt = np.asarray(gt) > 0

@@ -299,17 +299,23 @@ class PredictionController(QtCore.QObject):
                 )
 
     def _apply_payload_if_current(self, payload: dict, *, partial: bool) -> None:
-        image_path = str(payload.get("image_path") or "")
-        if not image_path or image_path != str(self._workspace_store.current_image_path or ""):
+        items = self._payload_items(payload)
+        current_path = str(self._workspace_store.current_image_path or "")
+        if not current_path:
             return
-        detections = list(payload.get("detections") or [])
+        if not partial:
+            self._workspace_store.set_result_items(items)
+        current_item = next((item for item in items if str(item.get("image_path") or "") == current_path), None)
+        if current_item is None:
+            return
+        detections = list(current_item.get("detections") or [])
         if detections:
             self._workspace_store.set_highlight_detections(detections)
             if not partial:
                 self._workspace_store.set_detections(detections)
         if partial:
             return
-        mask_path = str(payload.get("mask_path") or "")
+        mask_path = str(current_item.get("mask_path") or "")
         image = self._workspace_store.current_image
         if mask_path and not image.isNull():
             try:
@@ -318,3 +324,11 @@ class PredictionController(QtCore.QObject):
                 loaded = None
             if loaded is not None:
                 self._workspace_store.set_current_mask(mask_path, loaded.mask)
+
+    def _payload_items(self, payload: dict) -> list[dict]:
+        results = payload.get("results")
+        if isinstance(results, list):
+            items = [dict(item) for item in results if isinstance(item, dict)]
+            if items:
+                return items
+        return [dict(payload or {})]

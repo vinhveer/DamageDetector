@@ -24,6 +24,26 @@ class WorkspaceController:
             self.open_image(images[0])
         return images
 
+    def import_folder(self, source_folder: str) -> list[str]:
+        workspace_root = self._workspace_store.workspace_root
+        results_root = self._workspace_store.results_root
+        if workspace_root is None or results_root is None:
+            raise ImageIoError("Open a workspace folder before importing images.")
+        copied = self._file_service.import_images(source_folder, workspace_root)
+        images = self._file_service.list_images(workspace_root)
+        self._workspace_store.set_workspace(workspace_root, results_root, images)
+        return copied
+
+    def set_result_items(self, items: list[dict], *, adopt_images: bool = False) -> None:
+        if adopt_images:
+            image_paths = [str(item.get("image_path") or "").strip() for item in items]
+            image_paths = [path for path in image_paths if path]
+            if image_paths:
+                workspace_root = self._workspace_store.workspace_root or Path(image_paths[0]).resolve().parent
+                results_root = self._workspace_store.results_root or (workspace_root / "_editor_app_runs")
+                self._workspace_store.set_workspace(workspace_root, Path(results_root), image_paths)
+        self._workspace_store.set_result_items(items)
+
     def open_image(self, path: str) -> None:
         image = load_image(path)
         self._workspace_store.set_current_image(path, image)
@@ -31,6 +51,21 @@ class WorkspaceController:
         self._workspace_store.clear_mask(blank)
         self._workspace_store.set_detections([])
         self._workspace_store.set_highlight_detections([])
+        result_item = self._workspace_store.result_item_for(path)
+        if result_item is None:
+            return
+        detections = list(result_item.get("detections") or [])
+        if detections:
+            self._workspace_store.set_detections(detections)
+            self._workspace_store.set_highlight_detections(detections)
+        mask_path = str(result_item.get("mask_path") or "").strip()
+        if mask_path:
+            try:
+                loaded = load_mask(mask_path, (image.width(), image.height()))
+            except Exception:
+                loaded = None
+            if loaded is not None:
+                self._workspace_store.set_current_mask(mask_path, loaded.mask)
 
     def open_mask(self, path: str) -> None:
         image = self._workspace_store.current_image

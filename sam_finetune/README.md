@@ -5,14 +5,32 @@
 
 <h3>2. Train:</h3>
 
-Download the dataset and use your path
+Dataset layout is generic-only and must contain:
+
+```text
+dataset_root/
+  images/
+  masks/
+```
+
+Training now uses:
+- hybrid prompt policy by default
+- auto `pos_weight`
+- BCE + Dice + Tversky + Focal
+- tiled full-image validation as the primary model-selection metric
 
 ```python
-python train.py --root_path D:\CrackSAM\dataset\trainingset\  --val_path D:\CrackSAM\dataset\validationset\  --warmup --AdamW --img_size 448  --n_gpu 1  --batch_size 8     --base_lr 0.0004  --warmup_period 300  --tf32  --use_amp --lr_exp 6 --max_epochs 140 --stop_epoch 100   --vit_name vit_h    --delta_type adapter --middle_dim 32 --scaling_factor 0.2 --save_interval 5
+python train.py --root_path /path/to/train --val_path /path/to/val --warmup --AdamW --img_size 512 --n_gpu 1 --batch_size 8 --base_lr 0.0004 --warmup_period 300 --tf32 --use_amp --max_epochs 140 --stop_epoch 100 --vit_name vit_b --ckpt /path/to/sam_vit_b.pth --delta_type lora --rank 4 --patches_per_image 4 --background_crop_prob 0.2 --near_background_crop_prob 0.15 --prompt_policy hybrid --pos_weight auto --bce_weight 1.0 --dice_weight 0.35 --tversky_weight 0.35 --focal_weight 0.25 --focal_alpha 0.25 --focal_gamma 2.0 --val_thresholds 0.35 0.4 0.45 0.5 0.55 0.6 --tile_overlap 256 --save_interval 1
 ```
 
 <h3>3. Test:</h3>
 
+`test.py` now defaults to tiled full-image evaluation/inference-realistic metrics. Legacy crop + GT-box evaluation is still available with `--eval_mode legacy_full_box` or `--legacy_box_eval`.
+
 ```python
-python test.py --volume_path  D:\CrackSAM\dataset\testset\   --is_savenii   --img_size 448     --ckpt D:\CrackSAM\checkpoints\sam_vit_h_4b8939.pth  --vit_name vit_h    --delta_type adapter  --middle_dim 32 --scaling_factor 0.2  --delta_ckpt D:\CrackSAM\checkpoints\CrackSAM_adapter_d32.pth
+python test.py --volume_path /path/to/test --img_size 512 --ckpt /path/to/sam_vit_b.pth --vit_name vit_b --delta_type lora --rank 4 --delta_ckpt /path/to/best_model.pth --eval_mode tile_full_box --tile_size 512 --tile_overlap 256 --pred_threshold auto --val_thresholds 0.35 0.4 0.45 0.5 0.55 0.6 --is_savenii
 ```
+
+<h3>4. Engine / CLI inference:</h3>
+
+`python -m sam_finetune predict` now defaults to tiled full-box inference. If `best_threshold.txt` exists next to the delta checkpoint, `--threshold auto` will use it automatically.

@@ -8,16 +8,13 @@ from segment_anything import sam_model_registry
 from trainer import trainer_generic
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, help='root dir for training data')
-parser.add_argument('--val_path', type=str, help='root dir for validation data')
+NUM_CLASSES = 1
+
+
+parser = argparse.ArgumentParser(description='Train SAM finetune for crack segmentation using the GenericDataset folder layout.')
+parser.add_argument('--root_path', type=str, required=True, help='Training dataset root containing images/ and masks/')
+parser.add_argument('--val_path', type=str, required=True, help='Validation dataset root containing images/ and masks/')
 parser.add_argument('--output', type=str, default='./output/training')
-parser.add_argument('--dataset', type=str,
-                    default='generic', help='experiment_name')
-parser.add_argument('--list_dir', type=str,
-                    default='./lists/lists_khanhha', help='list dir') # Unused for generic
-parser.add_argument('--num_classes', type=int,
-                    default=1, help='output channel of network')
 parser.add_argument('--max_iterations', type=int,
                     default=30000, help='maximum iterations number to train')
 parser.add_argument('--max_epochs', type=int,
@@ -48,7 +45,7 @@ parser.add_argument('--warmup', action='store_true', help='If activated, warp up
 parser.add_argument('--warmup_period', type=int, default=300,
                     help='Warp up iterations, only valid whrn warmup is activated')
 parser.add_argument('--AdamW', action='store_true', default=True, help='If activated, use AdamW to finetune SAM model')
-parser.add_argument('--dice_param', type=float, default=0.7)
+parser.add_argument('--dice_param', type=float, default=None, help='Legacy alias for --dice_weight')
 parser.add_argument('--lr_exp', type=float, default=0.9, help='The learning rate decay expotential')
 parser.add_argument('--tf32', action='store_true', help='If activated, use tf32 to accelerate the training process')
 parser.add_argument('--use_amp', action='store_true', help='If activated, adopt mixed precision for acceleration, but may cause NaN')
@@ -57,14 +54,26 @@ parser.add_argument('--num_workers', type=int, default=8, help='number of datalo
 parser.add_argument('--patches_per_image', type=int, default=1, help='number of random patches to crop per image per epoch')
 parser.add_argument('--train_use_boxes', type=int, default=1, help='Use box prompts during training')
 parser.add_argument('--train_full_image_box', action='store_true', help='Use a full-image box prompt for every training sample')
-parser.add_argument('--train_use_points_prob', type=float, default=0.1, help='Probability of adding GT points during training')
+parser.add_argument('--train_use_points_prob', type=float, default=0.1, help='Legacy mode only: probability of adding GT points during training')
+parser.add_argument('--prompt_policy', type=str, default='hybrid_v1', choices=['hybrid', 'hybrid_v1', 'hybrid_tight_heavy', 'points_heavy', 'legacy'], help='Training prompt policy preset')
 parser.add_argument('--background_crop_prob', type=float, default=0.2, help='Probability of sampling a random background crop even when crack exists')
 parser.add_argument('--near_background_crop_prob', type=float, default=0.15, help='Probability of sampling a crop near but not centered on the crack')
 parser.add_argument('--tversky_alpha', type=float, default=0.3, help='False-positive weight in Tversky loss')
 parser.add_argument('--tversky_beta', type=float, default=0.7, help='False-negative weight in Tversky loss')
-parser.add_argument('--tversky_weight', type=float, default=0.5, help='Blend weight between Dice and Tversky region losses')
+parser.add_argument('--bce_weight', type=float, default=1.0, help='Weight for BCEWithLogits loss')
+parser.add_argument('--dice_weight', type=float, default=0.35, help='Weight for Dice loss')
+parser.add_argument('--tversky_weight', type=float, default=0.35, help='Weight for Tversky loss')
+parser.add_argument('--focal_weight', type=float, default=0.25, help='Weight for binary focal loss')
+parser.add_argument('--focal_alpha', type=float, default=0.25, help='Alpha for binary focal loss')
+parser.add_argument('--focal_gamma', type=float, default=2.0, help='Gamma for binary focal loss')
+parser.add_argument('--pos_weight', type=str, default='auto', help="Positive class weight for BCE or 'auto'")
+parser.add_argument('--pos_weight_min', type=float, default=1.0, help='Minimum auto positive class weight')
+parser.add_argument('--pos_weight_max', type=float, default=20.0, help='Maximum auto positive class weight')
+parser.add_argument('--pos_weight_sample', type=int, default=200, help='Number of masks sampled for auto pos weight')
 parser.add_argument('--val_thresholds', type=float, nargs='+', default=[0.35, 0.4, 0.45, 0.5, 0.55, 0.6], help='Candidate probability thresholds for validation model selection')
 parser.add_argument('--full_image_eval', action='store_true', help='Validate with a full-image box prompt instead of dataset-provided boxes')
+parser.add_argument('--tile_overlap', type=int, default=-1, help='Tile overlap for tiled validation/inference (-1 = img_size // 2)')
+parser.add_argument('--legacy_box_eval', action='store_true', help='Also run legacy crop+GT-box validation diagnostics')
 
 args = parser.parse_args()
 
@@ -83,16 +92,10 @@ if __name__ == "__main__":
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
-    dataset_name = args.dataset
-    dataset_config = {
-        'generic': {
-            'root_path': args.root_path,
-            'list_dir': args.list_dir,
-            'num_classes': args.num_classes,
-        }
-    }
+    if args.dice_param is not None:
+        args.dice_weight = float(args.dice_param)
     args.is_pretrain = True
-    args.exp = dataset_name + '_' + str(args.img_size)
+    args.exp = 'generic_' + str(args.img_size)
     snapshot_path = os.path.join(args.output, "{}".format(args.exp))
     snapshot_path = snapshot_path + '_pretrain' if args.is_pretrain else snapshot_path
     snapshot_path += '_' + args.vit_name
@@ -117,7 +120,7 @@ if __name__ == "__main__":
 
     # register model
     sam, img_embedding_size = sam_model_registry[args.vit_name](image_size=args.img_size,
-                                                                num_classes=args.num_classes,
+                                                                num_classes=NUM_CLASSES,
                                                                 checkpoint=args.ckpt, 
                                                                 pixel_mean=[0.485, 0.456, 0.406],
                                                                 pixel_std=[0.229, 0.224, 0.225])
@@ -135,10 +138,7 @@ if __name__ == "__main__":
     if args.delta_ckpt is not None:
         net.load_delta_parameters(args.delta_ckpt)
 
-    if args.num_classes > 1: 
-        multimask_output = True
-    else:
-        multimask_output = False # For crack segmentation
+    multimask_output = False
 
     low_res = img_embedding_size * 4  # It's better to use high resolution in crack segmentation
 
@@ -146,6 +146,8 @@ if __name__ == "__main__":
     config_items = []
     for key, value in args.__dict__.items():
         config_items.append(f'{key}: {value}\n')
+    config_items.append(f'num_classes: {NUM_CLASSES}\n')
+    config_items.append('dataset_backend: generic\n')
 
     with open(config_file, 'w') as f:
         f.writelines(config_items)
@@ -156,5 +158,4 @@ if __name__ == "__main__":
     total_params_train = sum(p.numel() for p in net.parameters() if p.requires_grad)
     print(f"Total number of trainable parameters:{total_params_train}")
 
-    trainer = {'generic': trainer_generic}
-    trainer[dataset_name](args, net, snapshot_path, multimask_output, low_res)
+    trainer_generic(args, net, snapshot_path, multimask_output, low_res)

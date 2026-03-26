@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import json
 from importlib import import_module
 
 from torch_runtime import get_torch
@@ -56,6 +57,80 @@ def resolve_best_delta_checkpoint(delta_type: str, delta_checkpoint: str) -> str
         raise FileNotFoundError(f"Cannot auto-find delta checkpoint for delta_type={delta_type!r}.")
     candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return candidates[0]
+
+
+def _sidecar_dir(delta_checkpoint: str | None) -> str | None:
+    if not delta_checkpoint:
+        return None
+    directory = os.path.dirname(os.path.abspath(str(delta_checkpoint)))
+    return directory if os.path.isdir(directory) else None
+
+
+def load_inference_config(delta_checkpoint: str | None) -> dict:
+    directory = _sidecar_dir(delta_checkpoint)
+    if directory is None:
+        return {}
+    path = os.path.join(directory, "inference_config.json")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def resolve_predict_threshold(delta_checkpoint: str | None, threshold: str | float | None) -> float:
+    if threshold is not None and str(threshold).strip().lower() != "auto":
+        return float(threshold)
+
+    directory = _sidecar_dir(delta_checkpoint)
+    if directory is not None:
+        best_threshold_path = os.path.join(directory, "best_threshold.txt")
+        if os.path.isfile(best_threshold_path):
+            try:
+                with open(best_threshold_path, "r", encoding="utf-8") as f:
+                    return float(f.read().strip())
+            except Exception:
+                pass
+
+    config = load_inference_config(delta_checkpoint)
+    best_threshold = config.get("best_threshold")
+    if best_threshold is not None:
+        try:
+            return float(best_threshold)
+        except Exception:
+            pass
+    return 0.5
+
+
+def resolve_predict_mode(delta_checkpoint: str | None, predict_mode: str | None) -> str:
+    if predict_mode is not None:
+        normalized = str(predict_mode).strip().lower()
+        if normalized and normalized != "auto":
+            return normalized
+    config = load_inference_config(delta_checkpoint)
+    mode = str(config.get("predict_mode", "tile_full_box")).strip().lower()
+    return mode or "tile_full_box"
+
+
+def resolve_tile_settings(delta_checkpoint: str | None, tile_size: int | None, tile_overlap: int | None) -> tuple[int, int]:
+    config = load_inference_config(delta_checkpoint)
+    size = int(tile_size) if tile_size is not None else -1
+    overlap = int(tile_overlap) if tile_overlap is not None else -1
+    if size <= 0:
+        try:
+            size = int(config.get("img_size", 512))
+        except Exception:
+            size = 512
+    if overlap < 0:
+        try:
+            overlap = int(config.get("tile_overlap", size // 2))
+        except Exception:
+            overlap = size // 2
+    overlap = max(0, min(overlap, max(0, size - 1)))
+    return int(size), int(overlap)
 
 
 def apply_delta_to_sam(

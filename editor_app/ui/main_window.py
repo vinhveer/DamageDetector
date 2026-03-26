@@ -56,7 +56,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._export_service = ExportService()
         self._settings_service = SettingsService()
         self._workspace_controller = WorkspaceController(self._workspace_store, self._history_store, self._file_service)
-        self._editor_controller = EditorController(self._workspace_store, self._workspace_controller)
+        self._editor_controller = EditorController(self._workspace_store, self._workspace_controller, self._run_storage)
         self._history_controller = HistoryController(self._workspace_store, self._history_store, self._run_storage)
         self._compare_controller = CompareController(self._compare_store, self._history_store, self._compare_service)
         self._isolate_controller = IsolateController(
@@ -177,6 +177,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._top_bar.predictRoiRequested.connect(lambda: self._prediction_actions.run_predict_dialog_roi(self._editor_workspace.start_prediction_roi_selection))
         self._top_bar.isolateRequested.connect(self._prediction_actions.run_isolate)
         self._left_rail.openFolderRequested.connect(self._workspace_actions.open_folder)
+        self._left_rail.addFolderImagesRequested.connect(self._workspace_actions.add_folder_images)
         self._left_rail.openImageRequested.connect(self._workspace_actions.open_image_dialog)
         self._left_rail.openMaskRequested.connect(self._workspace_actions.open_mask)
         self._left_rail.saveMaskRequested.connect(self._workspace_actions.save_mask)
@@ -322,6 +323,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _load_run_item_into_editor(self, payload: dict) -> None:
         image_path = self._prediction_actions.load_run_item_into_editor(payload)
         if image_path:
+            self._left_rail.explorer().set_images(list(self._workspace_store.images))
             self._left_rail.explorer().select_path(image_path)
 
     def _on_history_run_selected(self, run_dir: str) -> None:
@@ -348,6 +350,11 @@ class MainWindow(QtWidgets.QMainWindow):
         act_open_folder.setShortcut(QtGui.QKeySequence("Ctrl+Shift+O"))
         act_open_folder.triggered.connect(self._workspace_actions.open_folder)
         self.addAction(act_open_folder)
+
+        act_add_folder_images = QtGui.QAction("Add Folder Images...", self)
+        act_add_folder_images.setShortcut(QtGui.QKeySequence("Ctrl+Shift+I"))
+        act_add_folder_images.triggered.connect(self._workspace_actions.add_folder_images)
+        self.addAction(act_add_folder_images)
 
         act_open_mask = QtGui.QAction("Open Mask...", self)
         act_open_mask.setShortcut(QtGui.QKeySequence("Ctrl+M"))
@@ -413,6 +420,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(act_open_folder)
+        file_menu.addAction(act_add_folder_images)
         file_menu.addAction(act_open_image)
         file_menu.addAction(act_open_mask)
         file_menu.addSeparator()

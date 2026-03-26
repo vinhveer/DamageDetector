@@ -10,6 +10,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 
 class ExplorerPanel(QtWidgets.QWidget):
+    addFolderImagesRequested = QtCore.Signal()
     imageClicked = QtCore.Signal(str)
     imageActivated = QtCore.Signal(str)
 
@@ -103,17 +104,29 @@ class ExplorerPanel(QtWidgets.QWidget):
 
     def _show_context_menu(self, point: QtCore.QPoint) -> None:
         item = self._list.itemAt(point)
-        if item is None:
-            return
-        path = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "")
-        if not path or not os.path.exists(path):
-            return
 
         menu = QtWidgets.QMenu(self)
+        act_add_folder = menu.addAction("Add Folder Images...")
+        menu.addSeparator()
+        if item is None:
+            chosen = menu.exec(self._list.mapToGlobal(point))
+            if chosen == act_add_folder:
+                self.addFolderImagesRequested.emit()
+            return
+
+        path = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "")
+        if not path or not os.path.exists(path):
+            chosen = menu.exec(self._list.mapToGlobal(point))
+            if chosen == act_add_folder:
+                self.addFolderImagesRequested.emit()
+            return
+
         act_copy = menu.addAction("Copy Path")
         act_reveal = menu.addAction("Reveal")
         chosen = menu.exec(self._list.mapToGlobal(point))
-        if chosen == act_copy:
+        if chosen == act_add_folder:
+            self.addFolderImagesRequested.emit()
+        elif chosen == act_copy:
             QtWidgets.QApplication.clipboard().setText(path)
         elif chosen == act_reveal:
             self._reveal(path)

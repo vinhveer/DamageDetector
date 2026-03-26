@@ -20,6 +20,10 @@ def _common_params(args: argparse.Namespace) -> dict:
         "sam_dilate_iters": int(args.dilate),
         "device": args.device,
         "output_dir": args.output_dir,
+        "predict_mode": args.predict_mode,
+        "tile_size": int(args.tile_size),
+        "tile_overlap": int(args.tile_overlap),
+        "threshold": args.threshold,
     }
     roi = parse_roi(args.roi)
     if roi is not None:
@@ -45,6 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--dilate", type=int, default=0)
         subparser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
         subparser.add_argument("--output-dir", default="results_sam_finetune")
+        subparser.add_argument("--predict-mode", default="auto", choices=["auto", "tile_full_box", "legacy_full_box"])
+        subparser.add_argument("--tile-size", type=int, default=-1, help="Tile size for tile_full_box mode (-1 = use checkpoint metadata or 512).")
+        subparser.add_argument("--tile-overlap", type=int, default=-1, help="Tile overlap for tile_full_box mode (-1 = use checkpoint metadata or tile_size // 2).")
+        subparser.add_argument("--threshold", default="auto", help="Mask threshold as float or 'auto' to use best_threshold.txt.")
         subparser.add_argument("--roi", nargs=4, type=int, metavar=("X1", "Y1", "X2", "Y2"))
 
     warmup = sub.add_parser("warmup", help="Warm up the SAM finetune engine.")

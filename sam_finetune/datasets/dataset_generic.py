@@ -21,12 +21,76 @@ def random_rotate(image, label):
     # Deprecated: Handled by Albumentations
     pass
 
+
+def find_mask_path(mask_dir: str, base_name: str) -> str | None:
+    for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
+        candidate = os.path.join(mask_dir, base_name + ext)
+        if os.path.exists(candidate):
+            return candidate
+        candidate_mask = os.path.join(mask_dir, base_name + "_mask" + ext)
+        if os.path.exists(candidate_mask):
+            return candidate_mask
+    return None
+
+
+def list_image_files(image_dir: str, img_exts=None) -> list[str]:
+    if img_exts is None:
+        img_exts = [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]
+    names = []
+    for f in os.listdir(image_dir):
+        if os.path.splitext(f)[1].lower() in img_exts:
+            names.append(f)
+    names.sort()
+    return names
+
+
+def load_image_mask_arrays(base_dir: str, image_name: str) -> tuple[np.ndarray, np.ndarray]:
+    img_dir = os.path.join(base_dir, "images")
+    mask_dir = os.path.join(base_dir, "masks")
+    image_path = os.path.join(img_dir, image_name)
+    base_name = os.path.splitext(image_name)[0]
+    mask_path = find_mask_path(mask_dir, base_name)
+    if mask_path is None:
+        raise FileNotFoundError(f"No corresponding mask found for image {image_name} in {mask_dir}")
+    image = np.array(Image.open(image_path).convert("RGB"), dtype=np.uint8)
+    mask = (np.array(Image.open(mask_path).convert("L"), dtype=np.uint8) > 0).astype(np.uint8)
+    return image, mask
+
+
+def _select_point(coords: np.ndarray, *, split: str) -> np.ndarray:
+    if len(coords) == 0:
+        return np.array([0.0, 0.0], dtype=np.float32)
+    if split == "train":
+        point = coords[np.random.randint(len(coords))]
+    else:
+        point = coords[len(coords) // 2]
+    return point[::-1].astype(np.float32)
+
+
+def _sample_negative_point(mask_np: np.ndarray, *, split: str) -> np.ndarray:
+    ring_coords = np.empty((0, 2), dtype=np.int32)
+    if int(mask_np.sum()) > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        dilated = cv2.dilate(mask_np.astype(np.uint8), kernel, iterations=1)
+        ring = np.logical_and(dilated > 0, mask_np == 0)
+        ring_coords = np.argwhere(ring)
+    if len(ring_coords) > 0:
+        return _select_point(ring_coords, split=split)
+
+    bg_coords = np.argwhere(mask_np == 0)
+    if len(bg_coords) > 0:
+        return _select_point(bg_coords, split=split)
+
+    h_img, w_img = mask_np.shape
+    return np.array([float(w_img // 2), float(h_img // 2)], dtype=np.float32)
+
 class RandomGenerator(object):
     def __init__(self, output_size, low_res, background_crop_prob: float = 0.2, near_background_crop_prob: float = 0.15):
         self.output_size = output_size
         self.low_res = low_res
         self.background_crop_prob = float(background_crop_prob)
         self.near_background_crop_prob = float(near_background_crop_prob)
+        self.hard_negative_crop_prob = 0.15
         
         # Stronger but still crack-safe augmentations for field images.
         self.transform = A.Compose([
@@ -78,6 +142,31 @@ class RandomGenerator(object):
             A.CoarseDropout(p=0.2),
         ], is_check_shapes=False)
 
+    def _random_crop_coords(self, h: int, w: int, th: int, tw: int) -> tuple[int, int]:
+        y1 = random.randint(0, max(0, h - th))
+        x1 = random.randint(0, max(0, w - tw))
+        return y1, x1
+
+    def _hard_negative_crop_coords(self, image: np.ndarray, label: np.ndarray, h: int, w: int, th: int, tw: int) -> tuple[int, int]:
+        gray = cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_RGB2GRAY) if image.ndim == 3 and image.shape[2] == 3 else image.astype(np.uint8)
+        sobel_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        edge_map = cv2.magnitude(sobel_x, sobel_y)
+
+        best_score = -1.0
+        best_coords = self._random_crop_coords(h, w, th, tw)
+        for _ in range(32):
+            y1, x1 = self._random_crop_coords(h, w, th, tw)
+            label_crop = label[y1:y1 + th, x1:x1 + tw]
+            if int((label_crop > 0).sum()) > 0:
+                continue
+            edge_crop = edge_map[y1:y1 + th, x1:x1 + tw]
+            score = float(edge_crop.mean())
+            if score > best_score:
+                best_score = score
+                best_coords = (y1, x1)
+        return best_coords
+
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
         
@@ -127,13 +216,14 @@ class RandomGenerator(object):
         if len(y_inds) > 0:
             crop_mode = random.random()
             if crop_mode < self.background_crop_prob:
-                y1 = random.randint(0, max(0, h - th))
-                x1 = random.randint(0, max(0, w - tw))
+                y1, x1 = self._random_crop_coords(h, w, th, tw)
+            elif crop_mode < self.background_crop_prob + self.hard_negative_crop_prob:
+                y1, x1 = self._hard_negative_crop_coords(image, label, h, w, th, tw)
             else:
                 idx = random.randint(0, len(y_inds) - 1)
                 cy, cx = y_inds[idx], x_inds[idx]
 
-                if crop_mode < self.background_crop_prob + self.near_background_crop_prob:
+                if crop_mode < self.background_crop_prob + self.hard_negative_crop_prob + self.near_background_crop_prob:
                     offset_y = random.randint(-int(th * 0.9), int(th * 0.9))
                     offset_x = random.randint(-int(tw * 0.9), int(tw * 0.9))
                 else:
@@ -150,9 +240,10 @@ class RandomGenerator(object):
                 y1 = int(max(0, y1))
                 x1 = int(max(0, x1))
         else:
-            # Fallback for images without cracks (rare): Random Crop
-            y1 = random.randint(0, max(0, h - th))
-            x1 = random.randint(0, max(0, w - tw))
+            if random.random() < self.hard_negative_crop_prob:
+                y1, x1 = self._hard_negative_crop_coords(image, label, h, w, th, tw)
+            else:
+                y1, x1 = self._random_crop_coords(h, w, th, tw)
 
         # Perform the Crop
         image = image[y1:y1+th, x1:x1+tw, :]
@@ -328,12 +419,7 @@ class GenericDataset(Dataset):
         if img_exts is None:
             img_exts = [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]
 
-        self.sample_list = []
-        for f in os.listdir(self.img_dir):
-            if os.path.splitext(f)[1].lower() in img_exts:
-                self.sample_list.append(f)
-        
-        self.sample_list.sort() # Ensure deterministic order
+        self.sample_list = list_image_files(self.img_dir, img_exts=img_exts)
         print(f"GenericDataset ({split}): Found {len(self.sample_list)} images in {self.img_dir}")
 
         self.cached_images = {}
@@ -349,13 +435,7 @@ class GenericDataset(Dataset):
                 filepath_image = os.path.join(self.img_dir, img_name)
                 base_name = os.path.splitext(img_name)[0]
                 
-                # Find mask path
-                mask_path = None
-                for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
-                    candidate = os.path.join(self.mask_dir, base_name + ext)
-                    if os.path.exists(candidate):
-                        mask_path = candidate
-                        break
+                mask_path = find_mask_path(self.mask_dir, base_name)
                 
                 if mask_path:
                     # Load and convert immediately to save space/time later
@@ -396,23 +476,8 @@ class GenericDataset(Dataset):
         else:
             # Fallback to disk load (or if cache disabled)
             filepath_image = os.path.join(self.img_dir, img_name)
-            mask_name = None
-            for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
-                # Try exact name match
-                candidate = os.path.join(self.mask_dir, base_name + ext)
-                if os.path.exists(candidate):
-                    mask_name = base_name + ext
-                    filepath_label = candidate
-                    break
-                
-                # Try generic _mask suffix (common in crack datasets)
-                candidate_mask = os.path.join(self.mask_dir, base_name + "_mask" + ext)
-                if os.path.exists(candidate_mask):
-                    mask_name = base_name + "_mask" + ext
-                    filepath_label = candidate_mask
-                    break
-            
-            if mask_name is None:
+            filepath_label = find_mask_path(self.mask_dir, base_name)
+            if filepath_label is None:
                  raise FileNotFoundError(f"No corresponding mask found for image {img_name} in {self.mask_dir}")
     
             image = Image.open(filepath_image).convert("RGB")
@@ -496,24 +561,15 @@ class GenericDataset(Dataset):
         else:
             mask_np = label.astype(np.uint8)
 
-        # Find bounding box
+        # Build prompt candidates from the transformed mask.
         coords = np.argwhere(mask_np > 0)
         h, w = mask_np.shape
-        if self.use_full_image_box:
-            box = np.array([0, 0, w, h], dtype=np.float32)
-            if len(coords) > 0:
-                pos_indices = np.argwhere(mask_np > 0)
-                if self.split == 'train':
-                    pos_pt = pos_indices[np.random.randint(len(pos_indices))]
-                else:
-                    pos_pt = pos_indices[len(pos_indices) // 2]
-                pos_pt = pos_pt[::-1]
-            else:
-                pos_pt = np.array([w // 2, h // 2])
-        elif len(coords) > 0:
+        has_foreground = len(coords) > 0
+        full_box = np.array([0, 0, w, h], dtype=np.float32)
+
+        if has_foreground:
             y_min, x_min = coords.min(axis=0)
             y_max, x_max = coords.max(axis=0)
-            # Add some jitter/padding safely
             if self.split == 'train':
                 pad_x1 = np.random.randint(0, 10)
                 pad_y1 = np.random.randint(0, 10)
@@ -530,45 +586,30 @@ class GenericDataset(Dataset):
             y_min = max(0, y_min - pad_y1)
             x_max = min(w, x_max + pad_x2)
             y_max = min(h, y_max + pad_y2)
-            box = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
-
-            # Point prompt: 1 positive (center of random crack part) + 1 random negative
-            # Positive point
-            pos_indices = np.argwhere(mask_np > 0)
-            if self.split == 'train':
-                pos_pt = pos_indices[np.random.randint(len(pos_indices))] # [y, x]
-            else:
-                # Deterministic point (Median/Center)
-                # Sort indices to ensure deterministic order then pick middle
-                # argwhere returns sorted order usually logic wise (row major), but safe to just pick middle
-                pos_pt = pos_indices[len(pos_indices) // 2]
-            pos_pt = pos_pt[::-1] # [x, y]
-
+            tight_box = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
+            pos_pt = _select_point(coords, split=self.split)
         else:
-            # Empty mask: Box is full image, no pos point
-            h, w = mask_np.shape
-            box = np.array([0, 0, w, h], dtype=np.float32)
-            pos_pt = np.array([w//2, h//2]) # Dummy center
+            tight_box = full_box.copy()
+            pos_pt = np.array([float(w // 2), float(h // 2)], dtype=np.float32)
 
-        # Negative point (background)
-        neg_indices = np.argwhere(mask_np == 0)
-        if len(neg_indices) > 0:
-            if self.split == 'train':
-                neg_pt = neg_indices[np.random.randint(len(neg_indices))]
-            else:
-                # Deterministic negative point
-                neg_pt = neg_indices[len(neg_indices) // 2]
-            neg_pt = neg_pt[::-1] # [x, y]
+        neg_pt = _sample_negative_point(mask_np, split=self.split)
+        box = full_box if self.use_full_image_box or not has_foreground else tight_box
+        if has_foreground:
+            point_coords = np.array([pos_pt, neg_pt], dtype=np.float32)
+            point_labels = np.array([1, 0], dtype=np.float32)
         else:
-            neg_pt = np.array([0, 0])
-
-        point_coords = np.array([pos_pt, neg_pt], dtype=np.float32)
-        point_labels = np.array([1, 0], dtype=np.float32) # 1=pos, 0=neg
+            point_coords = np.array([neg_pt, neg_pt], dtype=np.float32)
+            point_labels = np.array([0, 0], dtype=np.float32)
 
         sample = {
             'image': image, 
             'label': label, 
             'box': torch.from_numpy(box),
+            'full_box': torch.from_numpy(full_box),
+            'tight_box': torch.from_numpy(tight_box),
+            'pos_point': torch.from_numpy(pos_pt),
+            'neg_point': torch.from_numpy(neg_pt),
+            'has_foreground': torch.tensor(bool(has_foreground)),
             'point_coords': torch.from_numpy(point_coords),
             'point_labels': torch.from_numpy(point_labels),
             'case_name': base_name

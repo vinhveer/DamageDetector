@@ -25,11 +25,14 @@ class WorkspaceStore(QtCore.QObject):
         self.current_mask = QtGui.QImage()
         self.current_detections: list[dict] = []
         self.highlight_detections: list[dict] = []
+        self._result_items_by_image: dict[str, dict] = {}
         self._rois_by_image: dict[str, list[tuple[int, int, int, int]]] = {}
         self.current_rois: list[tuple[int, int, int, int]] = []
         self.current_roi_index: int = -1
 
     def set_workspace(self, workspace_root: Path | None, results_root: Path | None, images: list[str]) -> None:
+        if workspace_root != self.workspace_root or results_root != self.results_root:
+            self._result_items_by_image = {}
         self.workspace_root = workspace_root
         self.results_root = results_root
         self.images = list(images)
@@ -62,6 +65,22 @@ class WorkspaceStore(QtCore.QObject):
     def set_highlight_detections(self, detections: list[dict]) -> None:
         self.highlight_detections = [dict(det) for det in detections]
         self.highlightChanged.emit()
+
+    def set_result_items(self, items: list[dict]) -> None:
+        mapped: dict[str, dict] = {}
+        for item in items:
+            image_path = str(item.get("image_path") or "").strip()
+            if not image_path:
+                continue
+            mapped[image_path] = dict(item)
+        self._result_items_by_image = mapped
+
+    def result_item_for(self, image_path: str | None) -> dict | None:
+        key = str(image_path or "").strip()
+        if not key:
+            return None
+        item = self._result_items_by_image.get(key)
+        return dict(item) if item is not None else None
 
     def current_roi_box(self) -> tuple[int, int, int, int] | None:
         if self.current_roi_index < 0 or self.current_roi_index >= len(self.current_rois):

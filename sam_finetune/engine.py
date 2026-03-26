@@ -27,6 +27,10 @@ class SamFinetuneParams:
     overlay_alpha: float = 0.45
     device: str = "auto"
     output_dir: str = "results_sam_finetune"
+    predict_mode: str = "auto"
+    tile_size: int = -1
+    tile_overlap: int = -1
+    threshold: str = "auto"
     roi_box: tuple[int, int, int, int] | None = None
     task_group: str = "crack_only"
     more_damage_max_masks: int = 8
@@ -50,6 +54,7 @@ class SamFinetuneRunner:
         self._sam_checkpoint: str | None = None
         self._sam_model_type: str | None = None
         self._delta_sig: tuple | None = None
+        self._resolved_delta_checkpoint: str | None = None
         self._predictor: Any | None = None
 
     def _ensure_import_paths(self) -> None:
@@ -70,12 +75,10 @@ class SamFinetuneRunner:
         if fallback is not None and log_fn is not None:
             log_fn(fallback)
         delta_type = str(params.delta_type or "").strip().lower()
-        if delta_type != "lora":
-            raise ValueError("SAM Finetune supports LoRA only.")
         delta_path = resolve_best_delta_checkpoint(delta_type, str(params.delta_checkpoint or "auto"))
         inferred = infer_delta_type_from_path(delta_path)
         if inferred is not None and inferred != delta_type:
-            raise ValueError(f"LoRA checkpoint mismatch: checkpoint looks like {inferred}, expected lora.")
+            raise ValueError(f"Delta checkpoint mismatch: checkpoint looks like {inferred}, expected {delta_type}.")
         delta_sig = (
             delta_type,
             delta_path,
@@ -110,10 +113,21 @@ class SamFinetuneRunner:
         self._sam_checkpoint = params.sam_checkpoint
         self._sam_model_type = used_model_type
         self._delta_sig = delta_sig
+        self._resolved_delta_checkpoint = str(delta_path)
         self._device = device
         if log_fn is not None:
             log_fn(f"SAM finetune ready (type={used_model_type}, device={device}).")
         return self._predictor, device
+
+    def _predict_score_map_tiled(self, predictor, rgb_image, *, tile_size: int, tile_overlap: int):
+        from sam_finetune.tiled_inference import predictor_tile_mask_score, tiled_score_map
+
+        return tiled_score_map(
+            rgb_image,
+            tile_size=tile_size,
+            tile_overlap=tile_overlap,
+            predict_tile_mask_score=lambda tile: predictor_tile_mask_score(predictor, tile),
+        )
 
     def _run_with_roi(self, func_name: str, image_path: str, params: SamFinetuneParams, **kwargs) -> dict:
         import cv2
@@ -149,6 +163,10 @@ class SamFinetuneRunner:
                 overlay_alpha=params.overlay_alpha,
                 device=params.device,
                 output_dir=params.output_dir,
+                predict_mode=params.predict_mode,
+                tile_size=params.tile_size,
+                tile_overlap=params.tile_overlap,
+                threshold=params.threshold,
                 roi_box=None,
                 task_group=params.task_group,
                 more_damage_max_masks=params.more_damage_max_masks,
@@ -193,6 +211,11 @@ class SamFinetuneRunner:
         import numpy as np
 
         from sam.runtime import ensure_dir, filter_small_components, overlay_mask, safe_basename
+        from sam_finetune.runtime import (
+            resolve_predict_mode,
+            resolve_predict_threshold,
+            resolve_tile_settings,
+        )
 
         if params.roi_box is not None:
             return self._run_with_roi("predict", image_path, params, stop_checker=stop_checker, log_fn=log_fn)
@@ -201,10 +224,14 @@ class SamFinetuneRunner:
         if not os.path.isfile(params.sam_checkpoint):
             raise FileNotFoundError(f"SAM checkpoint not found: {params.sam_checkpoint}")
         predictor, _device = self.ensure_model_loaded(params, log_fn=log_fn)
+        delta_path = self._resolved_delta_checkpoint
+        predict_mode = resolve_predict_mode(delta_path, params.predict_mode)
+        threshold = resolve_predict_threshold(delta_path, params.threshold)
+        tile_size, tile_overlap = resolve_tile_settings(delta_path, params.tile_size, params.tile_overlap)
         bgr = cv2.imread(image_path)
         if bgr is None:
             raise FileNotFoundError(f"Cannot read image: {image_path}")
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.uint8)
         h_img, w_img = bgr.shape[:2]
         ensure_dir(params.output_dir)
         base = safe_basename(image_path)
@@ -212,15 +239,36 @@ class SamFinetuneRunner:
         mask_path = os.path.join(params.output_dir, f"{base}_crack_mask.png")
         if stop_checker is not None and stop_checker():
             return {"stopped": True}
-        predictor.set_image(rgb)
-        full_box = np.array([[0.0, 0.0, float(w_img - 1), float(h_img - 1)]], dtype=np.float32)
-        masks, scores, _ = predictor.predict(box=full_box, multimask_output=True)
-        if masks is None or len(masks) == 0:
-            cv2.imwrite(overlay_path, bgr)
-            cv2.imwrite(mask_path, np.zeros((h_img, w_img), dtype=np.uint8))
-            return {"image_path": str(image_path), "overlay_path": overlay_path, "mask_path": mask_path, "output_dir": params.output_dir, "detections": []}
-        idx = int(np.argmax(scores))
-        chosen = masks[idx].astype(np.uint8)
+        if log_fn is not None:
+            if predict_mode == "tile_full_box":
+                log_fn(
+                    f"SAM finetune tiled predict: tile_size={tile_size} tile_overlap={tile_overlap} threshold={threshold:.4f}"
+                )
+            else:
+                log_fn(f"SAM finetune legacy predict: threshold={threshold:.4f}")
+
+        if predict_mode == "legacy_full_box":
+            predictor.set_image(rgb)
+            full_box = np.array([[0.0, 0.0, float(w_img - 1), float(h_img - 1)]], dtype=np.float32)
+            masks, scores, _ = predictor.predict(box=full_box, multimask_output=True)
+            if masks is None or len(masks) == 0:
+                chosen = np.zeros((h_img, w_img), dtype=np.uint8)
+                score = 0.0
+            else:
+                idx = int(np.argmax(scores))
+                prob_map = masks[idx].astype(np.float32)
+                chosen = (prob_map >= float(threshold)).astype(np.uint8)
+                score = float(scores[idx])
+        else:
+            score_map = self._predict_score_map_tiled(
+                predictor,
+                rgb,
+                tile_size=int(tile_size),
+                tile_overlap=int(tile_overlap),
+            )
+            chosen = (score_map >= float(threshold)).astype(np.uint8)
+            score = float(score_map[chosen > 0].mean()) if int(np.count_nonzero(chosen)) > 0 else float(score_map.max())
+
         if params.invert_mask:
             chosen = (1 - chosen).astype(np.uint8)
         chosen = filter_small_components(chosen, int(params.sam_min_component_area))
@@ -238,7 +286,7 @@ class SamFinetuneRunner:
         detections = [
             {
                 "label": "Mask",
-                "score": float(scores[idx]),
+                "score": float(score),
                 "box": [0.0, 0.0, float(w_img - 1), float(h_img - 1)],
                 "mask_b64": mask_b64,
                 "model_name": "SamFinetune",

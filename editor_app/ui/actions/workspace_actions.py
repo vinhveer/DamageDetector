@@ -58,6 +58,28 @@ class WorkspaceActions(QtCore.QObject):
         self._persist_state()
         self._show_status(f"Loaded workspace: {folder}", 5000)
 
+    def add_folder_images(self) -> None:
+        if self._workspace_store.workspace_root is None:
+            self._show_error("Open a workspace folder before importing images.")
+            return
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self._parent, "Add Folder Images To Workspace")
+        if not folder:
+            return
+        try:
+            copied = self._workspace_controller.import_folder(folder)
+        except Exception as exc:
+            self._show_error(str(exc))
+            return
+        images = list(self._workspace_store.images)
+        self._left_rail.explorer().set_images(images)
+        self._history_controller.refresh()
+        self._isolate_controller.refresh()
+        self._persist_state()
+        if copied:
+            self._show_status(f"Imported {len(copied)} image(s) into workspace.", 5000)
+            return
+        self._show_status("No supported images found in the selected folder.", 5000)
+
     def open_image_dialog(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self._parent,

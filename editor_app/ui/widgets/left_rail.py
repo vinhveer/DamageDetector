@@ -8,6 +8,7 @@ from editor_app.ui.components.explorer_panel import ExplorerPanel
 
 class LeftRail(QtWidgets.QWidget):
     openFolderRequested = QtCore.Signal()
+    addFolderImagesRequested = QtCore.Signal()
     openImageRequested = QtCore.Signal()
     openMaskRequested = QtCore.Signal()
     saveMaskRequested = QtCore.Signal()
@@ -30,6 +31,7 @@ class LeftRail(QtWidgets.QWidget):
         explorer_layout.setContentsMargins(0, 0, 0, 0)
         explorer_layout.setSpacing(6)
         self._explorer = ExplorerPanel(explorer_host)
+        self._explorer.addFolderImagesRequested.connect(self.addFolderImagesRequested.emit)
         explorer_layout.addWidget(self._explorer, 1)
 
         jobs_host = QtWidgets.QWidget(self._tabs)
