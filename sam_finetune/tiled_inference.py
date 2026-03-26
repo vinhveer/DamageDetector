@@ -7,6 +7,7 @@ import numpy as np
 
 
 TileMaskScoreFn = Callable[[np.ndarray], tuple[np.ndarray, float]]
+TileProbFn = Callable[[np.ndarray], np.ndarray]
 
 
 def resolve_tile_size(tile_size: int | None, fallback: int = 512) -> int:
@@ -39,12 +40,17 @@ def _tile_positions(length: int, tile_size: int, stride: int) -> list[int]:
 
 def make_center_weight(tile_size: int, edge_floor: float = 0.05) -> np.ndarray:
     tile_size = resolve_tile_size(tile_size)
-    win = np.hanning(tile_size).astype(np.float32)
-    if tile_size == 1:
-        win = np.ones((1,), dtype=np.float32)
-    window = np.outer(win, win).astype(np.float32)
+    return make_center_weight_2d(tile_size, tile_size, edge_floor=edge_floor)
+
+
+def make_center_weight_2d(height: int, width: int, edge_floor: float = 0.05) -> np.ndarray:
+    height = max(1, int(height))
+    width = max(1, int(width))
+    win_h = np.hanning(height).astype(np.float32) if height > 1 else np.ones((1,), dtype=np.float32)
+    win_w = np.hanning(width).astype(np.float32) if width > 1 else np.ones((1,), dtype=np.float32)
+    window = np.outer(win_h, win_w).astype(np.float32)
     if float(window.max()) <= 0.0:
-        window = np.ones((tile_size, tile_size), dtype=np.float32)
+        window = np.ones((height, width), dtype=np.float32)
     else:
         window /= float(window.max())
     window = np.maximum(window, float(edge_floor))
@@ -111,6 +117,109 @@ def tiled_score_map(
             local_weight = center_weight[:valid_h, :valid_w] * score_weight
             local_value = mask_tile[:valid_h, :valid_w] * local_weight
             value_sum[y:y2, x:x2] += local_value
+            weight_sum[y:y2, x:x2] += local_weight
+
+    weight_sum = np.clip(weight_sum, 1e-6, None)
+    return value_sum / weight_sum
+
+
+def _select_binary_logits(outputs) -> "torch.Tensor":
+    masks = outputs["masks"]
+    if masks.shape[1] == 1:
+        return masks[:, :1]
+    scores = outputs.get("iou_predictions")
+    if scores is None:
+        return masks[:, :1]
+    from torch_runtime import torch
+
+    best_idx = torch.argmax(scores, dim=1)
+    return masks[torch.arange(masks.shape[0], device=masks.device), best_idx].unsqueeze(1)
+
+
+def model_tile_prob_map(
+    model,
+    tile_hwc: np.ndarray,
+    *,
+    image_size: int,
+    multimask_output: bool,
+    use_amp: bool = False,
+) -> np.ndarray:
+    from torch_runtime import torch
+
+    tile = np.asarray(tile_hwc)
+    if tile.ndim != 3 or tile.shape[2] != 3:
+        raise ValueError(f"Expected tile shape (H, W, 3), got {tuple(tile.shape)}")
+
+    if tile.dtype != np.float32:
+        if tile.max() <= 1.0:
+            tile = tile.astype(np.float32)
+        else:
+            tile = tile.astype(np.float32) / 255.0
+    tile = np.clip(tile, 0.0, 1.0)
+
+    h_img, w_img = tile.shape[:2]
+    inputs = torch.from_numpy(np.transpose(tile, (2, 0, 1))).unsqueeze(0).float()
+    try:
+        device = next(model.parameters()).device
+    except StopIteration as exc:
+        raise ValueError("Model has no parameters to infer device from.") from exc
+    inputs = inputs.to(device=device)
+    boxes = torch.tensor([[0.0, 0.0, float(w_img), float(h_img)]], dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=bool(use_amp) and device.type == "cuda"):
+            outputs = model(inputs, multimask_output, image_size, boxes=boxes, points=None)
+            logits = _select_binary_logits(outputs)
+            prob_map = torch.sigmoid(logits)[0, 0, :h_img, :w_img]
+    return prob_map.detach().float().cpu().numpy()
+
+
+def tiled_model_score_map(
+    image_hwc: np.ndarray,
+    tile_size: int,
+    tile_overlap: int,
+    *,
+    model,
+    image_size: int,
+    multimask_output: bool,
+    use_amp: bool = False,
+) -> np.ndarray:
+    image = np.asarray(image_hwc)
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"Expected image shape (H, W, 3), got {tuple(image.shape)}")
+
+    tile_size = resolve_tile_size(tile_size)
+    tile_overlap = resolve_tile_overlap(tile_size, tile_overlap)
+    stride = max(1, tile_size - tile_overlap)
+    h_img, w_img = image.shape[:2]
+    value_sum = np.zeros((h_img, w_img), dtype=np.float32)
+    weight_sum = np.zeros((h_img, w_img), dtype=np.float32)
+
+    y_positions = _tile_positions(h_img, tile_size, stride)
+    x_positions = _tile_positions(w_img, tile_size, stride)
+
+    for y in y_positions:
+        for x in x_positions:
+            y2 = min(h_img, y + tile_size)
+            x2 = min(w_img, x + tile_size)
+            tile = image[y:y2, x:x2]
+            prob_tile = np.asarray(
+                model_tile_prob_map(
+                    model,
+                    tile,
+                    image_size=image_size,
+                    multimask_output=multimask_output,
+                    use_amp=use_amp,
+                ),
+                dtype=np.float32,
+            )
+            expected_shape = (y2 - y, x2 - x)
+            if prob_tile.shape != expected_shape:
+                raise ValueError(
+                    f"Model tile predictor must return shape {expected_shape}, got {tuple(prob_tile.shape)}"
+                )
+            local_weight = make_center_weight_2d(expected_shape[0], expected_shape[1])
+            value_sum[y:y2, x:x2] += prob_tile * local_weight
             weight_sum[y:y2, x:x2] += local_weight
 
     weight_sum = np.clip(weight_sum, 1e-6, None)

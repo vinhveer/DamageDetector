@@ -14,20 +14,18 @@ try:
     from tiled_inference import (
         best_threshold_result,
         continuity_metrics,
-        predictor_tile_mask_score,
         resolve_tile_overlap,
         threshold_sweep,
-        tiled_score_map,
+        tiled_model_score_map,
     )
     from utils import BinaryDiceLoss, BinaryFocalWithLogitsLoss, BinaryTverskyLoss, test_single_volume
 except ImportError:
     from .tiled_inference import (
         best_threshold_result,
         continuity_metrics,
-        predictor_tile_mask_score,
         resolve_tile_overlap,
         threshold_sweep,
-        tiled_score_map,
+        tiled_model_score_map,
     )
     from .utils import BinaryDiceLoss, BinaryFocalWithLogitsLoss, BinaryTverskyLoss, test_single_volume
 
@@ -238,15 +236,18 @@ def _select_logits(outputs):
     return masks[torch.arange(masks.shape[0], device=masks.device), best_idx].unsqueeze(1)
 
 
-def _unwrap_sam_model(model):
-    wrapped = model.module if isinstance(model, nn.DataParallel) else model
-    sam = getattr(wrapped, "sam", None)
-    if sam is None:
-        raise AttributeError("Expected wrapped SAM model to expose .sam for predictor-based validation.")
-    return sam
-
-
-def _run_tiled_full_image_eval(val_root, case_names, predictor, *, tile_size: int, tile_overlap: int, thresholds: list[float]):
+def _run_tiled_full_image_eval(
+    val_root,
+    case_names,
+    model,
+    *,
+    tile_size: int,
+    tile_overlap: int,
+    thresholds: list[float],
+    image_size: int,
+    multimask_output: bool,
+    use_amp: bool,
+):
     try:
         from datasets.dataset_generic import load_image_mask_arrays
     except ImportError:
@@ -257,11 +258,14 @@ def _run_tiled_full_image_eval(val_root, case_names, predictor, *, tile_size: in
 
     for i_batch, case_name in enumerate(tqdm(case_names)):
         image_hwc, label = load_image_mask_arrays(val_root, case_name)
-        score_map = tiled_score_map(
+        score_map = tiled_model_score_map(
             image_hwc,
             tile_size=tile_size,
             tile_overlap=tile_overlap,
-            predict_tile_mask_score=lambda tile: predictor_tile_mask_score(predictor, tile),
+            model=model,
+            image_size=image_size,
+            multimask_output=multimask_output,
+            use_amp=use_amp,
         )
         sweep = threshold_sweep(score_map, label, thresholds)
         total_cases += 1
@@ -279,7 +283,18 @@ def _run_tiled_full_image_eval(val_root, case_names, predictor, *, tile_size: in
     return selected_thr, metric, metric_by_thr, total_cases
 
 
-def _run_tiled_continuity_eval(val_root, case_names, predictor, *, tile_size: int, tile_overlap: int, threshold: float):
+def _run_tiled_continuity_eval(
+    val_root,
+    case_names,
+    model,
+    *,
+    tile_size: int,
+    tile_overlap: int,
+    threshold: float,
+    image_size: int,
+    multimask_output: bool,
+    use_amp: bool,
+):
     try:
         from datasets.dataset_generic import load_image_mask_arrays
     except ImportError:
@@ -294,11 +309,14 @@ def _run_tiled_continuity_eval(val_root, case_names, predictor, *, tile_size: in
     total_cases = 0
     for case_name in tqdm(case_names):
         image_hwc, label = load_image_mask_arrays(val_root, case_name)
-        score_map = tiled_score_map(
+        score_map = tiled_model_score_map(
             image_hwc,
             tile_size=tile_size,
             tile_overlap=tile_overlap,
-            predict_tile_mask_score=lambda tile: predictor_tile_mask_score(predictor, tile),
+            model=model,
+            image_size=image_size,
+            multimask_output=multimask_output,
+            use_amp=use_amp,
         )
         pred_mask = (score_map >= float(threshold)).astype(np.uint8)
         metrics = continuity_metrics(pred_mask, label)
@@ -359,8 +377,6 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         from datasets.dataset_generic import GenericDataset, RandomGenerator, ValGenerator, list_image_files
     except ImportError:
         from .datasets.dataset_generic import GenericDataset, RandomGenerator, ValGenerator, list_image_files
-    from segment_anything import SamPredictor
-
     logging.basicConfig(
         filename=snapshot_path + "/log.txt",
         level=logging.INFO,
@@ -623,23 +639,28 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         val_interval = args.save_interval
         if epoch_num % val_interval == 0:
             model.eval()
-            predictor = SamPredictor(_unwrap_sam_model(model))
             logging.info("%d tiled full-image val iterations per epoch" % len(val_case_names))
             tile_selected_thr, tile_metric, tile_by_thr, total_cases = _run_tiled_full_image_eval(
                 args.val_path,
                 val_case_names,
-                predictor,
+                model,
                 tile_size=int(args.img_size),
                 tile_overlap=tile_overlap,
                 thresholds=val_thresholds,
+                image_size=int(args.img_size),
+                multimask_output=multimask_output,
+                use_amp=bool(getattr(args, "use_amp", False)),
             )
             tile_continuity = _run_tiled_continuity_eval(
                 args.val_path,
                 val_case_names,
-                predictor,
+                model,
                 tile_size=int(args.img_size),
                 tile_overlap=tile_overlap,
                 threshold=float(tile_selected_thr),
+                image_size=int(args.img_size),
+                multimask_output=multimask_output,
+                use_amp=bool(getattr(args, "use_amp", False)),
             )
             for thr in val_thresholds:
                 logging.info(

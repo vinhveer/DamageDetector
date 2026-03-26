@@ -8,7 +8,7 @@ import numpy as np
 from PIL import Image
 from torch_runtime import DataLoader
 from torch_runtime import cudnn, torch
-from segment_anything import SamPredictor, sam_model_registry
+from segment_anything import sam_model_registry
 
 try:
     from datasets.dataset_generic import GenericDataset, ValGenerator, list_image_files, load_image_mask_arrays
@@ -21,9 +21,8 @@ try:
     from tiled_inference import (
         best_threshold_result,
         continuity_metrics,
-        predictor_tile_mask_score,
+        tiled_model_score_map,
         threshold_sweep,
-        tiled_score_map,
     )
     from utils import test_single_volume
 except ImportError:
@@ -37,9 +36,8 @@ except ImportError:
     from .tiled_inference import (
         best_threshold_result,
         continuity_metrics,
-        predictor_tile_mask_score,
+        tiled_model_score_map,
         threshold_sweep,
-        tiled_score_map,
     )
     from .utils import test_single_volume
 
@@ -73,7 +71,7 @@ def _save_case_outputs(test_save_path, case_name: str, image_hwc: np.ndarray, pr
     Image.fromarray((label.astype(np.uint8) * 255)).save(os.path.join(test_save_path, "gt", case_name + "_img.jpg"))
 
 
-def _run_tiled_eval(args, predictor, test_save_path=None):
+def _run_tiled_eval(args, model, multimask_output, test_save_path=None):
     case_names = list_image_files(os.path.join(args.volume_path, "images"))
     logging.info("%d tiled full-image test iterations", len(case_names))
 
@@ -84,11 +82,14 @@ def _run_tiled_eval(args, predictor, test_save_path=None):
 
     for i_batch, case_name in enumerate(case_names):
         image_hwc, label = load_image_mask_arrays(args.volume_path, case_name)
-        score_map = tiled_score_map(
+        score_map = tiled_model_score_map(
             image_hwc,
             tile_size=tile_size,
             tile_overlap=tile_overlap,
-            predict_tile_mask_score=lambda tile: predictor_tile_mask_score(predictor, tile),
+            model=model,
+            image_size=int(args.img_size),
+            multimask_output=multimask_output,
+            use_amp=False,
         )
         sweep = threshold_sweep(score_map, label, args.val_thresholds)
         total_cases += 1
@@ -125,11 +126,14 @@ def _run_tiled_eval(args, predictor, test_save_path=None):
     else:
         for case_name in case_names:
             image_hwc, label = load_image_mask_arrays(args.volume_path, case_name)
-            score_map = tiled_score_map(
+            score_map = tiled_model_score_map(
                 image_hwc,
                 tile_size=tile_size,
                 tile_overlap=tile_overlap,
-                predict_tile_mask_score=lambda tile: predictor_tile_mask_score(predictor, tile),
+                model=model,
+                image_size=int(args.img_size),
+                multimask_output=multimask_output,
+                use_amp=False,
             )
             metrics = continuity_metrics((score_map >= float(best_thr)).astype(np.uint8), label)
             for key in continuity_totals:
@@ -301,7 +305,6 @@ if __name__ == "__main__":
         rank=int(args.rank),
     )
     sam = sam.cuda()
-    predictor = SamPredictor(sam)
     multimask_output = False
 
     log_folder = os.path.join(args.output_dir, "test_log")
@@ -332,7 +335,7 @@ if __name__ == "__main__":
     if resolved_mode == "legacy_full_box":
         primary = _run_legacy_eval(args, sam, multimask_output, test_save_path)
     else:
-        primary = _run_tiled_eval(args, predictor, test_save_path)
+        primary = _run_tiled_eval(args, sam, multimask_output, test_save_path)
         if args.legacy_box_eval:
             _run_legacy_eval(args, sam, multimask_output, None)
 
