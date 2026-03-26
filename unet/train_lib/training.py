@@ -161,6 +161,8 @@ def _iter_prefetch(loader, device):
             with torch.cuda.stream(stream):
                 images = images.to(device, non_blocking=True)
                 masks = masks.to(device, non_blocking=True)
+                images = images.contiguous()
+                masks = masks.contiguous()
             return images, masks, metadata
 
     next_batch = _next_batch()
@@ -221,6 +223,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             if not use_prefetch:
                 images = images.to(device, non_blocking=non_blocking)
                 masks = masks.to(device, non_blocking=non_blocking)
+            images = images.contiguous()
+            masks = masks.contiguous()
 
             # Forward pass with AMP
             with torch.amp.autocast('cuda', enabled=use_cuda):
@@ -289,6 +293,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 if not use_prefetch:
                     images = images.to(device, non_blocking=non_blocking)
                     masks = masks.to(device, non_blocking=non_blocking)
+                images = images.contiguous()
+                masks = masks.contiguous()
 
                 # AMp for validation too
                 with torch.amp.autocast('cuda', enabled=use_cuda):

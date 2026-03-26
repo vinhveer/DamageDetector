@@ -90,6 +90,17 @@ def _resolve_preprocess_mode(mode):
     return mapping[key]
 
 
+def _make_module_layout_contiguous(module):
+    module = module.to(memory_format=torch.contiguous_format)
+    for param in module.parameters():
+        if param.ndim == 4 and not param.is_contiguous():
+            param.data = param.data.contiguous()
+    for buf in module.buffers():
+        if getattr(buf, "ndim", 0) == 4 and not buf.is_contiguous():
+            buf.data = buf.data.contiguous()
+    return module
+
+
 def run_training(args):
     is_distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -185,12 +196,14 @@ def run_training(args):
         )
         if auto_info is not None:
             pos_weight_value, pos_ratio, used = auto_info
-            print(
-                f"Auto pos_weight: {pos_weight_value:.2f} (pos_ratio={pos_ratio:.4f}, samples={used})"
-            )
+            if rank == 0:
+                print(
+                    f"Auto pos_weight: {pos_weight_value:.2f} (pos_ratio={pos_ratio:.4f}, samples={used})"
+                )
         else:
             pos_weight_value = 1.0
-            print("Auto pos_weight failed (no valid masks). Falling back to 1.0.")
+            if rank == 0:
+                print("Auto pos_weight failed (no valid masks). Falling back to 1.0.")
     args.pos_weight = float(pos_weight_value)
 
     # Preprocessing / datasets
@@ -297,8 +310,6 @@ def run_training(args):
         "collate_fn": collate_skip_none,
         "pin_memory": bool(pin_memory),
     }
-    if device.type == "cuda" and loader_kwargs["pin_memory"]:
-        loader_kwargs["pin_memory_device"] = "cuda"
     if args.num_workers > 0:
         if bool(args.persistent_workers):
             loader_kwargs["persistent_workers"] = True
@@ -321,7 +332,6 @@ def run_training(args):
             **loader_kwargs,
         )
     except TypeError:
-        loader_kwargs.pop("pin_memory_device", None)
         loader_kwargs.pop("persistent_workers", None)
         loader_kwargs.pop("prefetch_factor", None)
         train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
@@ -351,21 +361,24 @@ def run_training(args):
     if rank == 0:
         print(f"Model: Unet (smp) | Encoder: {encoder_name} | Weights: {encoder_weights} | Attention: SCSE")
     model_config = build_model_config(args)
+    decoder_attention_type = model_config.get("decoder_attention_type")
     model = smp.Unet(
         encoder_name=encoder_name, 
         encoder_weights=encoder_weights, 
         in_channels=3, 
         classes=classes, 
         activation=activation,
-        decoder_attention_type="scse" # <--- SOTA Attention for Cracks
+        decoder_attention_type=decoder_attention_type, # <--- SOTA Attention for Cracks
     ).to(device)
+    model = _make_module_layout_contiguous(model)
+    ddp_find_unused_parameters = bool(decoder_attention_type)
     if is_distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
             broadcast_buffers=False,
-            find_unused_parameters=False,
+            find_unused_parameters=ddp_find_unused_parameters,
         )
 
     # Loss + optimizer.
@@ -420,7 +433,7 @@ def run_training(args):
     
     # Allow fallback to ReduceLROnPlateau if explicitly requested (not implemented here to keep clean SOTA flow)
 
-    if train_preprocess == "patch":
+    if rank == 0 and train_preprocess == "patch":
         print(
             f"Patch training: patch_size={args.input_size}, train_patches_per_image={args.patches_per_image}, "
             f"val_stride={args.val_stride if args.val_stride > 0 else (args.input_size // 2)}"
