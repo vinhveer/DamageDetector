@@ -95,8 +95,10 @@ class MaskDecoder(nn.Module):
             dense_prompt_embeddings=dense_prompt_embeddings,
         )
 
-        # For crack segmentation we train a single binary mask logit.
-        if multimask_output:
+        # For crack segmentation we often train a single binary mask token.
+        # In that case, requesting multimask output should still return the
+        # available foreground mask instead of an empty channel slice.
+        if multimask_output and masks.shape[1] > 1:
             mask_slice = slice(1, None)
         else:
             mask_slice = slice(0, 1)
