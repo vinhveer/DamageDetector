@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen, QWheelEvent
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QNativeGestureEvent, QPainter, QPaintEvent, QPen, QWheelEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
 from editor_app.color_utils import label_color
@@ -42,7 +42,9 @@ class ImageCanvas(QWidget):
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self._is_drawing = False
+        self._is_panning = False
         self._last_img_pt: QPoint | None = None
+        self._last_pan_widget_pt: QPointF | None = None
         self._cursor_widget_pt: QPointF | None = None
         self._roi_mode = False
         self._roi_dragging = False
@@ -115,6 +117,9 @@ class ImageCanvas(QWidget):
 
     def set_editable(self, editable: bool) -> None:
         self._editable = bool(editable)
+        if not self._editable:
+            self._is_drawing = False
+            self._last_img_pt = None
         self.update()
 
     def start_roi_selection(self) -> None:
@@ -343,6 +348,13 @@ class ImageCanvas(QWidget):
         if self._editable and self._render_mode == "overlay" and (not self._roi_mode) and event.button() == Qt.LeftButton:
             self._is_drawing = True
             self._apply_brush(event.position(), event.modifiers())
+            event.accept()
+            return
+        if (not self._roi_mode) and event.button() in {Qt.LeftButton, Qt.MiddleButton}:
+            self._is_panning = True
+            self._last_pan_widget_pt = QPointF(event.position())
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -357,6 +369,11 @@ class ImageCanvas(QWidget):
                 return
         if self._editable and self._render_mode == "overlay" and (not self._roi_mode) and self._is_drawing and (event.buttons() & Qt.LeftButton):
             self._apply_brush(event.position(), event.modifiers())
+        elif self._is_panning and self._last_pan_widget_pt is not None:
+            delta = event.position() - self._last_pan_widget_pt
+            self._pan = QPointF(self._pan.x() + delta.x(), self._pan.y() + delta.y())
+            self._last_pan_widget_pt = QPointF(event.position())
+            event.accept()
         else:
             self._emit_cursor_info(event.position())
         self.update()
@@ -383,6 +400,9 @@ class ImageCanvas(QWidget):
         if self._editable and self._render_mode == "overlay" and (not self._roi_mode) and event.button() == Qt.LeftButton:
             self._is_drawing = False
             self._last_img_pt = None
+        if event.button() in {Qt.LeftButton, Qt.MiddleButton}:
+            self._is_panning = False
+            self._last_pan_widget_pt = None
         super().mouseReleaseEvent(event)
 
     def leaveEvent(self, event) -> None:
@@ -403,7 +423,7 @@ class ImageCanvas(QWidget):
         pixel = event.pixelDelta()
         step_y = int(angle.y() / 120) if angle.y() else int(round(pixel.y() / 40)) if pixel.y() else 0
         if (mods & Qt.ControlModifier) and (mods & Qt.ShiftModifier):
-            if step_y:
+            if self._editable and step_y:
                 self.set_brush_radius(self._brush_radius + step_y * 2)
                 event.accept()
                 return
@@ -438,6 +458,32 @@ class ImageCanvas(QWidget):
         self._pan = QPointF(self._pan.x() + dx, self._pan.y() + dy)
         self.update()
         event.accept()
+
+    def nativeGestureEvent(self, event: QNativeGestureEvent) -> None:
+        gesture_type = event.gestureType()
+        if gesture_type == Qt.NativeGestureType.ZoomNativeGesture:
+            target_before = self._target_rect()
+            anchor_img = self._widget_to_image(event.position(), target_before)
+            old_zoom = self._zoom
+            zoom_factor = 1.0 + float(event.value())
+            if zoom_factor <= 0.0:
+                zoom_factor = 0.01
+            self._zoom = max(0.1, min(20.0, self._zoom * zoom_factor))
+            if anchor_img is not None and self._zoom != old_zoom:
+                target_after = self._target_rect()
+                anchor_widget_after = self._image_to_widget(QPointF(anchor_img), target_after)
+                delta = event.position() - anchor_widget_after
+                self._pan = QPointF(self._pan.x() + delta.x(), self._pan.y() + delta.y())
+            self.update()
+            event.accept()
+            return
+        if gesture_type == Qt.NativeGestureType.PanNativeGesture:
+            delta = event.delta()
+            self._pan = QPointF(self._pan.x() + float(delta.x()), self._pan.y() + float(delta.y()))
+            self.update()
+            event.accept()
+            return
+        super().nativeGestureEvent(event)
 
     def _emit_cursor_info(self, widget_pos: QPointF) -> None:
         if self._image.isNull() or self._mask.isNull():

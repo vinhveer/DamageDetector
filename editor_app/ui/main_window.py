@@ -78,10 +78,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("editor_app")
 
         persisted = self._settings_service.load()
-        merged_settings = dict(DEFAULT_EDITOR_SETTINGS)
-        merged_settings.update(migrate_editor_settings(dict(persisted.get("settings") or {})))
-        self._saved_settings = dict(merged_settings)
-        self._ui_store.set_settings(merged_settings)
+        self._saved_global_settings = dict(DEFAULT_EDITOR_SETTINGS)
+        self._saved_global_settings.update(migrate_editor_settings(dict(persisted.get("settings") or {})))
+        self._settings_by_workspace = self._migrate_settings_by_workspace(persisted.get("settings_by_workspace"))
+        self._active_settings_workspace_key = ""
+        self._ui_store.set_settings(self._settings_for_workspace(None))
         self._ui_store.set_layout(
             main_splitter_sizes=list(persisted.get("main_splitter_sizes") or []),
             left_splitter_sizes=list(persisted.get("left_splitter_sizes") or []),
@@ -104,6 +105,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._left_rail = LeftRail(self._main_splitter)
         self._left_rail.stopJobRequested.connect(self._prediction_controller.cancel)
         self._left_rail.jobActivated.connect(self._activate_job)
+        self._left_rail.railTabChanged.connect(self._on_left_rail_tab_changed)
 
         self._workspaces = QtWidgets.QStackedWidget(self._main_splitter)
         self._editor_workspace = EditorWorkspace(self._workspaces)
@@ -140,6 +142,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._main_splitter.addWidget(self._left_rail)
         self._main_splitter.addWidget(self._workspaces)
+        self._left_rail.set_editor_panels(self._editor_workspace.inspect_panel(), self._editor_workspace.tools_panel())
         self._main_splitter.setSizes(self._ui_store.main_splitter_sizes or [420, 1260])
         if self._ui_store.left_splitter_sizes:
             self._left_rail.set_splitter_sizes(self._ui_store.left_splitter_sizes)
@@ -193,6 +196,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._workspace_store.detectionsChanged.connect(self._on_store_detections_changed)
         self._workspace_store.highlightChanged.connect(self._on_store_highlights_changed)
         self._workspace_store.roiChanged.connect(self._on_store_rois_changed)
+        self._workspace_store.workspaceChanged.connect(self._on_workspace_changed)
         self._history_store.runsChanged.connect(self._refresh_history_workspace)
         self._compare_store.runsChanged.connect(self._refresh_compare_workspace)
         self._compare_store.configChanged.connect(self._refresh_compare_workspace)
@@ -201,6 +205,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._isolate_store.itemsChanged.connect(self._refresh_isolate_workspace)
         self._ui_store.settingsChanged.connect(self._refresh_settings_workspace)
         self._ui_store.layoutChanged.connect(self._persist_editor_state)
+        self._prediction_controller.jobCompleted.connect(self._on_prediction_job_completed)
+        self._prediction_controller.jobFinalized.connect(lambda _job_id: self._history_controller.refresh())
         self.statusBar().showMessage("Ready")
         self._build_actions()
         self._show_workspace(str(persisted.get("current_workspace_view") or "editor"))
@@ -240,6 +246,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_store_rois_changed(self) -> None:
         self._editor_workspace.set_roi_boxes(self._workspace_store.current_rois, self._workspace_store.current_roi_index)
+
+    def _on_workspace_changed(self) -> None:
+        self._apply_workspace_settings(self._workspace_store.workspace_root)
 
     def _refresh_jobs(self) -> None:
         self._left_rail.set_jobs(self._prediction_store.all_jobs())
@@ -285,6 +294,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._prediction_store.set_active_job(job_id)
         self._show_workspace("runs")
 
+    def _on_left_rail_tab_changed(self, name: str) -> None:
+        self._editor_workspace.set_left_rail_editor_active(str(name) == "editor")
+
     def _load_image(self, path: str, *, switch_workspace: bool) -> None:
         self._workspace_actions.load_image(path, switch_workspace=switch_workspace)
 
@@ -327,7 +339,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._left_rail.explorer().select_path(image_path)
 
     def _on_history_run_selected(self, run_dir: str) -> None:
-        self._prediction_actions.on_history_run_selected(run_dir, self._history_workspace.set_selected_run_details)
+        bundle, _items = self._prediction_actions.on_history_run_selected(run_dir, self._history_workspace.set_selected_run_details)
+        run_meta = dict(bundle.get("run") or {})
+        run_id = str(run_meta.get("run_id") or Path(run_dir).name or "").strip()
+        if run_id:
+            self.statusBar().showMessage(f"History: {run_id}")
 
     def _compare_selected_run(self, run_dir: str) -> None:
         self._prediction_actions.compare_selected_run(run_dir)
@@ -336,9 +352,14 @@ class MainWindow(QtWidgets.QMainWindow):
         settings = dict(self._ui_store.settings)
         settings.update(dict(payload or {}))
         self._ui_store.set_settings(settings)
-        self._saved_settings = dict(settings)
+        workspace_key = self._workspace_key(self._workspace_store.workspace_root)
+        if workspace_key:
+            self._settings_by_workspace[workspace_key] = dict(settings)
+            self._active_settings_workspace_key = workspace_key
+        else:
+            self._saved_global_settings = dict(settings)
         self._persist_editor_state()
-        self.statusBar().showMessage("Saved default prediction settings.", 4000)
+        self.statusBar().showMessage("Saved prediction settings for current folder.", 4000)
 
     def _build_actions(self) -> None:
         act_open_image = QtGui.QAction("Open Image...", self)
@@ -443,7 +464,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _persist_editor_state(self) -> None:
         payload = {
-            "settings": dict(self._saved_settings),
+            "settings": dict(self._saved_global_settings),
+            "settings_by_workspace": dict(self._settings_by_workspace),
             "last_workspace": str(self._workspace_store.workspace_root or ""),
             "current_workspace_view": str(self._ui_store.current_workspace_view or "editor"),
             "main_splitter_sizes": [int(value) for value in self._main_splitter.sizes()],
@@ -460,3 +482,72 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._persist_editor_state()
         return super().closeEvent(event)
+
+    def _workspace_key(self, workspace_root: Path | str | None) -> str:
+        if workspace_root is None:
+            return ""
+        try:
+            return str(Path(workspace_root).resolve())
+        except Exception:
+            return str(workspace_root)
+
+    def _migrate_settings_by_workspace(self, raw: object) -> dict[str, dict]:
+        mapped: dict[str, dict] = {}
+        if not isinstance(raw, dict):
+            return mapped
+        for key, value in raw.items():
+            workspace_key = self._workspace_key(key)
+            if not workspace_key or not isinstance(value, dict):
+                continue
+            settings = dict(DEFAULT_EDITOR_SETTINGS)
+            settings.update(migrate_editor_settings(dict(value)))
+            mapped[workspace_key] = settings
+        return mapped
+
+    def _settings_for_workspace(self, workspace_root: Path | None) -> dict:
+        settings = dict(DEFAULT_EDITOR_SETTINGS)
+        workspace_key = self._workspace_key(workspace_root)
+        if workspace_key and workspace_key in self._settings_by_workspace:
+            settings.update(self._settings_by_workspace[workspace_key])
+            return settings
+        settings.update(self._saved_global_settings)
+        return settings
+
+    def _apply_workspace_settings(self, workspace_root: Path | None, *, force: bool = False) -> None:
+        workspace_key = self._workspace_key(workspace_root)
+        if not force and workspace_key == self._active_settings_workspace_key:
+            return
+        self._active_settings_workspace_key = workspace_key
+        self._ui_store.set_settings(self._settings_for_workspace(workspace_root))
+
+    def _on_prediction_job_completed(self, job_id: str) -> None:
+        job = self._prediction_store.get(job_id)
+        if job is None or str(job.scope) != "folder" or not job.run_dir:
+            return
+        try:
+            items = self._run_storage.list_result_items(Path(job.run_dir))
+        except Exception as exc:
+            self._show_error(str(exc))
+            return
+        if not items:
+            self.statusBar().showMessage("Folder prediction completed, but no result items were produced.", 5000)
+            return
+        self._workspace_controller.set_result_items(items)
+        item_paths = [str(item.get("image_path") or "").strip() for item in items]
+        item_paths = [path for path in item_paths if path]
+        target_path = None
+        current_path = str(self._workspace_store.current_image_path or "").strip()
+        if current_path and current_path in item_paths:
+            target_path = current_path
+        elif item_paths:
+            target_path = item_paths[0]
+        if target_path:
+            try:
+                self._workspace_controller.open_image(target_path)
+            except Exception as exc:
+                self._show_error(str(exc))
+                return
+            self._left_rail.explorer().set_images(list(self._workspace_store.images))
+            self._left_rail.explorer().select_path(target_path)
+        self._show_workspace("editor")
+        self.statusBar().showMessage(f"Loaded {len(items)} result item(s) for folder run {job.run_id}.", 5000)

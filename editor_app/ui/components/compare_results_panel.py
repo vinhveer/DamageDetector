@@ -160,7 +160,10 @@ class CompareResultsPanel(QtWidgets.QWidget):
         self._table.setColumnCount(4)
         self._table.setRowCount(1)
         self._table.setHorizontalHeaderLabels(["Image", "GT Mask", "Dice", "IoU"])
-        self._table.horizontalHeader().setStretchLastSection(True)
+        header = self._table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self._table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSortingEnabled(False)
@@ -190,7 +193,7 @@ class CompareResultsPanel(QtWidgets.QWidget):
         self._table.resizeColumnsToContents()
         mean_dice = sum(float(item.get("dice", 0.0)) for item in self._results) / len(self._results)
         mean_iou = sum(float(item.get("iou", 0.0)) for item in self._results) / len(self._results)
-        self._summary.setText(f"{len(self._results)} items | mean Dice {mean_dice:.4f} | mean IoU {mean_iou:.4f}")
+        self._summary.setText(f"{len(self._results)} items | Avg Dice {mean_dice:.4f} | Avg IoU {mean_iou:.4f}")
 
     def _populate_empty_table(self) -> None:
         self._table.clearSpans()

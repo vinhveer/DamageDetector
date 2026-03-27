@@ -64,7 +64,7 @@ class ImageToolsPanel(QtWidgets.QWidget):
         layout.addSpacing(6)
         layout.addWidget(
             QtWidgets.QLabel(
-                "Paint: LMB\nErase: Ctrl + LMB\nZoom: Ctrl + Wheel\nBrush: Ctrl + Shift + Wheel\nPan: Wheel",
+                "Paint: LMB\nErase: Ctrl + LMB\nPan: drag or wheel\nZoom: Ctrl + Wheel\nBrush size: Ctrl + Shift + Wheel",
                 self,
             )
         )

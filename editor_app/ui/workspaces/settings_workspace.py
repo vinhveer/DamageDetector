@@ -16,7 +16,7 @@ class SettingsWorkspace(QtWidgets.QWidget):
         root.setSpacing(14)
 
         header = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("Default Prediction Settings", self)
+        title = QtWidgets.QLabel("Prediction Settings", self)
         font = title.font()
         font.setPointSize(font.pointSize() + 2)
         title.setFont(font)
@@ -33,10 +33,15 @@ class SettingsWorkspace(QtWidgets.QWidget):
         self._tabs = QtWidgets.QTabWidget(self)
         root.addWidget(self._tabs, 1)
 
-        self._tabs.addTab(self._build_basic_tab(), "Basic")
-        self._tabs.addTab(self._build_advanced_tab(), "Advanced")
+        self._tabs.addTab(self._build_tab(self._build_general_group), "General")
+        self._tabs.addTab(self._build_tab(self._build_sam_group, self._build_sam_auto_group, self._build_sam_runtime_group), "SAM")
+        self._tabs.addTab(self._build_tab(self._build_sam_lora_group), "SAM LoRA")
+        self._tabs.addTab(self._build_tab(self._build_dino_group, self._build_dino_advanced_group), "DINO")
+        self._tabs.addTab(self._build_tab(self._build_unet_group), "UNet")
+        self._tabs.addTab(self._build_tab(self._build_crack_only_group, self._build_more_damage_group), "Tasks")
+        self._tabs.addTab(self._build_tab(self._build_isolate_group), "Isolate")
 
-    def _build_basic_tab(self) -> QtWidgets.QWidget:
+    def _build_tab(self, *builders) -> QtWidgets.QWidget:
         host = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(host)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -49,33 +54,8 @@ class SettingsWorkspace(QtWidgets.QWidget):
         form_root = QtWidgets.QVBoxLayout(content)
         form_root.setContentsMargins(0, 0, 0, 0)
         form_root.setSpacing(18)
-        form_root.addWidget(self._build_general_group(content))
-        form_root.addWidget(self._build_sam_group(content))
-        form_root.addWidget(self._build_sam_lora_group(content))
-        form_root.addWidget(self._build_dino_group(content))
-        form_root.addWidget(self._build_unet_group(content))
-        form_root.addWidget(self._build_crack_only_group(content))
-        form_root.addWidget(self._build_more_damage_group(content))
-        form_root.addStretch(1)
-        return host
-
-    def _build_advanced_tab(self) -> QtWidgets.QWidget:
-        host = QtWidgets.QWidget(self)
-        layout = QtWidgets.QVBoxLayout(host)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        scroll = QtWidgets.QScrollArea(host)
-        scroll.setWidgetResizable(True)
-        layout.addWidget(scroll, 1)
-        content = QtWidgets.QWidget(scroll)
-        scroll.setWidget(content)
-        form_root = QtWidgets.QVBoxLayout(content)
-        form_root.setContentsMargins(0, 0, 0, 0)
-        form_root.setSpacing(18)
-        form_root.addWidget(self._build_sam_auto_group(content))
-        form_root.addWidget(self._build_sam_runtime_group(content))
-        form_root.addWidget(self._build_dino_advanced_group(content))
-        form_root.addWidget(self._build_isolate_group(content))
+        for builder in builders:
+            form_root.addWidget(builder(content))
         form_root.addStretch(1)
         return host
 

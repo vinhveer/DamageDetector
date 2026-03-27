@@ -174,11 +174,12 @@ class PredictionActions(QtCore.QObject):
         self._show_status(f"Loaded run item: {Path(image_path).name}", 5000)
         return image_path
 
-    def on_history_run_selected(self, run_dir: str, set_selected_run_details: Callable[[str, dict, list[dict]], None]) -> None:
+    def on_history_run_selected(self, run_dir: str, set_selected_run_details: Callable[[str, dict, list[dict]], None]) -> tuple[dict, list[dict]]:
         if not run_dir:
-            return
+            return {}, []
         bundle, items = self._history_controller.load_run_details(run_dir)
         set_selected_run_details(run_dir, bundle=bundle, items=items)
+        return bundle, items
 
     def compare_selected_run(self, run_dir: str) -> None:
         try:

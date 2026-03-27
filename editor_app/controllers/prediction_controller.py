@@ -19,6 +19,8 @@ from inference_api.workflow_resolver import resolve_workflow
 
 class PredictionController(QtCore.QObject):
     errorRaised = QtCore.Signal(str)
+    jobCompleted = QtCore.Signal(str)
+    jobFinalized = QtCore.Signal(str)
 
     def __init__(
         self,
@@ -261,6 +263,8 @@ class PredictionController(QtCore.QObject):
                     meta["resolved_workflow"] = job.resolved_workflow or job.workflow
                 self._run_storage.write_result(run, status="done", payload=payload, metadata=meta)
             self._apply_payload_if_current(payload, partial=False)
+            self.jobFinalized.emit(job_id)
+            self.jobCompleted.emit(job_id)
             return
         if event_type == "failed":
             error = str(getattr(event, "error", "") or getattr(event, "message", "") or "Prediction failed.")
@@ -276,6 +280,7 @@ class PredictionController(QtCore.QObject):
                         "resolved_workflow": job.resolved_workflow or job.workflow,
                     }
                 self._run_storage.write_result(run, status="failed", payload={}, error=error, metadata=meta)
+            self.jobFinalized.emit(job_id)
             return
         if event_type == "cancelled":
             payload = getattr(event.result, "to_dict", lambda: {})() if getattr(event, "result", None) is not None else {}
@@ -297,6 +302,7 @@ class PredictionController(QtCore.QObject):
                     error=getattr(event, "message", None),
                     metadata=meta,
                 )
+            self.jobFinalized.emit(job_id)
 
     def _apply_payload_if_current(self, payload: dict, *, partial: bool) -> None:
         items = self._payload_items(payload)
