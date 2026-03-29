@@ -42,6 +42,8 @@ DEFAULT_EDITOR_SETTINGS = {
     "dino_parent_contain_threshold": 0.7,
     "dino_recursive_min_box_px": 48,
     "dino_recursive_max_depth": 3,
+    "predict_use_tiled_dino": True,
+    "predict_tile_trigger_px": 512,
     "device": "auto",
     "unet_model": "",
     "unet_threshold": 0.5,
@@ -53,8 +55,14 @@ DEFAULT_EDITOR_SETTINGS = {
     "crack_text_queries": "crack",
     "more_damage_text_queries": "mold,stain,spall,damage,column",
     "more_damage_max_masks": 8,
+    "more_damage_crack_mask_model": "off",
+    "isolate_prompt": "",
+    "isolate_mode": "dino_sam",
+    "isolate_action": "keep",
+    "isolate_use_tiled_dino": False,
+    "isolate_tile_trigger_px": 512,
     "isolate_labels": "mold,stain,spall,damage,column",
-    "isolate_crop": False,
+    "isolate_crop": True,
     "isolate_outside_white": False,
 }
 
@@ -75,6 +83,22 @@ def migrate_editor_settings(payload: dict | None) -> dict:
         settings["crack_text_queries"] = "crack"
     if "more_damage_text_queries" not in settings:
         settings["more_damage_text_queries"] = legacy_queries or "mold,stain,spall,damage,column"
+    if "more_damage_crack_mask_model" not in settings:
+        settings["more_damage_crack_mask_model"] = "off"
+    if "isolate_prompt" not in settings:
+        settings["isolate_prompt"] = str(settings.get("isolate_labels") or "")
+    if "isolate_mode" not in settings:
+        settings["isolate_mode"] = "dino_sam"
+    if "isolate_action" not in settings:
+        settings["isolate_action"] = "keep"
+    if "predict_use_tiled_dino" not in settings:
+        settings["predict_use_tiled_dino"] = True
+    if "predict_tile_trigger_px" not in settings:
+        settings["predict_tile_trigger_px"] = 512
+    if "isolate_use_tiled_dino" not in settings:
+        settings["isolate_use_tiled_dino"] = False
+    if "isolate_tile_trigger_px" not in settings:
+        settings["isolate_tile_trigger_px"] = 512
     if "isolate_labels" not in settings:
         settings["isolate_labels"] = "mold,stain,spall,damage,column"
     for legacy_key in ("delta_type", "delta_checkpoint", "middle_dim", "scaling_factor", "rank", "text_queries"):

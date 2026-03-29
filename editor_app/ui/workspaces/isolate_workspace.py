@@ -80,6 +80,8 @@ class IsolateWorkspace(QtWidgets.QWidget):
             f"workflow: {data.get('workflow')}",
             f"status: {data.get('status')}",
             f"created_at: {data.get('created_at')}",
+            f"prompt: {data.get('prompt')}",
+            f"isolate_action: {data.get('isolate_action')}",
             f"image_path: {data.get('image_path')}",
             f"isolate_path: {data.get('isolate_path')}",
             f"mask_path: {data.get('mask_path')}",

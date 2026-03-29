@@ -25,8 +25,8 @@ class HistoryController:
         runs = self._run_storage.list_runs(Path(results_root))
         self._history_store.set_runs(runs)
         valid_run_dirs = {run.run_dir for run in runs}
-        self._run_bundle_cache = {run_dir: value for run_dir, value in self._run_bundle_cache.items() if run_dir in valid_run_dirs}
-        self._run_items_cache = {run_dir: value for run_dir, value in self._run_items_cache.items() if run_dir in valid_run_dirs}
+        self._run_bundle_cache.clear()
+        self._run_items_cache.clear()
         if self._history_store.selected_run_dir not in valid_run_dirs:
             self._history_store.set_selected_run(None)
 

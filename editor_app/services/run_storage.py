@@ -111,12 +111,15 @@ class RunStorageService:
 
         detections = []
         if payload:
-            if isinstance(payload.get("detections"), list):
+            if isinstance(payload.get("display_detections"), list):
+                detections = list(payload.get("display_detections") or [])
+            elif isinstance(payload.get("detections"), list):
                 detections = list(payload.get("detections") or [])
             elif isinstance(payload.get("results"), list):
                 for item in payload.get("results") or []:
                     if isinstance(item, dict):
-                        for det in item.get("detections") or []:
+                        source = item.get("display_detections") if isinstance(item.get("display_detections"), list) else item.get("detections")
+                        for det in source or []:
                             detections.append(dict(det))
         self._write_json(run.data_dir / "detections.json", detections)
 
@@ -171,23 +174,38 @@ class RunStorageService:
 
     def list_result_items(self, run_dir: Path) -> list[dict[str, Any]]:
         bundle = self.load_run_bundle(run_dir)
+        request_payload = dict(bundle.get("request") or {})
         result_payload = dict(bundle.get("result") or {})
         payload = dict(result_payload.get("result") or {})
         items: list[dict[str, Any]] = []
+        request_image_path = str(request_payload.get("image_path") or "").strip()
+        request_image_paths = [str(path).strip() for path in (request_payload.get("image_paths") or []) if str(path).strip()]
+
+        def _with_defaults(entry: dict[str, Any], index: int) -> dict[str, Any]:
+            item = dict(entry or {})
+            if not str(item.get("image_path") or "").strip():
+                if request_image_paths:
+                    if index < len(request_image_paths):
+                        item["image_path"] = request_image_paths[index]
+                    else:
+                        item["image_path"] = request_image_paths[0]
+                elif request_image_path:
+                    item["image_path"] = request_image_path
+            item.setdefault("_item_index", index)
+            item.setdefault("_run_dir", str(run_dir))
+            return item
+
         if isinstance(payload.get("results"), list):
             for index, item in enumerate(payload.get("results") or []):
                 if not isinstance(item, dict):
                     continue
-                entry = dict(item)
-                entry.setdefault("_item_index", index)
-                entry.setdefault("_run_dir", str(run_dir))
-                items.append(entry)
+                items.append(_with_defaults(dict(item), index))
             return items
         if payload:
-            payload = dict(payload)
-            payload.setdefault("_item_index", 0)
-            payload.setdefault("_run_dir", str(run_dir))
-            items.append(payload)
+            items.append(_with_defaults(dict(payload), 0))
+            return items
+        if request_image_path or request_image_paths:
+            items.append(_with_defaults({}, 0))
         return items
 
     def list_isolate_items(self, results_root: Path) -> list[dict[str, Any]]:
@@ -206,6 +224,8 @@ class RunStorageService:
                         "created_at": run.created_at,
                         "run_dir": run.run_dir,
                         "image_path": str(item.get("image_path") or ""),
+                        "prompt": str(item.get("prompt") or ""),
+                        "isolate_action": str(item.get("isolate_action") or "keep"),
                         "isolate_path": isolate_path,
                         "mask_path": str(item.get("mask_path") or ""),
                     }

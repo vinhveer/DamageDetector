@@ -86,10 +86,11 @@ class SamFinetuneRunner:
             float(params.scaling_factor),
             int(params.rank),
         )
+        requested_model_type = str(params.sam_model_type or "auto").strip().lower()
         needs_reload = (
             self._predictor is None
             or self._sam_checkpoint != params.sam_checkpoint
-            or self._sam_model_type != params.sam_model_type
+            or (requested_model_type != "auto" and self._sam_model_type != requested_model_type)
             or self._delta_sig != delta_sig
             or self._device != device
         )

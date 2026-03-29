@@ -179,6 +179,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._top_bar.predictRequested.connect(self._prediction_actions.run_predict_dialog)
         self._top_bar.predictRoiRequested.connect(lambda: self._prediction_actions.run_predict_dialog_roi(self._editor_workspace.start_prediction_roi_selection))
         self._top_bar.isolateRequested.connect(self._prediction_actions.run_isolate)
+        self._top_bar.saveImageRequested.connect(self._workspace_actions.export_image)
         self._left_rail.openFolderRequested.connect(self._workspace_actions.open_folder)
         self._left_rail.addFolderImagesRequested.connect(self._workspace_actions.add_folder_images)
         self._left_rail.openImageRequested.connect(self._workspace_actions.open_image_dialog)

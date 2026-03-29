@@ -64,6 +64,8 @@ def build_editor_request(
     roi_box: tuple[int, int, int, int] | None = None,
     output_dir: str | None = None,
     target_labels: list[str] | None = None,
+    prompt: str | None = None,
+    isolate_mode: str | None = None,
     outside_value: int | None = None,
     crop_to_bbox: bool | None = None,
     max_depth: int | None = None,
@@ -77,6 +79,8 @@ def build_editor_request(
             output_dir=output_dir,
             roi_box=roi_box,
             target_labels=target_labels,
+            prompt=prompt,
+            mode=isolate_mode,
             outside_value=outside_value,
             crop_to_bbox=crop_to_bbox,
         )

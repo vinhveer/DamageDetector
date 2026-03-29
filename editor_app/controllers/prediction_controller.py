@@ -124,7 +124,9 @@ class PredictionController(QtCore.QObject):
         self,
         *,
         settings: dict,
-        target_labels: list[str] | None,
+        prompt: str | None,
+        mode: str | None,
+        action: str | None,
         outside_value: int | None,
         crop_to_bbox: bool | None,
         roi_box: tuple[int, int, int, int] | None = None,
@@ -144,7 +146,9 @@ class PredictionController(QtCore.QObject):
                 image_path=current_image,
                 output_dir=str(run.output_dir),
                 roi_box=roi_box,
-                target_labels=target_labels,
+                prompt=prompt,
+                mode=mode,
+                action=action,
                 outside_value=outside_value,
                 crop_to_bbox=crop_to_bbox,
             )
@@ -314,7 +318,7 @@ class PredictionController(QtCore.QObject):
         current_item = next((item for item in items if str(item.get("image_path") or "") == current_path), None)
         if current_item is None:
             return
-        detections = list(current_item.get("detections") or [])
+        detections = list(current_item.get("display_detections") or current_item.get("detections") or [])
         if detections:
             self._workspace_store.set_highlight_detections(detections)
             if not partial:

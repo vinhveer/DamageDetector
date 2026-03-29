@@ -146,6 +146,19 @@ class SettingsWorkspace(QtWidgets.QWidget):
         form = self._section_layout(group)
         self._add_row(form, 0, "Text queries", self._line("more_damage_text_queries"))
         self._add_row(form, 1, "Max masks", self._spin("more_damage_max_masks", minimum=1, maximum=128))
+        self._add_row(
+            form,
+            2,
+            "Crack mask model",
+            self._combo(
+                "more_damage_crack_mask_model",
+                [
+                    ("Off", "off"),
+                    ("SAM Finetune with LoRA", "sam_lora"),
+                    ("UNet", "unet"),
+                ],
+            ),
+        )
         return group
 
     def _build_sam_auto_group(self, parent: QtWidgets.QWidget) -> QtWidgets.QGroupBox:
@@ -179,14 +192,15 @@ class SettingsWorkspace(QtWidgets.QWidget):
         self._add_row(form, 1, "Parent contain threshold", self._double_spin("dino_parent_contain_threshold", minimum=0.0, maximum=1.0, step=0.01, decimals=4))
         self._add_row(form, 2, "Recursive min box px", self._spin("dino_recursive_min_box_px", minimum=1, maximum=4096))
         self._add_row(form, 3, "Recursive max depth", self._spin("dino_recursive_max_depth", minimum=0, maximum=16))
+        self._add_row(form, 4, "Predict: tile large images", self._checkbox("predict_use_tiled_dino"))
+        self._add_row(form, 5, "Predict tile trigger px", self._spin("predict_tile_trigger_px", minimum=128, maximum=16384))
         return group
 
     def _build_isolate_group(self, parent: QtWidgets.QWidget) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Isolate", parent)
         form = self._section_layout(group)
-        self._add_row(form, 0, "Target labels", self._line("isolate_labels"))
-        self._add_row(form, 1, "Crop to bbox", self._checkbox("isolate_crop"))
-        self._add_row(form, 2, "Outside white", self._checkbox("isolate_outside_white"))
+        self._add_row(form, 0, "Crop to bbox", self._checkbox("isolate_crop"))
+        self._add_row(form, 1, "Outside white", self._checkbox("isolate_outside_white"))
         return group
 
     def _section_layout(self, parent: QtWidgets.QWidget) -> QtWidgets.QGridLayout:

@@ -54,7 +54,7 @@ class WorkspaceController:
         result_item = self._workspace_store.result_item_for(path)
         if result_item is None:
             return
-        detections = list(result_item.get("detections") or [])
+        detections = list(result_item.get("display_detections") or result_item.get("detections") or [])
         if detections:
             self._workspace_store.set_detections(detections)
             self._workspace_store.set_highlight_detections(detections)

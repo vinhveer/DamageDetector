@@ -8,6 +8,7 @@ class TopBar(QtWidgets.QWidget):
     predictRequested = QtCore.Signal()
     predictRoiRequested = QtCore.Signal()
     isolateRequested = QtCore.Signal()
+    saveImageRequested = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -41,12 +42,15 @@ class TopBar(QtWidgets.QWidget):
         self._predict_btn = QtWidgets.QPushButton("Run Predict", self)
         self._predict_roi_btn = QtWidgets.QPushButton("Run ROI Predict", self)
         self._isolate_btn = QtWidgets.QPushButton("Run Isolate", self)
+        self._save_image_btn = QtWidgets.QPushButton("Save Image As", self)
         self._predict_btn.clicked.connect(self.predictRequested.emit)
         self._predict_roi_btn.clicked.connect(self.predictRoiRequested.emit)
         self._isolate_btn.clicked.connect(self.isolateRequested.emit)
+        self._save_image_btn.clicked.connect(self.saveImageRequested.emit)
         row.addWidget(self._predict_btn)
         row.addWidget(self._predict_roi_btn)
         row.addWidget(self._isolate_btn)
+        row.addWidget(self._save_image_btn)
         root.addLayout(row)
 
     def _emit_workspace_changed(self, index: int) -> None:

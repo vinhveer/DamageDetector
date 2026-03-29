@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QNativeGestureEvent, QPainter, QPaintEvent, QPen, QWheelEvent
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -29,6 +29,7 @@ class ImageCanvas(QWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
 
         self._render_mode = str(render_mode)
         self._editable = bool(editable)
@@ -57,6 +58,12 @@ class ImageCanvas(QWidget):
         self._overlay_timer.setSingleShot(True)
         self._overlay_timer.timeout.connect(self._rebuild_overlay_cache)
         self._emit_state()
+
+    def event(self, event) -> bool:
+        if event is not None and event.type() == QEvent.Type.NativeGesture and isinstance(event, QNativeGestureEvent):
+            if self.nativeGestureEvent(event):
+                return True
+        return super().event(event)
 
     def canvas_state(self) -> CanvasState:
         return CanvasState(
@@ -459,31 +466,44 @@ class ImageCanvas(QWidget):
         self.update()
         event.accept()
 
-    def nativeGestureEvent(self, event: QNativeGestureEvent) -> None:
+    def nativeGestureEvent(self, event: QNativeGestureEvent) -> bool:
         gesture_type = event.gestureType()
         if gesture_type == Qt.NativeGestureType.ZoomNativeGesture:
-            target_before = self._target_rect()
-            anchor_img = self._widget_to_image(event.position(), target_before)
-            old_zoom = self._zoom
             zoom_factor = 1.0 + float(event.value())
             if zoom_factor <= 0.0:
                 zoom_factor = 0.01
-            self._zoom = max(0.1, min(20.0, self._zoom * zoom_factor))
-            if anchor_img is not None and self._zoom != old_zoom:
-                target_after = self._target_rect()
-                anchor_widget_after = self._image_to_widget(QPointF(anchor_img), target_after)
-                delta = event.position() - anchor_widget_after
-                self._pan = QPointF(self._pan.x() + delta.x(), self._pan.y() + delta.y())
-            self.update()
+            self._zoom_at(event.position(), zoom_factor)
             event.accept()
-            return
+            return True
         if gesture_type == Qt.NativeGestureType.PanNativeGesture:
             delta = event.delta()
-            self._pan = QPointF(self._pan.x() + float(delta.x()), self._pan.y() + float(delta.y()))
-            self.update()
+            self._pan_by(float(delta.x()), float(delta.y()))
             event.accept()
+            return True
+        if gesture_type == Qt.NativeGestureType.SmartZoomNativeGesture:
+            self._zoom_at(event.position(), 2.0 if float(event.value()) >= 0.0 else 0.5)
+            event.accept()
+            return True
+        event.ignore()
+        return False
+
+    def _zoom_at(self, anchor_widget_pt: QPointF, zoom_factor: float) -> None:
+        if (self._image.isNull() and self._render_mode != "mask") or zoom_factor <= 0.0:
             return
-        super().nativeGestureEvent(event)
+        target_before = self._target_rect()
+        anchor_img = self._widget_to_image(anchor_widget_pt, target_before)
+        old_zoom = self._zoom
+        self._zoom = max(0.1, min(20.0, self._zoom * float(zoom_factor)))
+        if anchor_img is not None and self._zoom != old_zoom:
+            target_after = self._target_rect()
+            anchor_widget_after = self._image_to_widget(QPointF(anchor_img), target_after)
+            delta = anchor_widget_pt - anchor_widget_after
+            self._pan = QPointF(self._pan.x() + delta.x(), self._pan.y() + delta.y())
+        self.update()
+
+    def _pan_by(self, dx: float, dy: float) -> None:
+        self._pan = QPointF(self._pan.x() + float(dx), self._pan.y() + float(dy))
+        self.update()
 
     def _emit_cursor_info(self, widget_pos: QPointF) -> None:
         if self._image.isNull() or self._mask.isNull():

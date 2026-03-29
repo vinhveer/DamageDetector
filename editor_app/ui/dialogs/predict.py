@@ -185,7 +185,7 @@ class PredictRunDialog(QtWidgets.QDialog):
         ):
             self._seg_buttons[SEGMENTATION_SAM].setChecked(True)
         if more_damage:
-            self._hint.setText("More damage currently supports SAM with optional DINO detection.")
+            self._hint.setText("More damage uses SAM with optional DINO detection. Crack boxes can use UNet or SAM Finetune from Settings > Tasks.")
         else:
             self._hint.setText("Crack-only supports SAM, SAM Finetune with LoRA, or UNet, with or without DINO.")
 

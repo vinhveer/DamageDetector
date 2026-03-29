@@ -13,7 +13,7 @@ from editor_app.controllers.prediction_controller import PredictionController
 from editor_app.stores.prediction_store import PredictionStore
 from editor_app.stores.ui_store import UiStore
 from editor_app.stores.workspace_store import WorkspaceStore
-from editor_app.ui.dialogs import PredictRunDialog
+from editor_app.ui.dialogs import IsolateDialog, PredictRunDialog
 from inference_api.prediction_models import PredictionConfig, SCOPE_CURRENT
 
 
@@ -111,10 +111,31 @@ class PredictionActions(QtCore.QObject):
             self._show_error("Open an image before running isolate.")
             return
         settings = dict(self._ui_store.settings)
-        labels = [part.strip() for part in str(settings.get("isolate_labels") or "").split(",") if part.strip()]
+        dlg = IsolateDialog(
+            self._parent,
+            prompt=str(settings.get("isolate_prompt") or settings.get("isolate_labels") or ""),
+            mode=str(settings.get("isolate_mode") or "dino_sam"),
+            action=str(settings.get("isolate_action") or "keep"),
+            profile="QUALITY",
+            crop=bool(settings.get("isolate_crop") or False),
+            white=bool(settings.get("isolate_outside_white") or False),
+        )
+        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        values = dlg.get_values()
+        settings["isolate_prompt"] = str(values.get("prompt") or "").strip()
+        settings["isolate_mode"] = str(values.get("mode") or "dino_sam")
+        settings["isolate_action"] = str(values.get("action") or "keep")
+        settings["isolate_use_tiled_dino"] = False
+        settings["sam_auto_profile"] = "QUALITY"
+        settings["isolate_crop"] = str(values.get("action") or "keep") != "erase"
+        settings["isolate_outside_white"] = bool(values.get("white") or False)
+        self._ui_store.set_settings(settings)
         job_id = self._prediction_controller.submit_isolate(
             settings=dict(settings),
-            target_labels=labels,
+            prompt=str(values.get("prompt") or "").strip(),
+            mode=str(values.get("mode") or "dino_sam"),
+            action=str(values.get("action") or "keep"),
             outside_value=255 if bool(settings.get("isolate_outside_white") or False) else 0,
             crop_to_bbox=bool(settings.get("isolate_crop") or False),
         )
@@ -122,7 +143,12 @@ class PredictionActions(QtCore.QObject):
             self._prediction_store.set_active_job(job_id)
             self._show_workspace("runs")
             self._persist_state()
-            self._show_status("Queued isolate with saved settings.", 4000)
+            prompt = str(values.get("prompt") or "").strip()
+            action_label = "erase" if str(values.get("action") or "keep") == "erase" else "isolate"
+            if prompt:
+                self._show_status(f"Queued {action_label} for '{prompt}' with saved settings.", 4000)
+            else:
+                self._show_status(f"Queued {action_label} with saved settings.", 4000)
 
     def on_roi_box_selected(self, roi_box_obj) -> None:
         pending = dict(self._pending_roi_submission or {})

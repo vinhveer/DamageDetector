@@ -11,6 +11,14 @@ from typing import Any, Sequence
 from torch_runtime import describe_device_fallback, select_device_str
 
 
+_SAM_AUTO_MAX_SIDE = 2048
+_SAM_AUTO_MAX_PIXELS = 4_194_304
+_SAM_AUTO_RETRY_MAX_SIDE = 1280
+_SAM_AUTO_RETRY_MAX_PIXELS = 1_572_864
+_SAM_AUTO_MPS_QUALITY_MAX_SIDE = 1536
+_SAM_AUTO_MPS_QUALITY_MAX_PIXELS = 2_359_296
+
+
 @dataclass(frozen=True)
 class SamParams:
     sam_checkpoint: str
@@ -37,6 +45,8 @@ class SamParams:
     sam_crop_nms_thresh: float = -1.0
     sam_crop_n_points_downscale_factor: int = -1
     sam_min_mask_region_area: int = -1
+    selection_mode: str = "default"
+    selection_prompt: str = ""
 
 
 class SamRunner:
@@ -62,10 +72,11 @@ class SamRunner:
         fallback = describe_device_fallback(params.device, device)
         if fallback is not None and log_fn is not None:
             log_fn(fallback)
+        requested_model_type = str(params.sam_model_type or "auto").strip().lower()
         needs_reload = (
             self._predictor is None
             or self._sam_checkpoint != params.sam_checkpoint
-            or self._sam_model_type != params.sam_model_type
+            or (requested_model_type != "auto" and self._sam_model_type != requested_model_type)
             or self._device != device
         )
         if not needs_reload:
@@ -126,6 +137,8 @@ class SamRunner:
                 sam_crop_nms_thresh=params.sam_crop_nms_thresh,
                 sam_crop_n_points_downscale_factor=params.sam_crop_n_points_downscale_factor,
                 sam_min_mask_region_area=params.sam_min_mask_region_area,
+                selection_mode=params.selection_mode,
+                selection_prompt=params.selection_prompt,
             )
             func = getattr(self, func_name)
             result = dict(func(tmp_path, sub_params, **kwargs) or {})
@@ -216,6 +229,124 @@ def _process_one_image_sam_only(
         score_mask_for_crack,
     )
 
+    def _auto_mask_scale(height: int, width: int, *, max_side: int, max_pixels: int) -> float:
+        scale = 1.0
+        longest = max(int(height), int(width))
+        pixels = max(1, int(height) * int(width))
+        if longest > int(max_side):
+            scale = min(scale, float(max_side) / float(longest))
+        if pixels > int(max_pixels):
+            scale = min(scale, (float(max_pixels) / float(pixels)) ** 0.5)
+        return min(1.0, float(scale))
+
+    def _resize_image(image: np.ndarray, scale: float) -> np.ndarray:
+        if scale >= 0.999:
+            return image
+        target_w = max(1, int(round(image.shape[1] * scale)))
+        target_h = max(1, int(round(image.shape[0] * scale)))
+        return cv2.resize(image, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+    def _resize_mask_to_image(mask01: np.ndarray) -> np.ndarray:
+        if mask01.shape[:2] == (h_img, w_img):
+            return mask01.astype(np.uint8)
+        resized = cv2.resize(mask01.astype(np.uint8), (w_img, h_img), interpolation=cv2.INTER_NEAREST)
+        return (resized > 0).astype(np.uint8)
+
+    def _is_memory_error(exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return any(token in text for token in ("invalid buffer size", "out of memory", "bad allocation", "insufficient memory"))
+
+    def _mask_center_score(mask01: np.ndarray, image_shape: tuple[int, int]) -> float:
+        ys, xs = np.where(mask01 > 0)
+        if len(xs) == 0 or len(ys) == 0:
+            return 0.0
+        h_ref, w_ref = int(image_shape[0]), int(image_shape[1])
+        cx = float(xs.mean())
+        cy = float(ys.mean())
+        nx = (cx - (w_ref / 2.0)) / max(w_ref / 2.0, 1.0)
+        ny = (cy - (h_ref / 2.0)) / max(h_ref / 2.0, 1.0)
+        dist = float((nx * nx + ny * ny) ** 0.5)
+        return max(0.0, 1.0 - min(dist / 1.41421356237, 1.0))
+
+    def _mask_edge_touches(mask01: np.ndarray) -> int:
+        touches = 0
+        if np.any(mask01[0, :] > 0):
+            touches += 1
+        if np.any(mask01[-1, :] > 0):
+            touches += 1
+        if np.any(mask01[:, 0] > 0):
+            touches += 1
+        if np.any(mask01[:, -1] > 0):
+            touches += 1
+        return touches
+
+    def _build_detection(mask01: np.ndarray, *, label: str, score: float, index: int) -> dict[str, Any] | None:
+        if int(np.count_nonzero(mask01)) == 0:
+            return None
+        bbox = _mask_bbox(mask01)
+        if bbox is None:
+            return None
+        success, png_bytes = cv2.imencode(".png", mask01.astype(np.uint8) * 255)
+        mask_b64 = base64.b64encode(png_bytes.tobytes()).decode("ascii") if success else None
+        return {
+            "label": label,
+            "score": float(score),
+            "box": [float(bbox[0]), float(bbox[1]), float(bbox[2] - 1), float(bbox[3] - 1)],
+            "mask_b64": mask_b64,
+            "model_name": "SamOnlyAuto",
+            "mask_index": int(index),
+        }
+
+    def _build_auto_generator(profile_name: str, *, safe_mode: bool):
+        upper_profile = str(profile_name or "ULTRA").strip().upper()
+        overrides = {
+            "points_per_side": params.sam_points_per_side,
+            "points_per_batch": params.sam_points_per_batch,
+            "pred_iou_thresh": params.sam_pred_iou_thresh,
+            "stability_score_thresh": params.sam_stability_score_thresh,
+            "stability_score_offset": params.sam_stability_score_offset,
+            "box_nms_thresh": params.sam_box_nms_thresh,
+            "crop_n_layers": params.sam_crop_n_layers,
+            "crop_overlap_ratio": params.sam_crop_overlap_ratio,
+            "crop_nms_thresh": params.sam_crop_nms_thresh,
+            "crop_n_points_downscale_factor": params.sam_crop_n_points_downscale_factor,
+            "min_mask_region_area": params.sam_min_mask_region_area,
+        }
+        if safe_mode:
+            if upper_profile == "QUALITY":
+                overrides.update(
+                    {
+                        "points_per_side": 16 if int(params.sam_points_per_side) < 0 else min(int(params.sam_points_per_side), 16),
+                        "points_per_batch": 32 if int(params.sam_points_per_batch) < 0 else min(int(params.sam_points_per_batch), 32),
+                        "crop_n_layers": 0 if int(params.sam_crop_n_layers) < 0 else min(int(params.sam_crop_n_layers), 0),
+                        "crop_n_points_downscale_factor": 2
+                        if int(params.sam_crop_n_points_downscale_factor) < 0
+                        else max(int(params.sam_crop_n_points_downscale_factor), 2),
+                        "min_mask_region_area": 128
+                        if int(params.sam_min_mask_region_area) < 0
+                        else max(int(params.sam_min_mask_region_area), 128),
+                    }
+                )
+            else:
+                overrides.update(
+                    {
+                        "points_per_side": 8 if int(params.sam_points_per_side) < 0 else min(int(params.sam_points_per_side), 8),
+                        "points_per_batch": 16 if int(params.sam_points_per_batch) < 0 else min(int(params.sam_points_per_batch), 16),
+                        "crop_n_layers": 0 if int(params.sam_crop_n_layers) < 0 else min(int(params.sam_crop_n_layers), 0),
+                        "crop_n_points_downscale_factor": 4
+                        if int(params.sam_crop_n_points_downscale_factor) < 0
+                        else max(int(params.sam_crop_n_points_downscale_factor), 4),
+                        "min_mask_region_area": 256
+                        if int(params.sam_min_mask_region_area) < 0
+                        else max(int(params.sam_min_mask_region_area), 256),
+                    }
+                )
+        return make_sam_auto_mask_generator(
+            getattr(predictor, "model"),
+            profile=profile_name,
+            **overrides,
+        )
+
     bgr = cv2.imread(image_path)
     if bgr is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
@@ -237,24 +368,49 @@ def _process_one_image_sam_only(
         profile = "QUALITY"
     else:
         profile = "ULTRA"
-    auto_gen = make_sam_auto_mask_generator(
-        getattr(predictor, "model"),
-        profile=profile,
-        points_per_side=params.sam_points_per_side,
-        points_per_batch=params.sam_points_per_batch,
-        pred_iou_thresh=params.sam_pred_iou_thresh,
-        stability_score_thresh=params.sam_stability_score_thresh,
-        stability_score_offset=params.sam_stability_score_offset,
-        box_nms_thresh=params.sam_box_nms_thresh,
-        crop_n_layers=params.sam_crop_n_layers,
-        crop_overlap_ratio=params.sam_crop_overlap_ratio,
-        crop_nms_thresh=params.sam_crop_nms_thresh,
-        crop_n_points_downscale_factor=params.sam_crop_n_points_downscale_factor,
-        min_mask_region_area=params.sam_min_mask_region_area,
+    if str(device).lower() == "mps" and profile == "QUALITY":
+        work_scale = _auto_mask_scale(
+            h_img,
+            w_img,
+            max_side=min(_SAM_AUTO_MAX_SIDE, _SAM_AUTO_MPS_QUALITY_MAX_SIDE),
+            max_pixels=min(_SAM_AUTO_MAX_PIXELS, _SAM_AUTO_MPS_QUALITY_MAX_PIXELS),
+        )
+    else:
+        work_scale = _auto_mask_scale(h_img, w_img, max_side=_SAM_AUTO_MAX_SIDE, max_pixels=_SAM_AUTO_MAX_PIXELS)
+    work_bgr = _resize_image(bgr, work_scale)
+    work_rgb = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2RGB)
+    h_work, w_work = work_bgr.shape[:2]
+    preemptive_safe_mode = str(device).lower() == "mps" and profile in {"QUALITY", "ULTRA"} and (
+        max(h_work, w_work) >= 1536 or (h_work * w_work) >= 2_000_000
     )
+    auto_gen = _build_auto_generator(profile, safe_mode=preemptive_safe_mode)
     if log_fn is not None:
         log_fn(f"SAM only auto-mask mode: profile={profile}")
-    masks_info = auto_gen.generate(rgb)
+        if work_scale < 0.999:
+            log_fn(f"SAM only auto-mask mode: resized {w_img}x{h_img} -> {w_work}x{h_work} for memory safety")
+        if preemptive_safe_mode:
+            log_fn("SAM only auto-mask mode: using adjusted settings for large image on MPS")
+        log_fn("SAM only auto-mask mode: generating masks...")
+    try:
+        masks_info = auto_gen.generate(work_rgb)
+    except RuntimeError as exc:
+        if not _is_memory_error(exc):
+            raise
+        retry_scale = min(
+            work_scale,
+            _auto_mask_scale(h_img, w_img, max_side=_SAM_AUTO_RETRY_MAX_SIDE, max_pixels=_SAM_AUTO_RETRY_MAX_PIXELS),
+        )
+        work_scale = retry_scale
+        work_bgr = _resize_image(bgr, work_scale)
+        work_rgb = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2RGB)
+        h_work, w_work = work_bgr.shape[:2]
+        if log_fn is not None:
+            log_fn(
+                "SAM auto-mask hit memory limits; retrying with safer settings "
+                f"at {w_work}x{h_work}."
+            )
+        auto_gen = _build_auto_generator("FAST", safe_mode=True)
+        masks_info = auto_gen.generate(work_rgb)
     if not masks_info:
         cv2.imwrite(overlay_path, bgr)
         cv2.imwrite(mask_path, np.zeros((h_img, w_img), dtype=np.uint8))
@@ -262,13 +418,17 @@ def _process_one_image_sam_only(
     if log_fn is not None:
         log_fn(f"SAM only auto-mask mode: generated {len(masks_info)} masks")
 
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(work_bgr, cv2.COLOR_BGR2GRAY)
     task_group = str(params.task_group or "crack_only").strip().lower()
+    selection_mode = str(params.selection_mode or "default").strip().lower()
+    selection_prompt = str(params.selection_prompt or "").strip()
+    detection_prefix = selection_prompt or ("DamageMask" if task_group == "more_damage" else "CrackMask")
     rng = np.random.default_rng(int(params.seed))
     disp = bgr.copy()
     merged = np.zeros((h_img, w_img), dtype=np.uint8)
+    final_detections: list[dict[str, Any]] = []
     if task_group == "more_damage":
-        ranked_masks: list[tuple[float, np.ndarray]] = []
+        ranked_masks: list[tuple[float, np.ndarray, dict[str, float], int]] = []
         for info in masks_info:
             if stop_checker is not None and stop_checker():
                 return {"stopped": True}
@@ -280,23 +440,69 @@ def _process_one_image_sam_only(
                 continue
             predicted_iou = float(info.get("predicted_iou", 0.0))
             stability = float(info.get("stability_score", 0.0))
-            ranked_masks.append((predicted_iou + 0.2 * stability, mask))
+            score = predicted_iou + 0.2 * stability
+            stats = _mask_stats(mask, (h_work, w_work))
+            if stats is None:
+                continue
+            edge_touches = _mask_edge_touches(mask)
+            if selection_mode == "isolate":
+                center_score = _mask_center_score(mask, (h_work, w_work))
+                bbox_coverage = 0.5 * ((stats["bbox_w"] / max(float(w_work), 1.0)) + (stats["bbox_h"] / max(float(h_work), 1.0)))
+                score += 2.0 * center_score
+                score += 2.0 * min(bbox_coverage, 0.75)
+                if 0.04 <= stats["image_ratio"] <= 0.75:
+                    score += 2.0
+                elif stats["image_ratio"] < 0.015:
+                    score -= 2.0
+                elif stats["image_ratio"] < 0.04:
+                    score -= 0.5
+                score -= 0.8 * float(edge_touches)
+                if edge_touches >= 3:
+                    score -= 2.5
+                if stats["fill_ratio"] > 0.92 and edge_touches >= 1:
+                    score -= 1.5
+                if stats["image_ratio"] > 0.82:
+                    score -= 3.5
+            ranked_masks.append((score, mask, stats, edge_touches))
         ranked_masks.sort(key=lambda item: item[0], reverse=True)
-        kept_damage = ranked_masks[: max(1, int(params.more_damage_max_masks))]
+        keep_count = max(1, int(params.more_damage_max_masks))
+        if selection_mode == "isolate":
+            top_score = ranked_masks[0][0] if ranked_masks else float("-inf")
+            filtered = [
+                item for item in ranked_masks
+                if item[0] >= top_score - 2.0 and (item[2]["image_ratio"] >= 0.03 or item[2]["bbox_h"] >= 0.18 * h_work)
+            ]
+            keep_count = min(max(2, keep_count), 6)
+            kept_damage = filtered[:keep_count] if filtered else ranked_masks[:1]
+        else:
+            kept_damage = ranked_masks[:keep_count]
         if log_fn is not None:
-            log_fn(f"SAM only auto-mask mode: kept {len(kept_damage)} damage masks")
-        for _score, chosen in kept_damage:
+            if selection_mode == "isolate":
+                suffix = f" for prompt='{selection_prompt}'" if selection_prompt else ""
+                log_fn(f"SAM only auto-mask mode: kept {len(kept_damage)} isolate-focused mask{suffix}")
+            else:
+                log_fn(f"SAM only auto-mask mode: kept {len(kept_damage)} damage masks")
+        for det_index, (_score, chosen, _stats, _edge_touches) in enumerate(kept_damage, start=1):
             if params.invert_mask:
                 chosen = (1 - chosen).astype(np.uint8)
             chosen = filter_small_components(chosen, int(params.sam_min_component_area))
             if int(params.sam_dilate_iters) > 0 and int(np.count_nonzero(chosen)) > 0:
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                 chosen = cv2.dilate(chosen.astype(np.uint8), kernel, iterations=int(params.sam_dilate_iters)).astype(np.uint8)
+            chosen = _resize_mask_to_image(chosen)
             if int(np.count_nonzero(chosen)) == 0:
                 continue
             merged = np.maximum(merged, chosen)
             color = rng.integers(0, 255, (3,), dtype=np.uint8)
             disp = overlay_mask(disp, chosen, color=color, alpha=float(params.overlay_alpha))
+            det = _build_detection(
+                chosen,
+                label=f"{detection_prefix} #{det_index}" if len(kept_damage) > 1 else detection_prefix,
+                score=_score,
+                index=det_index,
+            )
+            if det is not None:
+                final_detections.append(det)
     else:
         ranked_masks: list[tuple[float, np.ndarray, dict[str, float], float, float]] = []
         for info in masks_info:
@@ -306,11 +512,11 @@ def _process_one_image_sam_only(
             if seg is None:
                 continue
             mask = seg.astype(np.uint8)
-            stats = _mask_stats(mask, (h_img, w_img))
+            stats = _mask_stats(mask, (h_work, w_work))
             if stats is None:
                 continue
             stability = float(info.get("stability_score", 0.0))
-            shape_score = score_mask_for_crack(mask, stability, (h_img, w_img))
+            shape_score = score_mask_for_crack(mask, stability, (h_work, w_work))
             darkness_score = score_mask_darkness(mask, gray)
             ranked_masks.append((shape_score + 0.35 * darkness_score, mask, stats, stability, darkness_score))
         ranked_masks.sort(key=lambda x: x[0], reverse=True)
@@ -334,36 +540,33 @@ def _process_one_image_sam_only(
         if log_fn is not None:
             log_fn(f"SAM only auto-mask mode: kept {len(kept)} crack-like masks")
 
-        for _score, chosen, _stats, _stability, _darkness in kept:
+        for det_index, (_score, chosen, _stats, _stability, _darkness) in enumerate(kept, start=1):
             if params.invert_mask:
                 chosen = (1 - chosen).astype(np.uint8)
             chosen = filter_small_components(chosen, int(params.sam_min_component_area))
             if int(params.sam_dilate_iters) > 0 and int(np.count_nonzero(chosen)) > 0:
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
                 chosen = cv2.dilate(chosen.astype(np.uint8), kernel, iterations=int(params.sam_dilate_iters)).astype(np.uint8)
+            chosen = _resize_mask_to_image(chosen)
             if int(np.count_nonzero(chosen)) == 0:
                 continue
             merged = np.maximum(merged, chosen)
             color = rng.integers(0, 255, (3,), dtype=np.uint8)
             disp = overlay_mask(disp, chosen, color=color, alpha=float(params.overlay_alpha))
+            det = _build_detection(
+                chosen,
+                label=f"{detection_prefix} #{det_index}" if len(kept) > 1 else detection_prefix,
+                score=_score,
+                index=det_index,
+            )
+            if det is not None:
+                final_detections.append(det)
 
     if int(np.count_nonzero(merged)) == 0:
         cv2.imwrite(overlay_path, bgr)
         cv2.imwrite(mask_path, np.zeros((h_img, w_img), dtype=np.uint8))
         return {"image_path": str(image_path), "overlay_path": overlay_path, "mask_path": mask_path, "output_dir": params.output_dir, "detections": []}
 
-    success, png_bytes = cv2.imencode(".png", merged * 255)
-    mask_b64 = base64.b64encode(png_bytes.tobytes()).decode("ascii") if success else None
-    bbox = _mask_bbox(merged) or (0, 0, w_img, h_img)
-    detections = [
-        {
-            "label": "DamageMask" if task_group == "more_damage" else "CrackMask",
-            "score": 1.0,
-            "box": [float(bbox[0]), float(bbox[1]), float(bbox[2] - 1), float(bbox[3] - 1)],
-            "mask_b64": mask_b64,
-            "model_name": "SamOnlyAuto",
-        }
-    ]
     cv2.imwrite(overlay_path, disp)
     cv2.imwrite(mask_path, merged * 255)
     return {
@@ -371,8 +574,8 @@ def _process_one_image_sam_only(
         "overlay_path": overlay_path,
         "mask_path": mask_path,
         "output_dir": params.output_dir,
-        "masks_saved": 1,
-        "detections": detections,
+        "masks_saved": len(final_detections),
+        "detections": final_detections,
     }
 
 

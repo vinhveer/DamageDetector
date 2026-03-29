@@ -5,6 +5,8 @@ from typing import Any
 from inference_api.contracts import InferenceRequest
 from inference_api.prediction_models import (
     DETECTION_DINO,
+    DETECTION_NONE,
+    SEGMENTATION_SAM,
     SEGMENTATION_SAM_LORA,
     SEGMENTATION_UNET,
     TASK_GROUP_CRACK_ONLY,
@@ -44,6 +46,31 @@ def build_prediction_request(
         params["sam"] = _build_sam_params(settings, output_dir=out_dir, roi_box=roi_box, task_group=resolved.task_group)
     if resolved.detection_model == DETECTION_DINO:
         params["dino"] = _build_dino_params(settings, output_dir=out_dir, roi_box=roi_box, task_group=resolved.task_group)
+        if resolved.segmentation_model in {SEGMENTATION_SAM, SEGMENTATION_SAM_LORA}:
+            params["use_tiled_dino"] = bool(settings.get("predict_use_tiled_dino") if settings.get("predict_use_tiled_dino") is not None else True)
+            params["tile_trigger_px"] = _int_value(settings, "predict_tile_trigger_px", 512)
+            params["target_labels"] = _queries_for_task_group(resolved.task_group, settings)
+            crack_mask_model = _normalize_crack_mask_model(settings.get("more_damage_crack_mask_model"))
+            if resolved.task_group == TASK_GROUP_MORE_DAMAGE and crack_mask_model != "off":
+                params["crack_mask_model"] = crack_mask_model
+                if crack_mask_model == SEGMENTATION_SAM_LORA:
+                    _require_sam_lora_settings(settings)
+                    params["crack_sam"] = _build_sam_lora_params(
+                        settings,
+                        output_dir=out_dir,
+                        roi_box=roi_box,
+                        task_group=TASK_GROUP_CRACK_ONLY,
+                    )
+                elif crack_mask_model == SEGMENTATION_UNET:
+                    _require_unet_settings(settings)
+                    params["crack_unet"] = _build_unet_params(
+                        settings,
+                        output_dir=out_dir,
+                        roi_box=roi_box,
+                        task_group=TASK_GROUP_CRACK_ONLY,
+                    )
+                else:
+                    raise ValueError(f"Unsupported crack mask model: {crack_mask_model}")
     return InferenceRequest(
         workflow=resolved.workflow,
         image_path=image_path,
@@ -64,40 +91,71 @@ def build_isolate_request(
     output_dir: str | None = None,
     roi_box: tuple[int, int, int, int] | None = None,
     target_labels: list[str] | None = None,
+    prompt: str | None = None,
+    mode: str | None = None,
+    action: str | None = None,
     outside_value: int | None = None,
     crop_to_bbox: bool | None = None,
 ) -> InferenceRequest:
     _require_sam_settings(settings)
-    missing = _require_dino_settings(settings)
-    if missing is not None:
-        raise ValueError(missing)
     out_dir = str(output_dir or "")
+    isolate_mode = str(mode or settings.get("isolate_mode") or "dino_sam").strip().lower()
+    sam_params = _build_sam_params(settings, output_dir=out_dir, roi_box=roi_box, task_group=TASK_GROUP_MORE_DAMAGE)
+    sam_params.update(
+        {
+            "selection_mode": "isolate" if isolate_mode == "sam_only" else "default",
+            "selection_prompt": str(prompt or "").strip(),
+        }
+    )
+    params: dict[str, Any] = {
+        "sam": sam_params,
+        "prompt": str(prompt or "").strip(),
+        "target_labels": [label.strip() for label in (target_labels or []) if str(label).strip()],
+        "outside_value": int(outside_value or 0),
+        "crop_to_bbox": bool(crop_to_bbox or False),
+        "action": str(action or settings.get("isolate_action") or "keep").strip().lower(),
+        "mode": isolate_mode,
+        "use_tiled_dino": bool(settings.get("isolate_use_tiled_dino") if settings.get("isolate_use_tiled_dino") is not None else True),
+        "tile_trigger_px": _int_value(settings, "isolate_tile_trigger_px", 512),
+    }
+    detection_model = DETECTION_NONE
+    detection_model_label = "No Detect"
+    resolved_detection_model = DETECTION_NONE
+    if isolate_mode == "dino_sam":
+        missing = _require_dino_settings(settings)
+        if missing is not None:
+            raise ValueError(missing)
+        dino_params = _build_dino_params(
+            settings,
+            output_dir=out_dir,
+            roi_box=roi_box,
+            task_group=TASK_GROUP_MORE_DAMAGE,
+        )
+        dino_params["text_queries"] = _split_queries(prompt) or _queries_for_task_group(TASK_GROUP_MORE_DAMAGE, settings)
+        params["dino"] = dino_params
+        detection_model = DETECTION_DINO
+        detection_model_label = "DINO"
+        resolved_detection_model = DETECTION_DINO
     return InferenceRequest(
         workflow="isolate",
         image_path=image_path,
         roi_box=roi_box,
-        params={
-            "sam": _build_sam_params(settings, output_dir=out_dir, roi_box=roi_box, task_group=TASK_GROUP_MORE_DAMAGE),
-            "dino": _build_dino_params(settings, output_dir=out_dir, roi_box=roi_box, task_group=TASK_GROUP_MORE_DAMAGE),
-            "target_labels": [label.strip() for label in (target_labels or []) if str(label).strip()],
-            "outside_value": int(outside_value or 0),
-            "crop_to_bbox": bool(crop_to_bbox or False),
-        },
+        params=params,
         selection={
             "task_group": TASK_GROUP_MORE_DAMAGE,
             "segmentation_model": "sam",
-            "detection_model": "dino",
+            "detection_model": detection_model,
             "scope": "current",
             "task_group_label": "Predict for More Damage",
             "segmentation_model_label": "SAM",
-            "detection_model_label": "DINO",
+            "detection_model_label": detection_model_label,
             "scope_label": "Current image",
         },
         resolved={
             "workflow": "isolate",
             "task_group": TASK_GROUP_MORE_DAMAGE,
             "segmentation_model": "sam",
-            "detection_model": "dino",
+            "detection_model": resolved_detection_model,
         },
         client_tag="editor_app",
         source="editor",
@@ -106,6 +164,13 @@ def build_isolate_request(
 
 def _split_queries(raw: Any) -> list[str]:
     return [part.strip() for part in str(raw or "").split(",") if part.strip()]
+
+
+def _normalize_crack_mask_model(raw: Any) -> str:
+    value = str(raw or "off").strip().lower()
+    if value in {"", "none"}:
+        return "off"
+    return value
 
 
 def _int_value(settings: dict[str, Any], key: str, default: int) -> int:

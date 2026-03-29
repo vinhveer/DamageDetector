@@ -12,6 +12,23 @@ from typing import Any, List, Sequence
 
 from torch_runtime import describe_device_fallback, get_torch, select_device_str
 
+_RECURSIVE_TILE_SIZE = 512
+_RECURSIVE_TILE_OVERLAP = 64
+_RECURSIVE_MIN_VALID_COVERAGE = 0.30
+_RECURSIVE_MEDIUM_TILE_SIZE = 1024
+_RECURSIVE_MEDIUM_TILE_OVERLAP = 160
+_RECURSIVE_MEDIUM_MIN_VALID_COVERAGE = 0.15
+_RECURSIVE_LARGE_TILE_SIZE = 1536
+_RECURSIVE_LARGE_TILE_OVERLAP = 256
+_RECURSIVE_LARGE_MIN_VALID_COVERAGE = 0.05
+_RECURSIVE_MIN_REFINED_COVERAGE = 0.35
+_RECURSIVE_TILE_CONTEXT_PAD = 16
+_RECURSIVE_MIN_REFINED_WIDTH = 96
+_RECURSIVE_MIN_REFINED_HEIGHT = 96
+_RECURSIVE_MIN_COMPONENT_AREA = 1024
+_DINO_BOX_BLACK_RATIO_REJECT = 0.40
+_DINO_BLACK_PIXEL_THRESHOLD = 12
+
 
 @dataclass(frozen=True)
 class DinoParams:
@@ -197,74 +214,495 @@ def _filter_parent_boxes(boxes_info: list[tuple[Any, str, float]], contain_thres
     return [boxes_info[i] for i in range(count) if not is_parent[i]]
 
 
-def _recursive_zoom_detect(
-    rgb: Any,
-    crop_box: tuple[int, int, int, int],
-    gdino_items: tuple[Any, Any, str],
-    text_queries: Sequence[str],
-    box_threshold: float,
-    text_threshold: float,
-    current_depth: int,
-    max_depth: int,
-    *,
-    min_box_px: int = 48,
-    stop_checker=None,
-    log_fn=None,
-) -> list[tuple[Any, str, float]]:
-    import numpy as np
-    from PIL import Image
+def _tile_positions(start: int, end: int, tile_size: int, overlap: int) -> list[int]:
+    span = max(0, int(end) - int(start))
+    if span <= tile_size:
+        return [int(start)]
+    step = max(1, int(tile_size) - int(overlap))
+    positions: list[int] = []
+    pos = int(start)
+    last = int(end) - int(tile_size)
+    while pos < last:
+        positions.append(pos)
+        pos += step
+    positions.append(last)
+    deduped: list[int] = []
+    seen = set()
+    for value in positions:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
 
-    crop_x1, crop_y1, crop_x2, crop_y2 = crop_box
-    width = crop_x2 - crop_x1
-    height = crop_y2 - crop_y1
-    if width < min_box_px or height < min_box_px:
-        return []
-    if stop_checker is not None and stop_checker():
-        raise RuntimeError("Stopped")
-    processor, gdino, device = gdino_items
-    crop_rgb = rgb[crop_y1:crop_y2, crop_x1:crop_x2]
-    pil_crop = Image.fromarray(crop_rgb)
-    detections = run_text_boxes(
-        processor=processor,
-        gdino=gdino,
-        device=device,
-        pil_image=pil_crop,
-        text_queries=text_queries,
-        box_threshold=box_threshold,
-        text_threshold=text_threshold,
-    )
-    if not detections:
-        return []
-    detections_full: list[tuple[Any, str, float]] = []
-    for det in detections:
-        rel_x1, rel_y1, rel_x2, rel_y2 = det.box_xyxy.tolist()
-        mapped = np.array([rel_x1 + crop_x1, rel_y1 + crop_y1, rel_x2 + crop_x1, rel_y2 + crop_y1], dtype=np.float32)
-        detections_full.append((mapped, det.label, float(det.score)))
-    if log_fn is not None and detections_full:
-        log_fn(f"  [depth {current_depth}] crop ({crop_x1},{crop_y1})-({crop_x2},{crop_y2}) -> {len(detections_full)} dets")
-    if current_depth >= max_depth:
-        return detections_full
-    result: list[tuple[Any, str, float]] = []
-    for box_full, label, score in detections_full:
-        child_x1, child_y1, child_x2, child_y2 = (int(v) for v in box_full.tolist())
-        children = _recursive_zoom_detect(
-            rgb,
-            (child_x1, child_y1, child_x2, child_y2),
-            gdino_items,
-            text_queries,
-            box_threshold,
-            text_threshold,
-            current_depth + 1,
-            max_depth,
-            min_box_px=min_box_px,
-            stop_checker=stop_checker,
-            log_fn=log_fn,
+
+def _mask_bbox(mask01: Any) -> tuple[int, int, int, int] | None:
+    import numpy as np
+
+    ys, xs = np.where(mask01 > 0)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def _normalize_band_to_uint8(band: Any, valid_mask: Any) -> Any:
+    import numpy as np
+
+    band_f = band.astype(np.float32, copy=False)
+    valid_values = band_f[valid_mask > 0]
+    if valid_values.size == 0:
+        valid_values = band_f.reshape(-1)
+    lo = float(np.percentile(valid_values, 2.0))
+    hi = float(np.percentile(valid_values, 98.0))
+    if hi <= lo:
+        lo = float(valid_values.min())
+        hi = float(valid_values.max())
+    if hi <= lo:
+        return np.zeros_like(band_f, dtype=np.uint8)
+    scaled = np.clip((band_f - lo) / (hi - lo), 0.0, 1.0)
+    return (scaled * 255.0).astype(np.uint8)
+
+
+def _load_tiff_with_rasterio(image_path: str, *, log_fn=None) -> tuple[Any, Any] | None:
+    import numpy as np
+
+    try:
+        import rasterio
+    except Exception as exc:
+        if log_fn is not None:
+            log_fn(f"Valid-mask fallback: rasterio unavailable ({exc}). Using OpenCV heuristic.")
+        return None
+
+    try:
+        with rasterio.open(image_path) as dataset:
+            valid_mask = dataset.dataset_mask() > 0
+            bands = dataset.read()
+    except Exception as exc:
+        if log_fn is not None:
+            log_fn(f"Valid-mask fallback: cannot read raster mask ({exc}). Using OpenCV heuristic.")
+        return None
+
+    if bands.ndim != 3 or bands.shape[0] <= 0:
+        if log_fn is not None:
+            log_fn("Valid-mask fallback: TIFF bands shape unsupported. Using OpenCV heuristic.")
+        return None
+
+    if bands.shape[0] >= 3:
+        chosen = bands[:3]
+    else:
+        chosen = np.repeat(bands[:1], 3, axis=0)
+    rgb = np.stack([_normalize_band_to_uint8(chosen[idx], valid_mask) for idx in range(3)], axis=-1)
+    return rgb, valid_mask.astype(bool)
+
+
+def _build_opencv_valid_mask(image_rgb: Any) -> Any:
+    import cv2
+    import numpy as np
+
+    dark_mask = (np.max(image_rgb[:, :, :3], axis=2) <= _DINO_BLACK_PIXEL_THRESHOLD).astype(np.uint8)
+    if int(dark_mask.sum()) == 0:
+        return np.ones(image_rgb.shape[:2], dtype=bool)
+    _, labels = cv2.connectedComponents(dark_mask, connectivity=8)
+    border_labels = np.unique(
+        np.concatenate(
+            [
+                labels[0, :],
+                labels[-1, :],
+                labels[:, 0],
+                labels[:, -1],
+            ]
         )
-        if children:
-            result.extend(children)
-        else:
-            result.append((box_full, label, score))
-    return result
+    )
+    invalid_mask = np.isin(labels, border_labels) & (dark_mask > 0)
+    valid_mask = (~invalid_mask).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    valid_mask = cv2.morphologyEx(valid_mask * 255, cv2.MORPH_CLOSE, kernel, iterations=1)
+    return valid_mask > 0
+
+
+def _build_valid_mask(image_path: str, image_rgb: Any, *, log_fn=None) -> tuple[Any, Any, str]:
+    lower = str(image_path or "").lower()
+    if lower.endswith((".tif", ".tiff")):
+        raster_data = _load_tiff_with_rasterio(image_path, log_fn=log_fn)
+        if raster_data is not None:
+            rgb, valid_mask = raster_data
+            return rgb, valid_mask, "rasterio_dataset_mask"
+    return image_rgb, _build_opencv_valid_mask(image_rgb), "opencv_valid_mask"
+
+
+def _rotate_image_and_mask(image_rgb: Any, valid_mask: Any, angle_deg: float) -> tuple[Any, Any, Any, Any]:
+    import cv2
+    import numpy as np
+
+    height, width = image_rgb.shape[:2]
+    center = (width / 2.0, height / 2.0)
+    matrix = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+    cos_v = abs(float(matrix[0, 0]))
+    sin_v = abs(float(matrix[0, 1]))
+    bound_w = int(round((height * sin_v) + (width * cos_v)))
+    bound_h = int(round((height * cos_v) + (width * sin_v)))
+    matrix[0, 2] += (bound_w / 2.0) - center[0]
+    matrix[1, 2] += (bound_h / 2.0) - center[1]
+    rotated_rgb = cv2.warpAffine(
+        image_rgb,
+        matrix,
+        (bound_w, bound_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    rotated_mask = cv2.warpAffine(
+        valid_mask.astype(np.uint8) * 255,
+        matrix,
+        (bound_w, bound_h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ) > 0
+    return rotated_rgb, rotated_mask, matrix, cv2.invertAffineTransform(matrix)
+
+
+def _compute_roi_occupancy(valid_mask: Any, roi_box: tuple[int, int, int, int] | None) -> float:
+    if roi_box is None:
+        return 0.0
+    x1, y1, x2, y2 = roi_box
+    area = max(1, int(x2 - x1) * int(y2 - y1))
+    valid_area = int(valid_mask[y1:y2, x1:x2].sum())
+    return float(valid_area) / float(area)
+
+
+def _compute_oriented_roi(image_rgb: Any, valid_mask: Any, *, log_fn=None) -> dict[str, Any]:
+    import cv2
+    import numpy as np
+
+    original_roi = _mask_bbox(valid_mask)
+    if original_roi is None:
+        return {
+            "rgb": image_rgb,
+            "valid_mask": valid_mask,
+            "roi_box": None,
+            "rotation_angle": 0.0,
+            "inverse_matrix": None,
+            "rotated": False,
+        }
+
+    contours, _ = cv2.findContours((valid_mask.astype(np.uint8) * 255), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return {
+            "rgb": image_rgb,
+            "valid_mask": valid_mask,
+            "roi_box": original_roi,
+            "rotation_angle": 0.0,
+            "inverse_matrix": None,
+            "rotated": False,
+        }
+
+    contour = max(contours, key=cv2.contourArea)
+    (_, _), (rect_w, rect_h), angle = cv2.minAreaRect(contour)
+    if rect_w <= 1 or rect_h <= 1:
+        return {
+            "rgb": image_rgb,
+            "valid_mask": valid_mask,
+            "roi_box": original_roi,
+            "rotation_angle": 0.0,
+            "inverse_matrix": None,
+            "rotated": False,
+        }
+
+    deskew_angle = float(angle)
+    if rect_w < rect_h:
+        deskew_angle += 90.0
+    while deskew_angle <= -45.0:
+        deskew_angle += 90.0
+    while deskew_angle > 45.0:
+        deskew_angle -= 90.0
+
+    original_occupancy = _compute_roi_occupancy(valid_mask, original_roi)
+    if abs(deskew_angle) < 1.0:
+        return {
+            "rgb": image_rgb,
+            "valid_mask": valid_mask,
+            "roi_box": original_roi,
+            "rotation_angle": 0.0,
+            "inverse_matrix": None,
+            "rotated": False,
+        }
+
+    rotated_rgb, rotated_mask, _matrix, inverse_matrix = _rotate_image_and_mask(image_rgb, valid_mask, deskew_angle)
+    rotated_roi = _mask_bbox(rotated_mask)
+    rotated_occupancy = _compute_roi_occupancy(rotated_mask, rotated_roi)
+
+    if rotated_roi is None or rotated_occupancy <= (original_occupancy + 0.05):
+        return {
+            "rgb": image_rgb,
+            "valid_mask": valid_mask,
+            "roi_box": original_roi,
+            "rotation_angle": 0.0,
+            "inverse_matrix": None,
+            "rotated": False,
+        }
+
+    if log_fn is not None:
+        log_fn(
+            f"Oriented ROI: angle={deskew_angle:.2f}deg "
+            f"occupancy {original_occupancy:.3f}->{rotated_occupancy:.3f}"
+        )
+
+    return {
+        "rgb": rotated_rgb,
+        "valid_mask": rotated_mask,
+        "roi_box": rotated_roi,
+        "rotation_angle": deskew_angle,
+        "inverse_matrix": inverse_matrix,
+        "rotated": True,
+    }
+
+
+def _generate_valid_tiles(
+    valid_mask: Any,
+    roi_box: tuple[int, int, int, int],
+    *,
+    tile_size: int,
+    overlap: int,
+    min_valid_coverage: float,
+    allow_refine: bool = True,
+) -> tuple[list[tuple[int, int, int, int, float, str]], int, int, int]:
+    import cv2
+
+    x1, y1, x2, y2 = roi_box
+    integral = cv2.integral(valid_mask.astype("uint8"))
+
+    def _coverage(ax1: int, ay1: int, ax2: int, ay2: int) -> float:
+        valid_pixels = int(integral[ay2, ax2] - integral[ay1, ax2] - integral[ay2, ax1] + integral[ay1, ax1])
+        area = max(1, int(ax2 - ax1) * int(ay2 - ay1))
+        return float(valid_pixels) / float(area)
+
+    def _expand_box_within_bounds(
+        box: tuple[int, int, int, int],
+        *,
+        bounds: tuple[int, int, int, int],
+        pad: int,
+        min_width: int,
+        min_height: int,
+    ) -> tuple[int, int, int, int]:
+        bx1, by1, bx2, by2 = [int(v) for v in box]
+        min_x, min_y, max_x, max_y = [int(v) for v in bounds]
+        bx1 = max(min_x, bx1 - int(pad))
+        by1 = max(min_y, by1 - int(pad))
+        bx2 = min(max_x, bx2 + int(pad))
+        by2 = min(max_y, by2 + int(pad))
+        width = bx2 - bx1
+        height = by2 - by1
+        if width < int(min_width):
+            grow = int(min_width) - width
+            left = grow // 2
+            right = grow - left
+            bx1 = max(min_x, bx1 - left)
+            bx2 = min(max_x, bx2 + right)
+            if (bx2 - bx1) < int(min_width):
+                deficit = int(min_width) - (bx2 - bx1)
+                if bx1 == min_x:
+                    bx2 = min(max_x, bx2 + deficit)
+                else:
+                    bx1 = max(min_x, bx1 - deficit)
+        if height < int(min_height):
+            grow = int(min_height) - height
+            top = grow // 2
+            bottom = grow - top
+            by1 = max(min_y, by1 - top)
+            by2 = min(max_y, by2 + bottom)
+            if (by2 - by1) < int(min_height):
+                deficit = int(min_height) - (by2 - by1)
+                if by1 == min_y:
+                    by2 = min(max_y, by2 + deficit)
+                else:
+                    by1 = max(min_y, by1 - deficit)
+        return int(bx1), int(by1), int(bx2), int(by2)
+
+    def _fit_crop_to_valid_bbox(tile_box: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
+        tile_x1, tile_y1, tile_x2, tile_y2 = tile_box
+        submask = valid_mask[tile_y1:tile_y2, tile_x1:tile_x2]
+        if submask.size == 0 or int(submask.sum()) == 0:
+            return None
+        local_bbox = _mask_bbox(submask)
+        if local_bbox is None:
+            return None
+        local_x1, local_y1, local_x2, local_y2 = local_bbox
+        return _expand_box_within_bounds(
+            (tile_x1 + local_x1, tile_y1 + local_y1, tile_x1 + local_x2, tile_y1 + local_y2),
+            bounds=tile_box,
+            pad=_RECURSIVE_TILE_CONTEXT_PAD,
+            min_width=_RECURSIVE_MIN_REFINED_WIDTH,
+            min_height=_RECURSIVE_MIN_REFINED_HEIGHT,
+        )
+
+    def _refine_tile_boxes(tile_box: tuple[int, int, int, int]) -> list[tuple[int, int, int, int]]:
+        tile_x1, tile_y1, tile_x2, tile_y2 = tile_box
+        submask = valid_mask[tile_y1:tile_y2, tile_x1:tile_x2]
+        if submask.size == 0 or int(submask.sum()) == 0:
+            return []
+        tile_h, tile_w = submask.shape[:2]
+        component_area_thresh = max(_RECURSIVE_MIN_COMPONENT_AREA, int(tile_h * tile_w * 0.01))
+        labels_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(submask.astype("uint8"), connectivity=8)
+        refined: list[tuple[int, int, int, int]] = []
+        for label_idx in range(1, int(labels_count)):
+            area = int(stats[label_idx, cv2.CC_STAT_AREA])
+            width = int(stats[label_idx, cv2.CC_STAT_WIDTH])
+            height = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
+            if area < component_area_thresh and max(width, height) < max(_RECURSIVE_MIN_REFINED_WIDTH, _RECURSIVE_MIN_REFINED_HEIGHT):
+                continue
+            local_x1 = int(stats[label_idx, cv2.CC_STAT_LEFT])
+            local_y1 = int(stats[label_idx, cv2.CC_STAT_TOP])
+            local_x2 = local_x1 + width
+            local_y2 = local_y1 + height
+            refined.append(
+                _expand_box_within_bounds(
+                    (tile_x1 + local_x1, tile_y1 + local_y1, tile_x1 + local_x2, tile_y1 + local_y2),
+                    bounds=tile_box,
+                    pad=_RECURSIVE_TILE_CONTEXT_PAD,
+                    min_width=_RECURSIVE_MIN_REFINED_WIDTH,
+                    min_height=_RECURSIVE_MIN_REFINED_HEIGHT,
+                )
+            )
+        if refined:
+            deduped: list[tuple[int, int, int, int]] = []
+            seen = set()
+            for candidate in sorted(refined, key=lambda item: (item[2] - item[0]) * (item[3] - item[1]), reverse=True):
+                key = tuple(int(v) for v in candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(candidate)
+            return deduped
+        fitted = _fit_crop_to_valid_bbox(tile_box)
+        return [fitted] if fitted is not None else []
+
+    tiles: list[tuple[int, int, int, int, float, str]] = []
+    x_positions = _tile_positions(x1, x2, tile_size, overlap)
+    y_positions = _tile_positions(y1, y2, tile_size, overlap)
+    total_tiles = len(x_positions) * len(y_positions)
+    skipped_tiles = 0
+    refined_tiles = 0
+    seen_tiles: set[tuple[int, int, int, int]] = set()
+    for tile_y1 in y_positions:
+        for tile_x1 in x_positions:
+            tile_x2 = min(x2, tile_x1 + tile_size)
+            tile_y2 = min(y2, tile_y1 + tile_size)
+            coverage = _coverage(tile_x1, tile_y1, tile_x2, tile_y2)
+            if coverage < float(min_valid_coverage):
+                if not allow_refine:
+                    skipped_tiles += 1
+                    continue
+                refined_candidates = _refine_tile_boxes((tile_x1, tile_y1, tile_x2, tile_y2))
+                kept_refined = 0
+                for refined_x1, refined_y1, refined_x2, refined_y2 in refined_candidates:
+                    refined_coverage = _coverage(refined_x1, refined_y1, refined_x2, refined_y2)
+                    if refined_coverage < _RECURSIVE_MIN_REFINED_COVERAGE:
+                        continue
+                    key = (int(refined_x1), int(refined_y1), int(refined_x2), int(refined_y2))
+                    if key in seen_tiles:
+                        continue
+                    seen_tiles.add(key)
+                    tiles.append((refined_x1, refined_y1, refined_x2, refined_y2, refined_coverage, "refined"))
+                    refined_tiles += 1
+                    kept_refined += 1
+                if kept_refined == 0:
+                    skipped_tiles += 1
+                continue
+            if allow_refine:
+                fitted_full = _fit_crop_to_valid_bbox((tile_x1, tile_y1, tile_x2, tile_y2))
+                if fitted_full is not None:
+                    fit_x1, fit_y1, fit_x2, fit_y2 = fitted_full
+                    fit_coverage = _coverage(fit_x1, fit_y1, fit_x2, fit_y2)
+                    tile_kind = "trimmed" if (fit_x1, fit_y1, fit_x2, fit_y2) != (tile_x1, tile_y1, tile_x2, tile_y2) else "full"
+                else:
+                    fit_x1, fit_y1, fit_x2, fit_y2 = tile_x1, tile_y1, tile_x2, tile_y2
+                    fit_coverage = coverage
+                    tile_kind = "full"
+            else:
+                fit_x1, fit_y1, fit_x2, fit_y2 = tile_x1, tile_y1, tile_x2, tile_y2
+                fit_coverage = coverage
+                tile_kind = "full"
+            key = (int(fit_x1), int(fit_y1), int(fit_x2), int(fit_y2))
+            if key in seen_tiles:
+                continue
+            seen_tiles.add(key)
+            tiles.append((fit_x1, fit_y1, fit_x2, fit_y2, fit_coverage, tile_kind))
+    return tiles, total_tiles, skipped_tiles, refined_tiles
+
+
+def _map_box_from_rotated_to_original(box_xyxy: Any, inverse_matrix: Any, *, original_width: int, original_height: int) -> Any:
+    import cv2
+    import numpy as np
+
+    if inverse_matrix is None:
+        return box_xyxy.astype(np.float32)
+    x1, y1, x2, y2 = [float(v) for v in box_xyxy]
+    points = np.array([[[x1, y1], [x2, y1], [x2, y2], [x1, y2]]], dtype=np.float32)
+    mapped = cv2.transform(points, inverse_matrix)[0]
+    mapped[:, 0] = np.clip(mapped[:, 0], 0.0, max(0.0, float(original_width - 1)))
+    mapped[:, 1] = np.clip(mapped[:, 1], 0.0, max(0.0, float(original_height - 1)))
+    return np.array(
+        [
+            float(mapped[:, 0].min()),
+            float(mapped[:, 1].min()),
+            float(mapped[:, 0].max()),
+            float(mapped[:, 1].max()),
+        ],
+        dtype=np.float32,
+    )
+
+
+def _mask_integral(mask01: Any) -> Any:
+    import cv2
+
+    return cv2.integral(mask01.astype("uint8"))
+
+
+def _pure_black_integral(image_rgb: Any) -> Any:
+    import numpy as np
+
+    black_mask = np.max(image_rgb[:, :, :3], axis=2) <= _DINO_BLACK_PIXEL_THRESHOLD
+    return _mask_integral(black_mask)
+
+
+def _box_valid_coverage(box_xyxy: Any, mask_integral: Any, *, width: int, height: int) -> float:
+    import math
+
+    x1, y1, x2, y2 = [float(v) for v in box_xyxy]
+    ix1 = max(0, min(width, int(math.floor(x1))))
+    iy1 = max(0, min(height, int(math.floor(y1))))
+    ix2 = max(0, min(width, int(math.ceil(x2))))
+    iy2 = max(0, min(height, int(math.ceil(y2))))
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    valid_pixels = int(mask_integral[iy2, ix2] - mask_integral[iy1, ix2] - mask_integral[iy2, ix1] + mask_integral[iy1, ix1])
+    area = max(1, int(ix2 - ix1) * int(iy2 - iy1))
+    return float(valid_pixels) / float(area)
+
+
+def _box_center_is_valid(box_xyxy: Any, valid_mask: Any) -> bool:
+    import numpy as np
+
+    height, width = valid_mask.shape[:2]
+    x1, y1, x2, y2 = [float(v) for v in box_xyxy]
+    cx = int(round((x1 + x2) * 0.5))
+    cy = int(round((y1 + y2) * 0.5))
+    cx = int(np.clip(cx, 0, max(0, width - 1)))
+    cy = int(np.clip(cy, 0, max(0, height - 1)))
+    return bool(valid_mask[cy, cx])
+
+
+def _box_is_fully_valid(box_xyxy: Any, mask_integral: Any, *, width: int, height: int) -> bool:
+    return _box_valid_coverage(box_xyxy, mask_integral, width=width, height=height) >= 1.0
+
+
+def _box_has_any_pure_black_pixels(box_xyxy: Any, black_integral: Any, *, width: int, height: int) -> bool:
+    return _box_valid_coverage(box_xyxy, black_integral, width=width, height=height) > 0.0
+
+
+def _box_black_ratio(box_xyxy: Any, black_integral: Any, *, width: int, height: int) -> float:
+    return _box_valid_coverage(box_xyxy, black_integral, width=width, height=height)
 
 
 class DinoRunner:
@@ -584,20 +1022,30 @@ class DinoRunner:
             )
             func = getattr(self, func_name)
             result = dict(func(tmp_path, sub_params, **kwargs) or {})
-            detections = []
-            for det in result.get("detections") or []:
-                item = dict(det)
-                box = item.get("box")
-                if isinstance(box, list) and len(box) == 4:
-                    item["box"] = [
-                        float(box[0]) + roi_x1,
-                        float(box[1]) + roi_y1,
-                        float(box[2]) + roi_x1,
-                        float(box[3]) + roi_y1,
-                    ]
-                detections.append(item)
+
+            def _shift_boxes(items: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]]:
+                shifted: list[dict[str, Any]] = []
+                for det in items or []:
+                    item = dict(det)
+                    box = item.get("box")
+                    if isinstance(box, list) and len(box) == 4:
+                        item["box"] = [
+                            float(box[0]) + roi_x1,
+                            float(box[1]) + roi_y1,
+                            float(box[2]) + roi_x1,
+                            float(box[3]) + roi_y1,
+                        ]
+                    shifted.append(item)
+                return shifted
+
+            detections = _shift_boxes(result.get("detections"))
+            display_detections = _shift_boxes(result.get("display_detections"))
             result["image_path"] = str(image_path)
             result["detections"] = detections
+            if "display_detections" in result or display_detections:
+                result["display_detections"] = display_detections
+                result["display_dets"] = len(display_detections)
+            result["dets"] = len(detections)
             return result
         finally:
             try:
@@ -614,15 +1062,23 @@ class DinoRunner:
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
         os.makedirs(params.output_dir, exist_ok=True)
-        image = cv2.imread(image_path)
-        if image is None:
-            raise FileNotFoundError(f"Cannot read image: {image_path}")
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if image is not None:
+            base_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        else:
+            raster_fallback = _load_tiff_with_rasterio(image_path, log_fn=log_fn) if str(image_path).lower().endswith((".tif", ".tiff")) else None
+            if raster_fallback is None:
+                raise FileNotFoundError(f"Cannot read image: {image_path}")
+            base_rgb, _fallback_valid_mask = raster_fallback
+        rgb, valid_mask, strategy_name = _build_valid_mask(image_path, base_rgb, log_fn=log_fn)
+        valid_integral = _mask_integral(valid_mask)
+        black_integral = _pure_black_integral(rgb)
+        height, width = rgb.shape[:2]
         processor, gdino, device = self.ensure_model_loaded(params, log_fn=log_fn)
         if stop_checker is not None and stop_checker():
             raise RuntimeError("Stopped")
         if log_fn is not None:
-            log_fn("Running DINO detect-only...")
+            log_fn(f"Running DINO detect-only... valid-mask strategy={strategy_name}")
         pil_img = Image.fromarray(rgb)
         detections = run_text_boxes(
             processor=processor,
@@ -633,6 +1089,19 @@ class DinoRunner:
             box_threshold=float(params.box_threshold),
             text_threshold=float(params.text_threshold),
         )
+        before_invalid_filter = len(detections)
+        detections = [
+            det
+            for det in detections
+            if _box_is_fully_valid(det.box_xyxy, valid_integral, width=width, height=height)
+            and _box_black_ratio(det.box_xyxy, black_integral, width=width, height=height) < _DINO_BOX_BLACK_RATIO_REJECT
+        ]
+        if log_fn is not None and len(detections) < before_invalid_filter:
+            log_fn(
+                f"DINO invalid-region filter: removed {before_invalid_filter - len(detections)} box(es) "
+                f"with invalid overlap or near_black_ratio>={_DINO_BOX_BLACK_RATIO_REJECT:.2f} "
+                f"(pixel<={_DINO_BLACK_PIXEL_THRESHOLD})."
+            )
         detections = detections[: max(0, int(params.max_dets))] if int(params.max_dets) > 0 else detections
         payload = [
             {
@@ -666,6 +1135,7 @@ class DinoRunner:
     ) -> dict:
         import cv2
         import numpy as np
+        from PIL import Image
 
         if params.roi_box is not None:
             return self._run_with_roi(
@@ -681,47 +1151,199 @@ class DinoRunner:
             )
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
-        image = cv2.imread(image_path)
-        if image is None:
-            raise FileNotFoundError(f"Cannot read image: {image_path}")
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        nonzero_y, nonzero_x = np.where(gray > nonblack_thresh)
-        if len(nonzero_x) == 0:
-            if log_fn is not None:
-                log_fn("WARN: Image is entirely black. Nothing to scan.")
-            return {"image_path": str(image_path), "output_dir": params.output_dir, "dets": 0, "detections": []}
-        bridge_x1, bridge_y1 = int(nonzero_x.min()), int(nonzero_y.min())
-        bridge_x2, bridge_y2 = int(nonzero_x.max()), int(nonzero_y.max())
-        effective_max_depth = int(max_depth if max_depth is not None else params.recursive_max_depth)
-        effective_min_box_px = int(min_box_px if min_box_px is not None else params.recursive_min_box_px)
+        os.makedirs(params.output_dir, exist_ok=True)
+        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if image is not None:
+            base_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        else:
+            raster_fallback = _load_tiff_with_rasterio(image_path, log_fn=log_fn) if str(image_path).lower().endswith((".tif", ".tiff")) else None
+            if raster_fallback is None:
+                raise FileNotFoundError(f"Cannot read image: {image_path}")
+            base_rgb, _fallback_valid_mask = raster_fallback
+
+        original_height, original_width = base_rgb.shape[:2]
+        base_rgb, valid_mask, strategy_name = _build_valid_mask(image_path, base_rgb, log_fn=log_fn)
+        original_roi = _mask_bbox(valid_mask)
         if log_fn is not None:
-            log_fn(
-                f"Bridge ROI: ({bridge_x1},{bridge_y1})-({bridge_x2},{bridge_y2}), "
-                f"size={bridge_x2-bridge_x1}x{bridge_y2-bridge_y1}. max_depth={effective_max_depth}"
-            )
+            log_fn(f"Tiled DINO valid-mask strategy: {strategy_name}")
+
+        if original_roi is None or int(np.count_nonzero(valid_mask)) == 0:
+            if log_fn is not None:
+                log_fn("WARN: No valid pixels found in image. Nothing to scan.")
+            return {
+                "image_path": str(image_path),
+                "output_dir": params.output_dir,
+                "display_detections": [],
+                "display_dets": 0,
+                "dets": 0,
+                "detections": [],
+            }
+
+        oriented = _compute_oriented_roi(base_rgb, valid_mask, log_fn=log_fn)
+        work_rgb = oriented["rgb"]
+        work_valid_mask = oriented["valid_mask"]
+        work_roi = oriented["roi_box"]
+        rotation_angle = float(oriented.get("rotation_angle") or 0.0)
+        inverse_matrix = oriented.get("inverse_matrix")
+        rotated = bool(oriented.get("rotated"))
+
+        if log_fn is not None:
+            orig_x1, orig_y1, orig_x2, orig_y2 = original_roi
+            if work_roi is None:
+                log_fn(
+                    f"Valid ROI: original=({orig_x1},{orig_y1})-({orig_x2},{orig_y2}) "
+                    f"size={orig_x2-orig_x1}x{orig_y2-orig_y1}. rotation={rotation_angle:.2f}deg"
+                )
+            else:
+                roi_x1, roi_y1, roi_x2, roi_y2 = work_roi
+                log_fn(
+                    f"Valid ROI: original=({orig_x1},{orig_y1})-({orig_x2},{orig_y2}) "
+                    f"rotated=({roi_x1},{roi_y1})-({roi_x2},{roi_y2}) "
+                    f"size={roi_x2-roi_x1}x{roi_y2-roi_y1}. rotation={rotation_angle:.2f}deg"
+                )
+
+        if work_roi is None:
+            if log_fn is not None:
+                log_fn("WARN: Valid ROI is empty after preprocessing. Nothing to scan.")
+            return {
+                "image_path": str(image_path),
+                "output_dir": params.output_dir,
+                "display_detections": [],
+                "display_dets": 0,
+                "dets": 0,
+                "detections": [],
+            }
+
+        effective_min_box_px = int(min_box_px if min_box_px is not None else params.recursive_min_box_px)
         processor, gdino, device = self.ensure_model_loaded(params, log_fn=log_fn)
-        detections = _recursive_zoom_detect(
-            rgb,
-            (bridge_x1, bridge_y1, bridge_x2, bridge_y2),
-            (processor, gdino, device),
-            list(params.text_queries),
-            float(params.box_threshold),
-            float(params.text_threshold),
-            current_depth=0,
-            max_depth=effective_max_depth,
-            min_box_px=effective_min_box_px,
-            stop_checker=stop_checker,
-            log_fn=log_fn,
-        )
+        original_valid_integral = _mask_integral(valid_mask)
+        original_black_integral = _pure_black_integral(base_rgb)
+        tile_passes = [
+            ("small", _RECURSIVE_TILE_SIZE, _RECURSIVE_TILE_OVERLAP, _RECURSIVE_MIN_VALID_COVERAGE),
+            ("medium", _RECURSIVE_MEDIUM_TILE_SIZE, _RECURSIVE_MEDIUM_TILE_OVERLAP, _RECURSIVE_MEDIUM_MIN_VALID_COVERAGE),
+            ("large", _RECURSIVE_LARGE_TILE_SIZE, _RECURSIVE_LARGE_TILE_OVERLAP, _RECURSIVE_LARGE_MIN_VALID_COVERAGE),
+        ]
+
+        detections: list[tuple[Any, str, float]] = []
+        total_tile_dets = 0
+        total_tiles_seen = 0
+        total_tiles_kept = 0
+        total_tiles_skipped = 0
+        total_refined_tiles = 0
+        for pass_name, tile_size, tile_overlap, pass_min_valid_coverage in tile_passes:
+            tiles, total_tiles, skipped_tiles, refined_tiles = _generate_valid_tiles(
+                work_valid_mask,
+                work_roi,
+                tile_size=tile_size,
+                overlap=tile_overlap,
+                min_valid_coverage=pass_min_valid_coverage,
+                allow_refine=False,
+            )
+            kept_tiles = len(tiles)
+            total_tiles_seen += total_tiles
+            total_tiles_kept += kept_tiles
+            total_tiles_skipped += skipped_tiles
+            total_refined_tiles += refined_tiles
+            if log_fn is not None:
+                log_fn(
+                    f"Tiled DINO {pass_name}: total={total_tiles} kept={kept_tiles} refined={refined_tiles} skipped={skipped_tiles} "
+                    f"tile={tile_size}px overlap={tile_overlap}px min_valid_coverage={pass_min_valid_coverage:.2f}"
+                )
+            if kept_tiles == 0:
+                continue
+
+            for tile_index, (tile_x1, tile_y1, tile_x2, tile_y2, coverage, tile_kind) in enumerate(tiles, start=1):
+                if stop_checker is not None and stop_checker():
+                    raise RuntimeError("Stopped")
+                patch_rgb = work_rgb[tile_y1:tile_y2, tile_x1:tile_x2]
+                if patch_rgb.size == 0:
+                    continue
+                tile_dets = run_text_boxes(
+                    processor=processor,
+                    gdino=gdino,
+                    device=device,
+                    pil_image=Image.fromarray(patch_rgb),
+                    text_queries=list(params.text_queries),
+                    box_threshold=float(params.box_threshold),
+                    text_threshold=float(params.text_threshold),
+                )
+                total_tile_dets += len(tile_dets)
+                if log_fn is not None:
+                    log_fn(
+                        f"[{pass_name} {tile_index}/{kept_tiles}] {tile_kind} crop ({tile_x1},{tile_y1})-({tile_x2},{tile_y2}) "
+                        f"coverage={coverage:.3f} -> {len(tile_dets)} dets"
+                    )
+                for det in tile_dets:
+                    box = det.box_xyxy.astype(np.float32).copy()
+                    box[0] += float(tile_x1)
+                    box[1] += float(tile_y1)
+                    box[2] += float(tile_x1)
+                    box[3] += float(tile_y1)
+                    mapped_box = _map_box_from_rotated_to_original(
+                        box,
+                        inverse_matrix,
+                        original_width=original_width,
+                        original_height=original_height,
+                    )
+                    width_px = float(mapped_box[2] - mapped_box[0])
+                    height_px = float(mapped_box[3] - mapped_box[1])
+                    if width_px < float(effective_min_box_px) or height_px < float(effective_min_box_px):
+                        continue
+                    box_valid_coverage = _box_valid_coverage(
+                        mapped_box,
+                        original_valid_integral,
+                        width=original_width,
+                        height=original_height,
+                    )
+                    if box_valid_coverage < 1.0:
+                        continue
+                    if (
+                        _box_black_ratio(
+                            mapped_box,
+                            original_black_integral,
+                            width=original_width,
+                            height=original_height,
+                        )
+                        >= _DINO_BOX_BLACK_RATIO_REJECT
+                    ):
+                        continue
+                    detections.append((mapped_box, str(det.label), float(det.score)))
+
+        if total_tiles_kept == 0:
+            if log_fn is not None:
+                log_fn("No valid small/large tiles passed coverage threshold. Skipping DINO.")
+            return {
+                "image_path": str(image_path),
+                "output_dir": params.output_dir,
+                "display_detections": [],
+                "display_dets": 0,
+                "dets": 0,
+                "detections": [],
+            }
+
         if stop_checker is not None and stop_checker():
             raise RuntimeError("Stopped")
+        if log_fn is not None:
+            log_fn(
+                f"Tiled DINO raw detections: total={total_tile_dets} "
+                f"tiles_total={total_tiles_seen} tiles_kept={total_tiles_kept} refined={total_refined_tiles} skipped={total_tiles_skipped} "
+                f"kept_after_size={len(detections)} rotated={str(rotated).lower()}"
+            )
         targets = normalize_queries(target_labels) if target_labels else []
         kept = []
         for box, label, score in detections:
             if targets and not label_matches(label, targets):
                 continue
             kept.append((box, label, score))
+        display_payload = [
+            {
+                "label": str(label),
+                "score": float(score),
+                "box": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
+                "model_name": "DinoRecursive",
+            }
+            for box, label, score in kept
+        ]
         before_cf = len(kept)
         kept = _filter_parent_boxes(kept, contain_thresh=float(params.parent_contain_threshold))
         if log_fn is not None and len(kept) < before_cf:
@@ -739,10 +1361,12 @@ class DinoRunner:
             for box, label, score in kept
         ]
         if log_fn is not None:
-            log_fn(f"Recursive DINO done. dets={len(payload)}")
+            log_fn(f"Recursive DINO done. display_dets={len(display_payload)} dets={len(payload)}")
         return {
             "image_path": str(image_path),
             "output_dir": params.output_dir,
+            "display_detections": display_payload,
+            "display_dets": len(display_payload),
             "dets": len(payload),
             "detections": payload,
         }
