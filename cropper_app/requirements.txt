@@ -1,0 +1,6 @@
+# Minimal runtime deps for cropper_app.
+# Install: `pip install -r cropper_app/requirements.txt`
+
+PySide6
+pillow
+

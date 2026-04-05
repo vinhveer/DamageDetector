@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import sys
 import tempfile
@@ -10,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Sequence
 
+from dino.dinov2_classifier import DinoV2ClassifierRunner, default_dinov2_checkpoint
+from dino.dinov2_prototypes import DinoV2PrototypeRunner, default_dinov2_embedding_checkpoint
 from torch_runtime import describe_device_fallback, get_torch, select_device_str
 
 _RECURSIVE_TILE_SIZE = 512
@@ -45,6 +48,29 @@ class DinoParams:
     parent_contain_threshold: float = 0.7
     recursive_min_box_px: int = 48
     recursive_max_depth: int = 3
+    # Which tile passes to run in recursive/tiled mode.
+    # Supported: small, medium, large
+    recursive_tile_scales: Sequence[str] = ("small", "medium", "large")
+    top_k: int = 1
+    crop_dirname: str = "dino_crops"
+    dinov2_checkpoint: str = ""
+    classifier_batch_size: int = 8
+    classifier_top_k_labels: int = 3
+    classifier_min_confidence: float = 0.0
+    classifier_map_path: str = ""
+    classifier_strict: bool = False
+    prototype_dir: str = ""
+    prototype_batch_size: int = 8
+    prototype_top_k_labels: int = 3
+    prototype_min_similarity: float = 0.3
+    prototype_background_labels: Sequence[str] = ("background", "negative", "other", "none")
+    prototype_strict: bool = True
+    save_overlay: bool = False
+    overlay_filename: str = "overlay_filtered.png"
+    overlay_include_rejected: bool = False
+    # Optional physical scale: how many millimeters correspond to 1 pixel.
+    # If > 0, overlay rendering will include box area in mm^2/cm^2.
+    mm_per_px: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -67,10 +93,14 @@ def normalize_queries(text_queries: Sequence[str]) -> List[str]:
     return deduped
 
 
+def _canonical_label(text: str) -> str:
+    return " ".join(str(text or "").replace("_", " ").replace("-", " ").strip().lower().split())
+
+
 def label_matches(label: str, targets: Sequence[str]) -> bool:
-    lowered = str(label or "").lower()
+    lowered = _canonical_label(label)
     for target in targets:
-        token = str(target or "").strip().lower()
+        token = _canonical_label(target)
         if token and token in lowered:
             return True
     return False
@@ -705,6 +735,250 @@ def _box_black_ratio(box_xyxy: Any, black_integral: Any, *, width: int, height: 
     return _box_valid_coverage(box_xyxy, black_integral, width=width, height=height)
 
 
+def default_gdino_checkpoint() -> str:
+    return str((Path(__file__).resolve().parent / "models" / "grounding-dino-base").resolve())
+
+
+def _image_max_dim_from_path(image_path: str, *, log_fn=None) -> int:
+    import cv2
+
+    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if image is not None:
+        height, width = image.shape[:2]
+        return max(int(width), int(height))
+    raster_fallback = _load_tiff_with_rasterio(image_path, log_fn=log_fn) if str(image_path).lower().endswith((".tif", ".tiff")) else None
+    if raster_fallback is None:
+        raise FileNotFoundError(f"Cannot read image: {image_path}")
+    rgb, _mask = raster_fallback
+    height, width = rgb.shape[:2]
+    return max(int(width), int(height))
+
+
+def _sanitize_crop_box(box_xyxy: Any, *, width: int, height: int) -> tuple[int, int, int, int] | None:
+    if box_xyxy is None or len(box_xyxy) != 4:
+        return None
+    x1 = max(0, min(width, int(round(float(box_xyxy[0])))))
+    y1 = max(0, min(height, int(round(float(box_xyxy[1])))))
+    x2 = max(0, min(width, int(round(float(box_xyxy[2])))))
+    y2 = max(0, min(height, int(round(float(box_xyxy[3])))))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _load_classifier_rules(path_or_json: str) -> list[tuple[str, str | None]]:
+    source = str(path_or_json or "").strip()
+    if not source:
+        return []
+    if os.path.isfile(source):
+        raw = json.loads(Path(source).read_text(encoding="utf-8"))
+    else:
+        raw = json.loads(source)
+
+    rules: list[tuple[str, str | None]] = []
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    elif isinstance(raw, list):
+        items = []
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            items.append((entry.get("match"), entry.get("label")))
+    else:
+        raise ValueError("classifier_map_path must be a JSON object, JSON list, or a path to one.")
+
+    for match, label in items:
+        key = str(match or "").strip().lower()
+        if not key:
+            continue
+        mapped = None if label is None or str(label).strip() == "" else str(label).strip()
+        rules.append((key, mapped))
+    return rules
+
+
+def _default_classifier_rules_for_queries(query_labels: Sequence[str], checkpoint_path: str) -> list[tuple[str, str | None]]:
+    checkpoint_name = os.path.basename(str(checkpoint_path or "")).lower()
+    normalized_queries = [str(query).strip() for query in normalize_queries(query_labels)]
+    crack_only = bool(normalized_queries) and all("crack" in str(query).lower() for query in normalized_queries)
+    if crack_only and ("surface_crack" in checkpoint_name or "crack" in checkpoint_name):
+        primary = normalized_queries[0] if normalized_queries else "crack"
+        return [("positive", primary), ("negative", None)]
+    return []
+
+
+def _lookup_classifier_rule(predicted_label: str, rules: Sequence[tuple[str, str | None]]) -> tuple[bool, str | None]:
+    lowered = _canonical_label(predicted_label)
+    if not lowered:
+        return False, None
+    for match, mapped in rules:
+        normalized_match = _canonical_label(match)
+        if normalized_match in lowered or lowered in normalized_match:
+            return True, mapped
+    return False, None
+
+
+def _auto_map_classifier_label(predicted_label: str, queries: Sequence[str]) -> str | None:
+    lowered = _canonical_label(predicted_label)
+    if not lowered:
+        return None
+    for query in normalize_queries(queries):
+        token = _canonical_label(query)
+        if token and (token in lowered or lowered in token):
+            return query
+    return None
+
+
+def _resolve_classifier_decision(
+    *,
+    proposal_label: str,
+    predictions: Sequence[dict[str, Any]],
+    query_labels: Sequence[str],
+    rules: Sequence[tuple[str, str | None]],
+    min_confidence: float,
+    strict: bool,
+) -> dict[str, Any]:
+    top_prediction = dict(predictions[0] or {}) if predictions else {}
+    top_confidence = float(top_prediction.get("confidence") or 0.0)
+
+    if predictions and top_confidence < float(min_confidence):
+        return {
+            "accepted": False,
+            "final_label": str(proposal_label or ""),
+            "matched_classifier_label": None,
+            "matched_confidence": top_confidence,
+            "reason": "low_classifier_confidence",
+        }
+
+    for prediction in predictions:
+        predicted_label = str(prediction.get("label") or "")
+        predicted_confidence = float(prediction.get("confidence") or 0.0)
+        matched, mapped_label = _lookup_classifier_rule(predicted_label, rules)
+        if matched:
+            if mapped_label is None:
+                return {
+                    "accepted": False,
+                    "final_label": str(proposal_label or ""),
+                    "matched_classifier_label": predicted_label,
+                    "matched_confidence": predicted_confidence,
+                    "reason": "classifier_rule_rejected",
+                }
+            return {
+                "accepted": True,
+                "final_label": str(mapped_label),
+                "matched_classifier_label": predicted_label,
+                "matched_confidence": predicted_confidence,
+                "reason": "classifier_rule_mapped",
+            }
+        auto_label = _auto_map_classifier_label(predicted_label, query_labels)
+        if auto_label is not None:
+            return {
+                "accepted": True,
+                "final_label": str(auto_label),
+                "matched_classifier_label": predicted_label,
+                "matched_confidence": predicted_confidence,
+                "reason": "classifier_query_mapped",
+            }
+
+    if strict:
+        return {
+            "accepted": False,
+            "final_label": str(proposal_label or ""),
+            "matched_classifier_label": None,
+            "matched_confidence": top_confidence,
+            "reason": "classifier_unmapped",
+        }
+
+    return {
+        "accepted": True,
+        "final_label": str(proposal_label or ""),
+        "matched_classifier_label": None,
+        "matched_confidence": top_confidence,
+        "reason": "kept_original_label",
+    }
+
+
+def _resolve_prototype_decision(
+    *,
+    proposal_label: str,
+    predictions: Sequence[dict[str, Any]],
+    min_similarity: float,
+    background_labels: Sequence[str],
+    strict: bool,
+) -> dict[str, Any]:
+    top_prediction = dict(predictions[0] or {}) if predictions else {}
+    top_similarity = float(top_prediction.get("similarity") or 0.0)
+    predicted_label = str(top_prediction.get("label") or "")
+
+    if not predictions:
+        if strict:
+            return {
+                "accepted": False,
+                "final_label": str(proposal_label or ""),
+                "matched_prototype_label": None,
+                "matched_similarity": 0.0,
+                "reason": "prototype_no_match",
+            }
+        return {
+            "accepted": True,
+            "final_label": str(proposal_label or ""),
+            "matched_prototype_label": None,
+            "matched_similarity": 0.0,
+            "reason": "kept_original_label",
+        }
+
+    if label_matches(predicted_label, background_labels):
+        return {
+            "accepted": False,
+            "final_label": str(proposal_label or ""),
+            "matched_prototype_label": predicted_label,
+            "matched_similarity": top_similarity,
+            "reason": "prototype_background_rejected",
+        }
+
+    if top_similarity < float(min_similarity):
+        if strict:
+            return {
+                "accepted": False,
+                "final_label": str(proposal_label or ""),
+                "matched_prototype_label": predicted_label,
+                "matched_similarity": top_similarity,
+                "reason": "low_prototype_similarity",
+            }
+        return {
+            "accepted": True,
+            "final_label": str(proposal_label or ""),
+            "matched_prototype_label": predicted_label,
+            "matched_similarity": top_similarity,
+            "reason": "kept_original_label",
+        }
+
+    return {
+        "accepted": True,
+        "final_label": predicted_label or str(proposal_label or ""),
+        "matched_prototype_label": predicted_label or None,
+        "matched_similarity": top_similarity,
+        "reason": "prototype_mapped",
+    }
+
+
+def _rank_dino_payload(
+    detections: Sequence[dict[str, Any]],
+    crop_paths: Sequence[str],
+    *,
+    top_k: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ranked: list[dict[str, Any]] = []
+    for index, det in enumerate(detections):
+        payload = dict(det)
+        payload["crop_path"] = str(crop_paths[index])
+        ranked.append(payload)
+    ranked.sort(key=lambda item: float(item.get("refined_score") or item.get("score") or 0.0), reverse=True)
+    for index, item in enumerate(ranked, start=1):
+        item["rank"] = index
+    keep = max(1, int(top_k)) if ranked else 0
+    return ranked, ranked[:keep]
+
+
 class DinoRunner:
     def __init__(self) -> None:
         self._device: str | None = None
@@ -712,6 +986,8 @@ class DinoRunner:
         self._gdino_config_id: str | None = None
         self._processor: Any | None = None
         self._gdino: Any | None = None
+        self._dinov2_runner = DinoV2ClassifierRunner()
+        self._prototype_runner = DinoV2PrototypeRunner()
 
     def _ensure_import_paths(self) -> None:
         here = Path(__file__).resolve()
@@ -1121,6 +1397,281 @@ class DinoRunner:
             "detections": payload,
         }
 
+    def rank_boxes(self, image_path: str, params: DinoParams, *, stop_checker=None, log_fn=None) -> dict:
+        import cv2
+        from PIL import Image
+
+        if params.roi_box is not None:
+            raise ValueError("rank_boxes does not support ROI mode yet.")
+        if not os.path.isfile(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
+        image_max_dim = _image_max_dim_from_path(image_path, log_fn=log_fn)
+        use_tiled_dino = image_max_dim > 512
+        if use_tiled_dino:
+            if log_fn is not None:
+                log_fn(f"Large image detected ({image_max_dim}px). Using recursive/tiled DINO for proposal boxes.")
+            detection_result = self.predict_recursive(
+                image_path,
+                params,
+                target_labels=list(params.text_queries),
+                max_depth=int(params.recursive_max_depth),
+                min_box_px=int(params.recursive_min_box_px),
+                stop_checker=stop_checker,
+                log_fn=log_fn,
+            )
+        else:
+            detection_result = self.predict(image_path, params, stop_checker=stop_checker, log_fn=log_fn)
+        detections = list(detection_result.get("detections") or [])
+        if not detections:
+            return {
+                **detection_result,
+                "ranked_detections": [],
+                "selected_detections": [],
+                "rejected_detections": [],
+                "selected_count": 0,
+                "rejected_count": 0,
+                "top_k": max(1, int(params.top_k)),
+                "used_tiled_dino": use_tiled_dino,
+            }
+
+        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if image is None:
+            raster_fallback = _load_tiff_with_rasterio(image_path, log_fn=log_fn) if str(image_path).lower().endswith((".tif", ".tiff")) else None
+            if raster_fallback is None:
+                raise FileNotFoundError(f"Cannot read image: {image_path}")
+            image_rgb, _mask = raster_fallback
+        else:
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        height, width = image_rgb.shape[:2]
+
+        crop_dir = Path(params.output_dir) / str(params.crop_dirname or "dino_crops").strip()
+        crop_dir.mkdir(parents=True, exist_ok=True)
+        query_labels = normalize_queries(params.text_queries)
+        prototype_dir = str(params.prototype_dir or "").strip()
+
+        crop_paths: list[str] = []
+        crop_images: list[Any] = []
+        cropped_detections: list[dict[str, Any]] = []
+        stem = Path(image_path).stem
+        for index, det in enumerate(detections, start=1):
+            crop_box = _sanitize_crop_box(det.get("box"), width=width, height=height)
+            if crop_box is None:
+                continue
+            x1, y1, x2, y2 = crop_box
+            crop_rgb = image_rgb[y1:y2, x1:x2]
+            if crop_rgb.size == 0:
+                continue
+            crop_path = crop_dir / f"{stem}_crop_{index:03d}.png"
+            cv2.imwrite(str(crop_path), cv2.cvtColor(crop_rgb, cv2.COLOR_RGB2BGR))
+            crop_images.append(Image.fromarray(crop_rgb))
+            crop_paths.append(str(crop_path))
+            payload = dict(det)
+            payload["crop_box"] = [int(x1), int(y1), int(x2), int(y2)]
+            cropped_detections.append(payload)
+
+        if not cropped_detections:
+            return {
+                **detection_result,
+                "ranked_detections": [],
+                "selected_detections": [],
+                "rejected_detections": [],
+                "selected_count": 0,
+                "rejected_count": 0,
+                "top_k": max(1, int(params.top_k)),
+                "used_tiled_dino": use_tiled_dino,
+            }
+
+        if stop_checker is not None and stop_checker():
+            raise RuntimeError("Stopped")
+
+        accepted: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        if prototype_dir:
+            prototype_checkpoint = str(params.dinov2_checkpoint or "").strip() or default_dinov2_embedding_checkpoint()
+            background_labels = normalize_queries(params.prototype_background_labels)
+            include_labels = normalize_queries(list(query_labels) + list(background_labels))
+            prototype_outputs = self._prototype_runner.classify_crops(
+                checkpoint_path=prototype_checkpoint,
+                prototype_dir=prototype_dir,
+                images=crop_images,
+                include_labels=include_labels,
+                device_preference=params.device,
+                batch_size=params.prototype_batch_size,
+                top_k=params.prototype_top_k_labels,
+                log_fn=log_fn,
+            )
+            for det, crop_path, prototype_output in zip(cropped_detections, crop_paths, prototype_outputs):
+                item = dict(det)
+                item["proposal_label"] = str(det.get("label") or "")
+                item["proposal_score"] = float(det.get("score") or 0.0)
+                item["crop_path"] = str(crop_path)
+                item["prototype_label"] = str(prototype_output.get("label") or "")
+                item["prototype_similarity"] = float(prototype_output.get("similarity") or 0.0)
+                item["prototype_support_count"] = int(prototype_output.get("support_count") or 0)
+                item["prototype_top_predictions"] = list(prototype_output.get("top_predictions") or [])
+                decision = _resolve_prototype_decision(
+                    proposal_label=item["proposal_label"],
+                    predictions=item["prototype_top_predictions"],
+                    min_similarity=float(params.prototype_min_similarity),
+                    background_labels=background_labels,
+                    strict=bool(params.prototype_strict),
+                )
+                item["prototype_decision"] = str(decision.get("reason") or "")
+                item["matched_prototype_label"] = decision.get("matched_prototype_label")
+                item["matched_prototype_similarity"] = float(decision.get("matched_similarity") or 0.0)
+                if decision.get("final_label"):
+                    item["label"] = str(decision["final_label"])
+                matched_similarity = max(0.0, float(decision.get("matched_similarity") or 0.0))
+                if item["prototype_decision"] == "prototype_mapped" and matched_similarity > 0.0:
+                    item["refined_score"] = float(item["proposal_score"]) * matched_similarity
+                else:
+                    item["refined_score"] = float(item["proposal_score"])
+                if bool(decision.get("accepted")):
+                    accepted.append(item)
+                else:
+                    item["rejection_reason"] = item["prototype_decision"]
+                    rejected.append(item)
+            relabel_mode = "dinov2_prototypes"
+            relabel_model = prototype_checkpoint
+        else:
+            classifier_checkpoint = str(params.dinov2_checkpoint or "").strip() or default_dinov2_checkpoint()
+            classifier_rules = _load_classifier_rules(params.classifier_map_path)
+            if not classifier_rules:
+                classifier_rules = _default_classifier_rules_for_queries(params.text_queries, classifier_checkpoint)
+            classifier_outputs = self._dinov2_runner.classify_crops(
+                checkpoint_path=classifier_checkpoint,
+                images=crop_images,
+                device_preference=params.device,
+                batch_size=params.classifier_batch_size,
+                top_k=params.classifier_top_k_labels,
+                log_fn=log_fn,
+            )
+            for det, crop_path, classifier_output in zip(cropped_detections, crop_paths, classifier_outputs):
+                item = dict(det)
+                item["proposal_label"] = str(det.get("label") or "")
+                item["proposal_score"] = float(det.get("score") or 0.0)
+                item["crop_path"] = str(crop_path)
+                item["classifier_label"] = str(classifier_output.get("label") or "")
+                item["classifier_confidence"] = float(classifier_output.get("confidence") or 0.0)
+                item["classifier_top_predictions"] = list(classifier_output.get("top_predictions") or [])
+                decision = _resolve_classifier_decision(
+                    proposal_label=item["proposal_label"],
+                    predictions=item["classifier_top_predictions"],
+                    query_labels=query_labels,
+                    rules=classifier_rules,
+                    min_confidence=float(params.classifier_min_confidence),
+                    strict=bool(params.classifier_strict),
+                )
+                item["classifier_decision"] = str(decision.get("reason") or "")
+                item["matched_classifier_label"] = decision.get("matched_classifier_label")
+                item["matched_classifier_confidence"] = float(decision.get("matched_confidence") or 0.0)
+                if decision.get("final_label"):
+                    item["label"] = str(decision["final_label"])
+                matched_confidence = float(decision.get("matched_confidence") or 0.0)
+                if matched_confidence > 0.0 and item["classifier_decision"] in {"classifier_rule_mapped", "classifier_query_mapped"}:
+                    item["refined_score"] = float(item["proposal_score"]) * matched_confidence
+                else:
+                    item["refined_score"] = float(item["proposal_score"])
+                if bool(decision.get("accepted")):
+                    accepted.append(item)
+                else:
+                    item["rejection_reason"] = item["classifier_decision"]
+                    rejected.append(item)
+            relabel_mode = "dinov2_classifier"
+            relabel_model = classifier_checkpoint
+
+        ranked, selected = _rank_dino_payload(
+            accepted,
+            [str(item.get("crop_path") or "") for item in accepted],
+            top_k=params.top_k,
+        )
+
+        if bool(params.save_overlay):
+            overlay = image_rgb.copy()
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            mm_per_px = float(getattr(params, "mm_per_px", 0.0) or 0.0)
+
+            def _format_area(x1: int, y1: int, x2: int, y2: int) -> str:
+                if mm_per_px <= 0.0:
+                    return ""
+                w = max(0, int(x2) - int(x1))
+                h = max(0, int(y2) - int(y1))
+                area_px2 = float(w * h)
+                area_mm2 = area_px2 * (mm_per_px * mm_per_px)
+                area_cm2 = area_mm2 / 100.0
+                if area_cm2 >= 1.0:
+                    return f" A={area_cm2:.2f}cm2"
+                return f" A={area_mm2:.0f}mm2"
+
+            def _draw(items: list[dict[str, Any]], *, color: tuple[int, int, int]) -> None:
+                for entry in items:
+                    box = entry.get("crop_box") or entry.get("box")
+                    sanitized = _sanitize_crop_box(box, width=width, height=height)
+                    if sanitized is None:
+                        continue
+                    x1, y1, x2, y2 = sanitized
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 3)
+                    label = str(entry.get("label") or entry.get("proposal_label") or "")
+                    score = float(entry.get("refined_score") or entry.get("score") or 0.0)
+                    sim = entry.get("matched_prototype_similarity")
+                    sim_text = f" sim={float(sim):.2f}" if sim is not None else ""
+                    area_text = _format_area(x1, y1, x2, y2)
+                    text = f"{label} {score:.2f}{sim_text}{area_text}".strip()
+                    if text:
+                        cv2.putText(
+                            overlay,
+                            text,
+                            (x1, max(14, y1 - 6)),
+                            font,
+                            0.55,
+                            (0, 0, 0),
+                            4,
+                            cv2.LINE_AA,
+                        )
+                        cv2.putText(
+                            overlay,
+                            text,
+                            (x1, max(14, y1 - 6)),
+                            font,
+                            0.55,
+                            color,
+                            1,
+                            cv2.LINE_AA,
+                        )
+
+            _draw(ranked, color=(40, 220, 60))
+            if bool(params.overlay_include_rejected):
+                _draw(rejected, color=(30, 80, 240))
+
+            overlay_path = Path(params.output_dir) / str(params.overlay_filename or "overlay_filtered.png")
+            cv2.imwrite(str(overlay_path), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+            if log_fn is not None:
+                log_fn(f"Saved overlay: {overlay_path}")
+
+        if log_fn is not None:
+            log_fn(
+                f"DINOv2 refine done. mode={relabel_mode} proposals={len(cropped_detections)} kept={len(accepted)} "
+                f"rejected={len(rejected)} selected={len(selected)}"
+            )
+        return {
+            **detection_result,
+            "classifier_model": relabel_model,
+            "relabel_model": relabel_model,
+            "relabel_mode": relabel_mode,
+            "prototype_dir": prototype_dir or None,
+            "overlay_path": str((Path(params.output_dir) / str(params.overlay_filename or "overlay_filtered.png")).resolve())
+            if bool(params.save_overlay)
+            else None,
+            "ranked_detections": ranked,
+            "selected_detections": selected,
+            "rejected_detections": rejected,
+            "selected_count": len(selected),
+            "rejected_count": len(rejected),
+            "top_k": max(1, int(params.top_k)),
+            "used_tiled_dino": use_tiled_dino,
+        }
+
     def predict_recursive(
         self,
         image_path: str,
@@ -1223,6 +1774,9 @@ class DinoRunner:
             ("medium", _RECURSIVE_MEDIUM_TILE_SIZE, _RECURSIVE_MEDIUM_TILE_OVERLAP, _RECURSIVE_MEDIUM_MIN_VALID_COVERAGE),
             ("large", _RECURSIVE_LARGE_TILE_SIZE, _RECURSIVE_LARGE_TILE_OVERLAP, _RECURSIVE_LARGE_MIN_VALID_COVERAGE),
         ]
+        allowed_scales = {str(s).strip().lower() for s in (params.recursive_tile_scales or []) if str(s).strip()}
+        if allowed_scales:
+            tile_passes = [entry for entry in tile_passes if entry[0] in allowed_scales]
 
         detections: list[tuple[Any, str, float]] = []
         total_tile_dets = 0

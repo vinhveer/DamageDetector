@@ -205,10 +205,9 @@ def _compose_segmented_output(
             x1, y1, x2, y2 = [int(round(float(v))) for v in box]
             cv2.rectangle(overlay, (x1, y1), (x2, y2), tuple(int(v) for v in color.tolist()), 2)
             label = str(item.get("label") or "object")
-            score = float(item.get("score") or 0.0)
             cv2.putText(
                 overlay,
-                f"{label} {score:.2f}",
+                label,
                 (x1, max(0, y1 - 6)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,

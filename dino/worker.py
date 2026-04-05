@@ -17,6 +17,9 @@ def _params_from(obj: dict[str, Any]) -> DinoParams:
     queries = data.get("text_queries")
     if isinstance(queries, str):
         data["text_queries"] = [part.strip() for part in queries.split(",") if part.strip()]
+    background_labels = data.get("prototype_background_labels")
+    if isinstance(background_labels, str):
+        data["prototype_background_labels"] = [part.strip() for part in background_labels.split(",") if part.strip()]
     return DinoParams(**data)
 
 
@@ -77,6 +80,19 @@ def _dispatch(proto: WorkerProtocol, call_id: int, method: str, params: dict[str
                 target_labels=target_labels,
                 max_depth=max_depth,
                 min_box_px=min_box_px,
+                stop_checker=proto.stop_checker(call_id),
+                log_fn=proto.log_fn(call_id),
+            )
+        proto.spawn_job(call_id, _job)
+        return
+
+    if normalized == "rank_boxes":
+        def _job():
+            image_path = str(params.get("image_path") or "").strip()
+            p = _params_from(params.get("params") or {})
+            return _runner.rank_boxes(
+                image_path,
+                p,
                 stop_checker=proto.stop_checker(call_id),
                 log_fn=proto.log_fn(call_id),
             )

@@ -630,7 +630,7 @@ def _segment_boxes_with_predictor(
         cv2.rectangle(disp, (int(x1), int(y1)), (int(x2), int(y2)), (0, 200, 255), 2)
         cv2.putText(
             disp,
-            f"{label} {score:.2f}",
+            label,
             (int(x1), int(max(0, y1 - 5))),
             cv2.FONT_HERSHEY_SIMPLEX,
             1.0,

@@ -8,10 +8,12 @@ from unittest import mock
 import cv2
 import numpy as np
 from PySide6 import QtGui
+from PIL import Image
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from dino import engine
+from dino.prototype_dataset import build_prototypes_from_yolo_dataset
 from editor_app.controllers.history_controller import HistoryController
 from editor_app.config.prediction_settings import DEFAULT_EDITOR_SETTINGS, migrate_editor_settings
 from editor_app.services.run_storage import RunStorageService
@@ -22,6 +24,131 @@ from inference_api.request_builder import build_prediction_request
 
 
 class DinoValidTilingTests(unittest.TestCase):
+    def test_build_prototypes_from_yolo_dataset_exports_class_and_background_crops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir) / "toy_yolo"
+            (root / "train" / "images").mkdir(parents=True)
+            (root / "train" / "labels").mkdir(parents=True)
+            (root / "valid" / "images").mkdir(parents=True)
+            (root / "valid" / "labels").mkdir(parents=True)
+            (root / "data.yaml").write_text(
+                "train: ../train/images\nval: ../valid/images\nnc: 2\nnames: ['crack', 'moisture']\n",
+                encoding="utf-8",
+            )
+            image = Image.new("RGB", (200, 200), color=(180, 180, 180))
+            image.save(root / "train" / "images" / "sample.jpg")
+            (root / "train" / "labels" / "sample.txt").write_text("0 0.5 0.5 0.4 0.4\n", encoding="utf-8")
+
+            output_dir = pathlib.Path(tmpdir) / "prototypes"
+            manifest = build_prototypes_from_yolo_dataset(
+                dataset_dir=str(root),
+                output_dir=str(output_dir),
+                splits=["train"],
+                samples_per_class=2,
+                background_samples=1,
+                min_crop_size=32,
+                seed=3,
+            )
+
+            self.assertEqual(manifest["classes"]["crack"]["count"], 1)
+            self.assertEqual(manifest["classes"]["moisture"]["count"], 0)
+            self.assertEqual(manifest["background"]["count"], 1)
+            self.assertTrue((output_dir / "crack").is_dir())
+            self.assertTrue((output_dir / "background").is_dir())
+            self.assertTrue((output_dir / "manifest.json").is_file())
+
+    def test_sanitize_crop_box_clamps_to_image_bounds(self) -> None:
+        self.assertEqual(
+            engine._sanitize_crop_box([-5.1, 10.2, 210.9, 90.6], width=200, height=100),
+            (0, 10, 200, 91),
+        )
+        self.assertIsNone(engine._sanitize_crop_box([50, 20, 50, 40], width=200, height=100))
+
+    def test_rank_dino_payload_sorts_and_keeps_top_k(self) -> None:
+        detections = [
+            {"label": "box-a", "score": 0.7, "refined_score": 0.21, "box": [1, 2, 3, 4]},
+            {"label": "box-b", "score": 0.8, "refined_score": 0.72, "box": [5, 6, 7, 8]},
+            {"label": "box-c", "score": 0.9, "refined_score": 0.45, "box": [9, 10, 11, 12]},
+        ]
+        ranked, selected = engine._rank_dino_payload(
+            detections,
+            ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"],
+            top_k=2,
+        )
+
+        self.assertEqual([item["label"] for item in ranked], ["box-b", "box-c", "box-a"])
+        self.assertEqual([item["rank"] for item in ranked], [1, 2, 3])
+        self.assertEqual([item["label"] for item in selected], ["box-b", "box-c"])
+        self.assertEqual(selected[0]["crop_path"], "/tmp/b.png")
+
+    def test_load_classifier_rules_supports_dict_and_null_reject(self) -> None:
+        rules = engine._load_classifier_rules('{"church":"building","clock":null}')
+        self.assertEqual(rules, [("church", "building"), ("clock", None)])
+
+    def test_label_matches_normalizes_separators(self) -> None:
+        self.assertTrue(engine.label_matches("broken_wall", ["broken wall"]))
+        self.assertTrue(engine.label_matches("water-stain", ["stain"]))
+
+    def test_default_classifier_rules_for_crack_checkpoint(self) -> None:
+        rules = engine._default_classifier_rules_for_queries(["crack"], "surface_crack_image_detection")
+        self.assertEqual(rules, [("positive", "crack"), ("negative", None)])
+
+    def test_resolve_classifier_decision_maps_then_rejects_unmapped_in_strict_mode(self) -> None:
+        mapped = engine._resolve_classifier_decision(
+            proposal_label="crack",
+            predictions=[{"label": "tabby cat", "confidence": 0.82}],
+            query_labels=["cat", "dog"],
+            rules=[],
+            min_confidence=0.0,
+            strict=True,
+        )
+        self.assertTrue(mapped["accepted"])
+        self.assertEqual(mapped["final_label"], "cat")
+        self.assertEqual(mapped["reason"], "classifier_query_mapped")
+
+        rejected = engine._resolve_classifier_decision(
+            proposal_label="crack",
+            predictions=[{"label": "church", "confidence": 0.91}],
+            query_labels=["cat", "dog"],
+            rules=[],
+            min_confidence=0.0,
+            strict=True,
+        )
+        self.assertFalse(rejected["accepted"])
+        self.assertEqual(rejected["reason"], "classifier_unmapped")
+
+    def test_resolve_prototype_decision_rejects_background_and_low_similarity(self) -> None:
+        accepted = engine._resolve_prototype_decision(
+            proposal_label="damage",
+            predictions=[{"label": "broken_wall", "similarity": 0.71}],
+            min_similarity=0.3,
+            background_labels=["background", "negative"],
+            strict=True,
+        )
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual(accepted["final_label"], "broken_wall")
+        self.assertEqual(accepted["reason"], "prototype_mapped")
+
+        background = engine._resolve_prototype_decision(
+            proposal_label="damage",
+            predictions=[{"label": "background", "similarity": 0.81}],
+            min_similarity=0.3,
+            background_labels=["background", "negative"],
+            strict=True,
+        )
+        self.assertFalse(background["accepted"])
+        self.assertEqual(background["reason"], "prototype_background_rejected")
+
+        low_similarity = engine._resolve_prototype_decision(
+            proposal_label="damage",
+            predictions=[{"label": "stain", "similarity": 0.12}],
+            min_similarity=0.3,
+            background_labels=["background", "negative"],
+            strict=True,
+        )
+        self.assertFalse(low_similarity["accepted"])
+        self.assertEqual(low_similarity["reason"], "low_prototype_similarity")
+
     def test_opencv_valid_mask_preserves_internal_black_object(self) -> None:
         image = np.full((200, 200, 3), 255, dtype=np.uint8)
         image[70:130, 70:130] = 0
