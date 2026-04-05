@@ -34,6 +34,12 @@ def _max_dim_fast(image_path: Path) -> int:
     return int(max(w, h))
 
 
+def _image_output_dir(*, output_dir: Path, input_dir: Path, image_path: Path) -> Path:
+    rel = image_path.relative_to(input_dir)
+    parent = rel.parent
+    return output_dir / parent / rel.name
+
+
 def _sanitize_xyxy(box: Any, *, width: int, height: int) -> tuple[int, int, int, int] | None:
     if not isinstance(box, (list, tuple)) or len(box) != 4:
         return None
@@ -118,8 +124,10 @@ def _write_overlay(
     detections: Iterable[dict[str, Any]],
 ) -> tuple[int, int, int]:
     import cv2
+    import numpy as np
 
-    img = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    data = np.fromfile(str(image_path), dtype=np.uint8)
+    img = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
     if img is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
     height, width = img.shape[:2]
@@ -143,27 +151,75 @@ def _write_overlay(
         drawn += 1
 
     overlay_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(overlay_path), overlay)
+    ok, buf = cv2.imencode(overlay_path.suffix or ".png", overlay)
+    if not ok:
+        raise RuntimeError(f"cv2.imencode failed for: {overlay_path}")
+    buf.tofile(str(overlay_path))
     return width, height, drawn
 
 
+def _write_box_csv(*, csv_path: Path, rows: list[Row]) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "image",
+                "image_path",
+                "label",
+                "score",
+                "x1",
+                "y1",
+                "x2",
+                "y2",
+                "w",
+                "h",
+                "area_px2",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.image,
+                    row.image_path,
+                    row.label,
+                    f"{row.score:.6f}",
+                    row.x1,
+                    row.y1,
+                    row.x2,
+                    row.y2,
+                    row.w,
+                    row.h,
+                    row.area_px2,
+                ]
+            )
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Batch GroundingDINO detect on a folder; output CSV + overlay images.")
+    parser = argparse.ArgumentParser(description="Batch GroundingDINO detect on a folder; output one folder per image with box.csv + overlay.")
     parser.add_argument("--input-dir", required=True, help="Folder containing images.")
-    parser.add_argument("--output-dir", default="results_gdino_folder", help="Where to save CSV + overlays.")
+    parser.add_argument("--output-dir", default="results_gdino_folder", help="Root output folder. Each image gets its own subfolder.")
     parser.add_argument(
         "--checkpoint",
         default="",
         help="GroundingDINO checkpoint path or HF model folder/id. If empty, use repo default.",
     )
     parser.add_argument(
+        "--online",
+        action="store_true",
+        help=(
+            "Allow HuggingFace downloads (sets HF_HUB_OFFLINE=0 and TRANSFORMERS_OFFLINE=0 for this run). "
+            "Useful when --checkpoint is a HuggingFace model id."
+        ),
+    )
+    parser.add_argument(
         "--queries",
-        default="damage, defect, crack, peeling, mold, stain, broken wall, decay",
+        default="crack . peeling . mold . mildew . moss . stain . decay . spalling",
         help="Comma-separated text queries for GroundingDINO.",
     )
-    parser.add_argument("--box-threshold", type=float, default=0.25)
-    parser.add_argument("--text-threshold", type=float, default=0.25)
-    parser.add_argument("--max-dets", type=int, default=30)
+    parser.add_argument("--box-threshold", type=float, default=0.16)
+    parser.add_argument("--text-threshold", type=float, default=0.16)
+    parser.add_argument("--max-dets", type=int, default=80)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--recursive-find", action="store_true", help="Also scan subfolders for images.")
     parser.add_argument("--verbose-logs", action="store_true", help="Stream GroundingDINO/tiled logs to stdout.")
@@ -188,9 +244,12 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"Input dir not found: {input_dir}")
 
     out_dir = Path(args.output_dir).expanduser().resolve()
-    overlays_dir = out_dir / "overlays"
     os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(overlays_dir, exist_ok=True)
+
+    if bool(args.online):
+        os.environ["HF_HUB_OFFLINE"] = "0"
+        os.environ["TRANSFORMERS_OFFLINE"] = "0"
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
 
     from dino.client import get_dino_service
     from dino.engine import default_gdino_checkpoint
@@ -208,6 +267,15 @@ def main(argv: list[str] | None = None) -> int:
         if not checkpoint:
             raise RuntimeError("No GroundingDINO checkpoint available. Pass --checkpoint or download the default model.")
 
+        checkpoint_lower = checkpoint.lower()
+        checkpoint_is_path = Path(checkpoint).expanduser().exists()
+        checkpoint_is_explicit_file = checkpoint_lower.endswith((".pth", ".pt", ".safetensors", ".bin"))
+        checkpoint_is_hf_id = ("/" in checkpoint) and (not checkpoint_is_path) and (not checkpoint_is_explicit_file)
+        if checkpoint_is_hf_id and not bool(args.online):
+            os.environ["HF_HUB_OFFLINE"] = "0"
+            os.environ["TRANSFORMERS_OFFLINE"] = "0"
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
+
         params = {
             "gdino_checkpoint": checkpoint,
             "gdino_config_id": "auto",
@@ -220,26 +288,29 @@ def main(argv: list[str] | None = None) -> int:
             "recursive_tile_scales": [s.strip() for s in str(args.tile_scales).split(",") if s.strip()],
         }
 
-        all_rows: list[Row] = []
         for idx, img_path in enumerate(images, start=1):
             max_dim = _max_dim_fast(img_path)
             use_tiled = int(max_dim) > int(args.tiled_threshold)
-            print(f"[{idx}/{len(images)}] start {img_path.name} mode={'tiled' if use_tiled else 'single'}", flush=True)
+            image_out_dir = _image_output_dir(output_dir=out_dir, input_dir=input_dir, image_path=img_path)
+            os.makedirs(image_out_dir, exist_ok=True)
+            print(f"[{idx}/{len(images)}] start {img_path.name} mode={'tiled' if use_tiled else 'single'} out={image_out_dir}", flush=True)
             log_fn = (lambda s: print(s, flush=True)) if bool(args.verbose_logs) else None
+            image_params = dict(params)
+            image_params["output_dir"] = str(image_out_dir)
             if use_tiled:
                 result = service.call(
                     "recursive_detect",
                     {
                         "image_path": str(img_path),
-                        "params": params,
-                        "target_labels": params["text_queries"],
+                        "params": image_params,
+                        "target_labels": image_params["text_queries"],
                         "max_depth": int(args.recursive_max_depth),
                         "min_box_px": int(args.recursive_min_box_px),
                     },
                     log_fn=log_fn,
                 )
             else:
-                result = service.call("predict", {"image_path": str(img_path), "params": params}, log_fn=log_fn)
+                result = service.call("predict", {"image_path": str(img_path), "params": image_params}, log_fn=log_fn)
 
             # Use the filtered detections (after containment filter + NMS + max_dets).
             # `display_detections` can be extremely large in tiled mode.
@@ -252,50 +323,15 @@ def main(argv: list[str] | None = None) -> int:
                 w, h = pil_img.size
 
             rows = _rows_from_detections(image_path=img_path, detections=detections, width=int(w), height=int(h))
-            all_rows.extend(rows)
 
-            overlay_path = overlays_dir / f"{img_path.stem}_gdino.png"
+            overlay_path = image_out_dir / "overlay.png"
+            csv_path = image_out_dir / "box.csv"
             _write_overlay(image_path=img_path, overlay_path=overlay_path, detections=detections)
+            _write_box_csv(csv_path=csv_path, rows=rows)
 
-            print(f"[{idx}/{len(images)}] done {img_path.name}: dets={len(rows)} overlay={overlay_path.name}", flush=True)
+            print(f"[{idx}/{len(images)}] done {img_path.name}: dets={len(rows)} box.csv + overlay.png", flush=True)
 
-        csv_path = out_dir / "detections.csv"
-        with csv_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "image",
-                    "image_path",
-                    "label",
-                    "score",
-                    "x1",
-                    "y1",
-                    "x2",
-                    "y2",
-                    "w",
-                    "h",
-                    "area_px2",
-                ]
-            )
-            for row in all_rows:
-                writer.writerow(
-                    [
-                        row.image,
-                        row.image_path,
-                        row.label,
-                        f"{row.score:.6f}",
-                        row.x1,
-                        row.y1,
-                        row.x2,
-                        row.y2,
-                        row.w,
-                        row.h,
-                        row.area_px2,
-                    ]
-                )
-
-        print(f"Saved CSV: {csv_path}", flush=True)
-        print(f"Saved overlays: {overlays_dir}", flush=True)
+        print(f"Saved per-image outputs under: {out_dir}", flush=True)
         return 0
     finally:
         service.close()

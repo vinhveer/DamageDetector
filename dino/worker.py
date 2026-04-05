@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from dino.engine import DinoParams, DinoRunner
@@ -7,6 +8,22 @@ from inference_api.process_worker import WorkerProtocol, run_worker
 
 
 _runner = DinoRunner()
+
+
+def _preload_grounding_dino_imports() -> None:
+    """Preload heavy GroundingDINO deps on the worker main thread.
+
+    On this Windows setup, importing transformers GroundingDINO lazily inside the
+    per-request job thread can stall for a very long time. Preloading once during
+    worker startup keeps the actual request path stable.
+    """
+    try:
+        import transformers.models.grounding_dino.image_processing_grounding_dino  # noqa: F401
+        from transformers import AutoProcessor, GroundingDinoConfig, GroundingDinoForObjectDetection  # noqa: F401
+    except Exception:
+        # Keep startup resilient. The real request path will still surface the
+        # original import error with the existing logging/traceback flow.
+        return
 
 
 def _params_from(obj: dict[str, Any]) -> DinoParams:
@@ -103,6 +120,8 @@ def _dispatch(proto: WorkerProtocol, call_id: int, method: str, params: dict[str
 
 
 def main() -> int:
+    if os.name == "nt":
+        _preload_grounding_dino_imports()
     return run_worker(_dispatch)
 
 

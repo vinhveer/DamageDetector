@@ -739,10 +739,35 @@ def default_gdino_checkpoint() -> str:
     return str((Path(__file__).resolve().parent / "models" / "grounding-dino-base").resolve())
 
 
+def _cv2_imread_any_path(image_path: str, flags: int) -> Any:
+    """Read image with OpenCV, supporting non-ASCII Windows paths.
+
+    Some OpenCV builds fail to read Unicode paths via cv2.imread on Windows.
+    Fallback to imdecode(fromfile) in that case.
+    """
+    import cv2
+
+    # On Windows, cv2.imread() frequently fails (and emits a warning) when the
+    # path contains non-ASCII characters. Avoid calling it in that case.
+    if not (os.name == "nt" and any(ord(ch) > 127 for ch in str(image_path))):
+        image = cv2.imread(image_path, flags)
+        if image is not None:
+            return image
+    try:
+        import numpy as np
+
+        data = np.fromfile(image_path, dtype=np.uint8)
+        if data.size == 0:
+            return None
+        return cv2.imdecode(data, flags)
+    except Exception:
+        return None
+
+
 def _image_max_dim_from_path(image_path: str, *, log_fn=None) -> int:
     import cv2
 
-    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    image = _cv2_imread_any_path(image_path, cv2.IMREAD_COLOR)
     if image is not None:
         height, width = image.shape[:2]
         return max(int(width), int(height))
@@ -1041,10 +1066,9 @@ class DinoRunner:
 
     def ensure_model_loaded(self, params: DinoParams, *, log_fn=None) -> tuple[Any, Any, str]:
         self._ensure_import_paths()
-        import transformers
-        import transformers.models.grounding_dino.image_processing_grounding_dino
-        from transformers import AutoProcessor, GroundingDinoConfig, GroundingDinoForObjectDetection
         import faulthandler
+        import sys
+        import types
 
         def _dump_on_hang(label: str, seconds: float) -> threading.Event:
             stop = threading.Event()
@@ -1064,6 +1088,33 @@ class DinoRunner:
 
             threading.Thread(target=_arm, name=f"hang-dump:{label}", daemon=True).start()
             return stop
+
+        def _start_log_tick(label: str, *, every_s: float = 10.0) -> threading.Event:
+            stop = threading.Event()
+
+            def _tick() -> None:
+                if log_fn is None:
+                    return
+                start = time.time()
+                while not stop.wait(every_s):
+                    elapsed = int(time.time() - start)
+                    log_fn(f"Still {label}... ({elapsed}s)")
+
+            if log_fn is not None:
+                threading.Thread(target=_tick, name=f"tick:{label}", daemon=True).start()
+            return stop
+
+        # Emit a log line before importing heavy deps so users aren't left with a "hang"
+        # when transformers/torch import is slow on Windows.
+        if log_fn is not None:
+            log_fn("Step: import transformers + grounding_dino...")
+        tick = _start_log_tick("importing transformers", every_s=10.0)
+        hang = _dump_on_hang("import transformers", 180.0)
+        import transformers  # type: ignore
+        import transformers.models.grounding_dino.image_processing_grounding_dino  # noqa: F401
+        from transformers import AutoProcessor, GroundingDinoConfig, GroundingDinoForObjectDetection  # type: ignore
+        hang.set()
+        tick.set()
 
         device = select_device_str(params.device)
         fallback = describe_device_fallback(params.device, device)
@@ -1124,6 +1175,14 @@ class DinoRunner:
         os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
+        def _is_truthy_env(name: str) -> bool:
+            value = str(os.environ.get(name, "")).strip().lower()
+            return value in {"1", "true", "yes", "on"}
+
+        # Offline-first by default, but allow online downloads when the user explicitly sets:
+        # `HF_HUB_OFFLINE=0` and `TRANSFORMERS_OFFLINE=0` in the parent shell.
+        local_files_only = _is_truthy_env("HF_HUB_OFFLINE") or _is_truthy_env("TRANSFORMERS_OFFLINE")
+
         tick_stop = threading.Event()
 
         def _tick() -> None:
@@ -1144,6 +1203,7 @@ class DinoRunner:
                 log_fn(f"GroundingDINO: device={device}")
                 log_fn(f"GroundingDINO: checkpoint={checkpoint_path}")
                 log_fn(f"GroundingDINO: config={config_id}")
+                log_fn(f"GroundingDINO: local_files_only={local_files_only} (HF_HUB_OFFLINE={os.environ.get('HF_HUB_OFFLINE','')}, TRANSFORMERS_OFFLINE={os.environ.get('TRANSFORMERS_OFFLINE','')})")
                 if checkpoint_is_file:
                     try:
                         size_mb = os.path.getsize(checkpoint_path) / (1024 * 1024)
@@ -1155,7 +1215,7 @@ class DinoRunner:
                     log_fn("Step: load processor (AutoProcessor.from_pretrained folder)...")
                 start = time.time()
                 hang = _dump_on_hang("AutoProcessor.from_pretrained(folder)", 30.0)
-                processor = AutoProcessor.from_pretrained(checkpoint_path, local_files_only=True)
+                processor = AutoProcessor.from_pretrained(checkpoint_path, local_files_only=local_files_only)
                 hang.set()
                 if log_fn is not None:
                     log_fn(f"Loaded processor ({time.time() - start:.1f}s)")
@@ -1167,11 +1227,11 @@ class DinoRunner:
                 try:
                     gdino = GroundingDinoForObjectDetection.from_pretrained(
                         checkpoint_path,
-                        local_files_only=True,
+                        local_files_only=local_files_only,
                         use_safetensors=use_safetensors,
                     )
                 except TypeError:
-                    gdino = GroundingDinoForObjectDetection.from_pretrained(checkpoint_path, local_files_only=True)
+                    gdino = GroundingDinoForObjectDetection.from_pretrained(checkpoint_path, local_files_only=local_files_only)
                 hang.set()
                 if log_fn is not None:
                     log_fn(f"Loaded model from folder ({time.time() - start:.1f}s)")
@@ -1180,7 +1240,7 @@ class DinoRunner:
                     log_fn("Step: load processor (AutoProcessor.from_pretrained cache)...")
                 start = time.time()
                 hang = _dump_on_hang("AutoProcessor.from_pretrained(cache)", 30.0)
-                processor = AutoProcessor.from_pretrained(checkpoint_path, local_files_only=True)
+                processor = AutoProcessor.from_pretrained(checkpoint_path, local_files_only=local_files_only)
                 hang.set()
                 if log_fn is not None:
                     log_fn(f"Loaded processor ({time.time() - start:.1f}s)")
@@ -1189,9 +1249,9 @@ class DinoRunner:
                 start = time.time()
                 hang = _dump_on_hang("GroundingDinoForObjectDetection.from_pretrained(cache)", 60.0)
                 try:
-                    gdino = GroundingDinoForObjectDetection.from_pretrained(checkpoint_path, local_files_only=True)
+                    gdino = GroundingDinoForObjectDetection.from_pretrained(checkpoint_path, local_files_only=local_files_only)
                 except TypeError:
-                    gdino = GroundingDinoForObjectDetection.from_pretrained(checkpoint_path, local_files_only=True)
+                    gdino = GroundingDinoForObjectDetection.from_pretrained(checkpoint_path, local_files_only=local_files_only)
                 hang.set()
                 if log_fn is not None:
                     log_fn(f"Loaded model from cache ({time.time() - start:.1f}s)")
@@ -1208,14 +1268,14 @@ class DinoRunner:
                     log_fn("Step: load processor (AutoProcessor.from_pretrained)...")
                 start = time.time()
                 hang = _dump_on_hang("AutoProcessor.from_pretrained(config_id)", 30.0)
-                processor = AutoProcessor.from_pretrained(config_id, local_files_only=True)
+                processor = AutoProcessor.from_pretrained(config_id, local_files_only=local_files_only)
                 hang.set()
                 if log_fn is not None:
                     log_fn(f"Loaded processor ({time.time() - start:.1f}s)")
                 if log_fn is not None:
                     log_fn("Step: load config (GroundingDinoConfig.from_pretrained)...")
                 start = time.time()
-                config = GroundingDinoConfig.from_pretrained(config_id, local_files_only=True)
+                config = GroundingDinoConfig.from_pretrained(config_id, local_files_only=local_files_only)
                 if log_fn is not None:
                     log_fn(f"Loaded config ({time.time() - start:.1f}s)")
                 if log_fn is not None:
@@ -1265,7 +1325,7 @@ class DinoRunner:
     def _run_with_roi(self, func_name: str, image_path: str, params: DinoParams, **kwargs) -> dict:
         import cv2
 
-        image = cv2.imread(image_path)
+        image = _cv2_imread_any_path(image_path, cv2.IMREAD_COLOR)
         if image is None:
             raise FileNotFoundError(f"Cannot read image: {image_path}")
         roi_x1, roi_y1, roi_x2, roi_y2 = params.roi_box
@@ -1338,7 +1398,7 @@ class DinoRunner:
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
         os.makedirs(params.output_dir, exist_ok=True)
-        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        image = _cv2_imread_any_path(image_path, cv2.IMREAD_COLOR)
         if image is not None:
             base_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         else:
@@ -1435,7 +1495,7 @@ class DinoRunner:
                 "used_tiled_dino": use_tiled_dino,
             }
 
-        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        image = _cv2_imread_any_path(image_path, cv2.IMREAD_COLOR)
         if image is None:
             raster_fallback = _load_tiff_with_rasterio(image_path, log_fn=log_fn) if str(image_path).lower().endswith((".tif", ".tiff")) else None
             if raster_fallback is None:
@@ -1703,7 +1763,7 @@ class DinoRunner:
         if not os.path.isfile(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
         os.makedirs(params.output_dir, exist_ok=True)
-        image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        image = _cv2_imread_any_path(image_path, cv2.IMREAD_COLOR)
         if image is not None:
             base_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         else:

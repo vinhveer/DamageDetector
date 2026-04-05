@@ -32,6 +32,10 @@ class JsonServiceProcess:
     def _default_env(self) -> dict[str, str]:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        # Ensure the worker process speaks UTF-8 on stdio so JSON/logs can
+        # include non-ASCII paths (e.g., Vietnamese filenames) on Windows.
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("TOKENIZERS_PARALLELISM", "false")
         env.setdefault("HF_HUB_OFFLINE", "1")
         env.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -60,6 +64,8 @@ class JsonServiceProcess:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
         self._reader = threading.Thread(target=self._read_loop, name=f"svc-reader:{self._module}", daemon=True)

@@ -50,8 +50,11 @@ def _stable_color(label: str) -> tuple[int, int, int]:
 
 def _write_overlay(*, image_path: Path, overlay_path: Path, detections: list[dict[str, Any]]) -> None:
     import cv2
+    import numpy as np
 
-    img = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    # cv2.imread can fail on Windows when the path contains non-ASCII characters.
+    data = np.fromfile(str(image_path), dtype=np.uint8)
+    img = cv2.imdecode(data, cv2.IMREAD_COLOR) if data.size else None
     if img is None:
         raise FileNotFoundError(f"Cannot read image: {image_path}")
     height, width = img.shape[:2]
@@ -73,7 +76,10 @@ def _write_overlay(*, image_path: Path, overlay_path: Path, detections: list[dic
             cv2.putText(overlay, text, (x1, max(14, y1 - 6)), font, 0.55, color, 1, cv2.LINE_AA)
 
     overlay_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(overlay_path), overlay)
+    ok, buf = cv2.imencode(overlay_path.suffix or ".png", overlay)
+    if not ok:
+        raise RuntimeError(f"cv2.imencode failed for: {overlay_path}")
+    buf.tofile(str(overlay_path))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,13 +87,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--image", required=True)
     parser.add_argument("--output-dir", default="results_gdino_single")
     parser.add_argument("--checkpoint", default="", help="GroundingDINO checkpoint path/folder/id. If empty, use repo default.")
+    parser.add_argument("--log", action="store_true", help="Print worker logs to stderr while running.")
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        help=(
+            "Allow HuggingFace downloads (sets HF_HUB_OFFLINE=0 and TRANSFORMERS_OFFLINE=0 for this run). "
+            "Useful when --checkpoint is a HuggingFace model id."
+        ),
+    )
     parser.add_argument(
         "--queries",
-        default="damage, defect, crack, peeling, mold, stain, broken wall, decay, spalling",
+        default="crack . peeling . mold . mildew . moss . stain . decay . spalling",
         help="Comma-separated text queries for GroundingDINO.",
     )
-    parser.add_argument("--box-threshold", type=float, default=0.19)
-    parser.add_argument("--text-threshold", type=float, default=0.19)
+    parser.add_argument("--box-threshold", type=float, default=0.16)
+    parser.add_argument("--text-threshold", type=float, default=0.16)
     parser.add_argument("--max-dets", type=int, default=80)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--tiled-threshold", type=int, default=512, help="If max dim > this, use tiled recursive detect.")
@@ -103,12 +118,30 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.output_dir).expanduser().resolve()
     os.makedirs(out_dir, exist_ok=True)
 
+    if bool(args.online):
+        # The worker inherits env from this process (via os.environ.copy()).
+        os.environ["HF_HUB_OFFLINE"] = "0"
+        os.environ["TRANSFORMERS_OFFLINE"] = "0"
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
+
     from dino.client import get_dino_service
     from dino.engine import default_gdino_checkpoint
 
     checkpoint = str(args.checkpoint or "").strip() or str(default_gdino_checkpoint() or "").strip()
     if not checkpoint:
         raise RuntimeError("No GroundingDINO checkpoint available. Pass --checkpoint or download the default model.")
+
+    checkpoint_lower = checkpoint.lower()
+    checkpoint_is_path = Path(checkpoint).expanduser().exists()
+    checkpoint_is_explicit_file = checkpoint_lower.endswith((".pth", ".pt", ".safetensors", ".bin"))
+    checkpoint_is_hf_id = ("/" in checkpoint) and (not checkpoint_is_path) and (not checkpoint_is_explicit_file)
+
+    if checkpoint_is_hf_id and not bool(args.online):
+        # Pragmatic default: if you pass a HF model id, allow downloads so the command doesn't "hang"
+        # waiting for a model that isn't cached locally.
+        os.environ["HF_HUB_OFFLINE"] = "0"
+        os.environ["TRANSFORMERS_OFFLINE"] = "0"
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
 
     params: dict[str, Any] = {
         "gdino_checkpoint": checkpoint,
@@ -124,8 +157,15 @@ def main(argv: list[str] | None = None) -> int:
 
     use_tiled = _max_dim_fast(image_path) > int(args.tiled_threshold)
     service = get_dino_service()
+    log_fn = None
+    if bool(args.log):
+        from inference_api.cli_support import log_to_stderr
+
+        log_fn = log_to_stderr
     try:
         if use_tiled:
+            if log_fn is not None:
+                log_fn("mode=tiled (recursive_detect)")
             result = service.call(
                 "recursive_detect",
                 {
@@ -135,9 +175,12 @@ def main(argv: list[str] | None = None) -> int:
                     "max_depth": int(args.recursive_max_depth),
                     "min_box_px": int(args.recursive_min_box_px),
                 },
+                log_fn=log_fn,
             )
         else:
-            result = service.call("predict", {"image_path": str(image_path), "params": params})
+            if log_fn is not None:
+                log_fn("mode=single (predict)")
+            result = service.call("predict", {"image_path": str(image_path), "params": params}, log_fn=log_fn)
     finally:
         service.close()
 
