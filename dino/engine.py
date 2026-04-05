@@ -174,6 +174,35 @@ def run_text_boxes(
     return [Det(label=str(label), box_xyxy=box.astype(np.float32), score=float(score)) for box, score, label in zip(boxes, scores, labels)]
 
 
+def _pad_rgb_for_grounding_dino(rgb: Any, *, min_side: int = 256, square_if_aspect_over: float = 8.0) -> Any:
+    import numpy as np
+
+    height, width = rgb.shape[:2]
+    short_side = max(1, min(height, width))
+    long_side = max(height, width)
+
+    target_h = int(height)
+    target_w = int(width)
+
+    if short_side < int(min_side):
+        if height <= width:
+            target_h = max(target_h, int(min_side))
+        else:
+            target_w = max(target_w, int(min_side))
+
+    if float(long_side) / float(short_side) >= float(square_if_aspect_over):
+        side = max(long_side, int(min_side))
+        target_h = max(target_h, int(side))
+        target_w = max(target_w, int(side))
+
+    if target_h == height and target_w == width:
+        return rgb
+
+    canvas = np.zeros((target_h, target_w, rgb.shape[2]), dtype=rgb.dtype)
+    canvas[:height, :width] = rgb
+    return canvas
+
+
 def _box_iou(a: Any, b: Any) -> float:
     ax1, ay1, ax2, ay2 = float(a[0]), float(a[1]), float(a[2]), float(a[3])
     bx1, by1, bx2, by2 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
@@ -1416,15 +1445,36 @@ class DinoRunner:
         if log_fn is not None:
             log_fn(f"Running DINO detect-only... valid-mask strategy={strategy_name}")
         pil_img = Image.fromarray(rgb)
-        detections = run_text_boxes(
-            processor=processor,
-            gdino=gdino,
-            device=device,
-            pil_image=pil_img,
-            text_queries=list(params.text_queries),
-            box_threshold=float(params.box_threshold),
-            text_threshold=float(params.text_threshold),
-        )
+        try:
+            detections = run_text_boxes(
+                processor=processor,
+                gdino=gdino,
+                device=device,
+                pil_image=pil_img,
+                text_queries=list(params.text_queries),
+                box_threshold=float(params.box_threshold),
+                text_threshold=float(params.text_threshold),
+            )
+        except RuntimeError as exc:
+            if "selected index k out of range" not in str(exc):
+                raise
+            padded_rgb = _pad_rgb_for_grounding_dino(rgb)
+            if padded_rgb.shape[:2] == rgb.shape[:2]:
+                raise
+            if log_fn is not None:
+                log_fn(
+                    "GroundingDINO retry: padding extreme-aspect image "
+                    f"from {width}x{height} to {padded_rgb.shape[1]}x{padded_rgb.shape[0]}."
+                )
+            detections = run_text_boxes(
+                processor=processor,
+                gdino=gdino,
+                device=device,
+                pil_image=Image.fromarray(padded_rgb),
+                text_queries=list(params.text_queries),
+                box_threshold=float(params.box_threshold),
+                text_threshold=float(params.text_threshold),
+            )
         before_invalid_filter = len(detections)
         detections = [
             det

@@ -195,6 +195,14 @@ def _write_box_csv(*, csv_path: Path, rows: list[Row]) -> None:
             )
 
 
+def _write_error_text(*, error_path: Path, image_path: Path, exc: Exception) -> None:
+    error_path.parent.mkdir(parents=True, exist_ok=True)
+    error_path.write_text(
+        f"image_path: {image_path}\nerror_type: {exc.__class__.__name__}\nerror: {exc}\n",
+        encoding="utf-8",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Batch GroundingDINO detect on a folder; output one folder per image with box.csv + overlay.")
     parser.add_argument("--input-dir", required=True, help="Folder containing images.")
@@ -288,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
             "recursive_tile_scales": [s.strip() for s in str(args.tile_scales).split(",") if s.strip()],
         }
 
+        failed_images: list[tuple[Path, Exception]] = []
         for idx, img_path in enumerate(images, start=1):
             max_dim = _max_dim_fast(img_path)
             use_tiled = int(max_dim) > int(args.tiled_threshold)
@@ -297,42 +306,49 @@ def main(argv: list[str] | None = None) -> int:
             log_fn = (lambda s: print(s, flush=True)) if bool(args.verbose_logs) else None
             image_params = dict(params)
             image_params["output_dir"] = str(image_out_dir)
-            if use_tiled:
-                result = service.call(
-                    "recursive_detect",
-                    {
-                        "image_path": str(img_path),
-                        "params": image_params,
-                        "target_labels": image_params["text_queries"],
-                        "max_depth": int(args.recursive_max_depth),
-                        "min_box_px": int(args.recursive_min_box_px),
-                    },
-                    log_fn=log_fn,
-                )
-            else:
-                result = service.call("predict", {"image_path": str(img_path), "params": image_params}, log_fn=log_fn)
+            try:
+                if use_tiled:
+                    result = service.call(
+                        "recursive_detect",
+                        {
+                            "image_path": str(img_path),
+                            "params": image_params,
+                            "target_labels": image_params["text_queries"],
+                            "max_depth": int(args.recursive_max_depth),
+                            "min_box_px": int(args.recursive_min_box_px),
+                        },
+                        log_fn=log_fn,
+                    )
+                else:
+                    result = service.call("predict", {"image_path": str(img_path), "params": image_params}, log_fn=log_fn)
 
-            # Use the filtered detections (after containment filter + NMS + max_dets).
-            # `display_detections` can be extremely large in tiled mode.
-            detections = list(result.get("detections") or [])
+                # Use the filtered detections (after containment filter + NMS + max_dets).
+                # `display_detections` can be extremely large in tiled mode.
+                detections = list(result.get("detections") or [])
 
-            # Image dims for CSV sanitization:
-            from PIL import Image
+                # Image dims for CSV sanitization:
+                from PIL import Image
 
-            with Image.open(img_path) as pil_img:
-                w, h = pil_img.size
+                with Image.open(img_path) as pil_img:
+                    w, h = pil_img.size
 
-            rows = _rows_from_detections(image_path=img_path, detections=detections, width=int(w), height=int(h))
+                rows = _rows_from_detections(image_path=img_path, detections=detections, width=int(w), height=int(h))
 
-            overlay_path = image_out_dir / "overlay.png"
-            csv_path = image_out_dir / "box.csv"
-            _write_overlay(image_path=img_path, overlay_path=overlay_path, detections=detections)
-            _write_box_csv(csv_path=csv_path, rows=rows)
+                overlay_path = image_out_dir / "overlay.png"
+                csv_path = image_out_dir / "box.csv"
+                _write_overlay(image_path=img_path, overlay_path=overlay_path, detections=detections)
+                _write_box_csv(csv_path=csv_path, rows=rows)
 
-            print(f"[{idx}/{len(images)}] done {img_path.name}: dets={len(rows)} box.csv + overlay.png", flush=True)
+                print(f"[{idx}/{len(images)}] done {img_path.name}: dets={len(rows)} box.csv + overlay.png", flush=True)
+            except Exception as exc:
+                failed_images.append((img_path, exc))
+                _write_error_text(error_path=image_out_dir / "error.txt", image_path=img_path, exc=exc)
+                print(f"[{idx}/{len(images)}] error {img_path.name}: {exc}", flush=True)
+                continue
 
         print(f"Saved per-image outputs under: {out_dir}", flush=True)
-        return 0
+        print(f"Completed: ok={len(images) - len(failed_images)} failed={len(failed_images)}", flush=True)
+        return 0 if not failed_images else 1
     finally:
         service.close()
 
