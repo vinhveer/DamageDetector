@@ -51,6 +51,12 @@ def _append_csv_rows(path: str, rows: list[list]) -> None:
         writer.writerows(rows)
 
 
+def _append_csv_row(path: str, row: list) -> None:
+    with open(path, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(row)
+
+
 def calc_loss(
     outputs,
     high_res_label_batch,
@@ -642,8 +648,6 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         epoch_loss_tversky_sum = 0.0
         epoch_loss_focal_sum = 0.0
         epoch_step_count = 0
-        train_step_rows = []
-
         for sampled_batch in trainloader:
             optimizer.zero_grad()
             image_batch = sampled_batch["image"].cuda()
@@ -725,7 +729,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             epoch_loss_tversky_sum += loss_tversky_value
             epoch_loss_focal_sum += loss_focal_value
             epoch_step_count += 1
-            train_step_rows.append(
+            _append_csv_row(
+                train_step_csv_path,
                 [
                     int(epoch_num),
                     int(iter_num),
@@ -735,10 +740,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     loss_tversky_value,
                     loss_focal_value,
                     float(lr_),
-                ]
+                ],
             )
-
-        _append_csv_rows(train_step_csv_path, train_step_rows)
 
         mean_loss = epoch_loss_sum / max(1, epoch_step_count)
         mean_loss_bce = epoch_loss_bce_sum / max(1, epoch_step_count)
