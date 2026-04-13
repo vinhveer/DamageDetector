@@ -37,6 +37,20 @@ PROMPT_SCHEDULES = {
 }
 
 
+def _init_csv(path: str, headers: list[str]) -> None:
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+
+
+def _append_csv_rows(path: str, rows: list[list]) -> None:
+    if not rows:
+        return
+    with open(path, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerows(rows)
+
+
 def calc_loss(
     outputs,
     high_res_label_batch,
@@ -248,6 +262,8 @@ def _run_tiled_full_image_eval(
     image_size: int,
     multimask_output: bool,
     use_amp: bool,
+    case_metrics_csv_path: str | None = None,
+    epoch_num: int | None = None,
 ):
     try:
         from datasets.dataset_generic import load_image_mask_arrays
@@ -270,11 +286,24 @@ def _run_tiled_full_image_eval(
         )
         sweep = threshold_sweep(score_map, label, thresholds)
         total_cases += 1
-        case_logs = []
+        case_rows = []
         for thr in thresholds:
             metric_by_thr[float(thr)] += np.array(sweep[float(thr)], dtype=np.float64)
-            case_logs.append(f"thr={float(thr):.2f} tile_iou={sweep[float(thr)][3]:.4f}")
-        logging.info("idx %d case %s %s" % (i_batch, case_name, " | ".join(case_logs)))
+            if case_metrics_csv_path is not None:
+                metrics = sweep[float(thr)]
+                case_rows.append(
+                    [
+                        int(epoch_num) if epoch_num is not None else -1,
+                        int(i_batch),
+                        str(case_name),
+                        float(thr),
+                        float(metrics[0]),
+                        float(metrics[1]),
+                        float(metrics[2]),
+                        float(metrics[3]),
+                    ]
+                )
+        _append_csv_rows(case_metrics_csv_path, case_rows)
 
     metric_by_thr = {
         float(thr): metric_by_thr[float(thr)] / max(1, total_cases)
@@ -329,7 +358,16 @@ def _run_tiled_continuity_eval(
     return {key: float(value) / float(total_cases) for key, value in totals.items()}
 
 
-def _run_legacy_box_eval(valloader, model, args, multimask_output, thresholds):
+def _run_legacy_box_eval(
+    valloader,
+    model,
+    args,
+    multimask_output,
+    thresholds,
+    *,
+    case_metrics_csv_path: str | None = None,
+    epoch_num: int | None = None,
+):
     metric_by_thr = {float(thr): np.zeros(4, dtype=np.float64) for thr in thresholds}
     total_cases = 0
 
@@ -345,7 +383,7 @@ def _run_legacy_box_eval(valloader, model, args, multimask_output, thresholds):
                 use_points=False,
                 device=torch.device("cuda"),
             )
-        case_logs = []
+        case_rows = []
         for thr in thresholds:
             metric_box_i = test_single_volume(
                 image,
@@ -361,9 +399,21 @@ def _run_legacy_box_eval(valloader, model, args, multimask_output, thresholds):
                 threshold_prob=float(thr),
             )
             metric_by_thr[float(thr)] += np.array(metric_box_i, dtype=np.float64)
-            case_logs.append(f"thr={float(thr):.2f} legacy_iou={metric_box_i[3]:.4f}")
+            if case_metrics_csv_path is not None:
+                case_rows.append(
+                    [
+                        int(epoch_num) if epoch_num is not None else -1,
+                        int(i_batch),
+                        str(case_name),
+                        float(thr),
+                        float(metric_box_i[0]),
+                        float(metric_box_i[1]),
+                        float(metric_box_i[2]),
+                        float(metric_box_i[3]),
+                    ]
+                )
         total_cases += 1
-        logging.info("legacy idx %d case %s %s" % (i_batch, case_name, " | ".join(case_logs)))
+        _append_csv_rows(case_metrics_csv_path, case_rows)
 
     metric_by_thr = {
         float(thr): metric_by_thr[float(thr)] / max(1, total_cases)
@@ -513,27 +563,63 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     max_iterations = args.max_epochs * len(trainloader)
     logging.info("%d iterations per epoch. %d max iterations " % (len(trainloader), max_iterations))
     csv_path = os.path.join(snapshot_path, "val.csv")
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(
-            [
-                "epoch",
-                "tile_threshold",
-                "tile_precision",
-                "tile_recall",
-                "tile_dice",
-                "tile_iou",
-                "tile_skeleton_dice",
-                "tile_centerline_precision",
-                "tile_centerline_recall",
-                "tile_component_fragmentation",
-                "legacy_threshold",
-                "legacy_precision",
-                "legacy_recall",
-                "legacy_dice",
-                "legacy_iou",
-            ]
-        )
+    train_step_csv_path = os.path.join(snapshot_path, "train_steps.csv")
+    train_epoch_csv_path = os.path.join(snapshot_path, "train_epochs.csv")
+    val_threshold_csv_path = os.path.join(snapshot_path, "val_thresholds.csv")
+    val_tile_case_csv_path = os.path.join(snapshot_path, "val_tile_cases.csv")
+    val_legacy_case_csv_path = os.path.join(snapshot_path, "val_legacy_cases.csv")
+    _init_csv(
+        csv_path,
+        [
+            "epoch",
+            "tile_threshold",
+            "tile_precision",
+            "tile_recall",
+            "tile_dice",
+            "tile_iou",
+            "tile_skeleton_dice",
+            "tile_centerline_precision",
+            "tile_centerline_recall",
+            "tile_component_fragmentation",
+            "legacy_threshold",
+            "legacy_precision",
+            "legacy_recall",
+            "legacy_dice",
+            "legacy_iou",
+        ],
+    )
+    _init_csv(
+        train_step_csv_path,
+        ["epoch", "iteration", "loss", "loss_bce", "loss_dice", "loss_tversky", "loss_focal", "lr"],
+    )
+    _init_csv(
+        train_epoch_csv_path,
+        [
+            "epoch",
+            "mean_loss",
+            "mean_loss_bce",
+            "mean_loss_dice",
+            "mean_loss_tversky",
+            "mean_loss_focal",
+            "lr",
+            "full_box_points",
+            "full_box_only",
+            "tight_box_points",
+            "background_full_box_only",
+        ],
+    )
+    _init_csv(
+        val_threshold_csv_path,
+        ["epoch", "mode", "threshold", "precision", "recall", "dice", "iou"],
+    )
+    _init_csv(
+        val_tile_case_csv_path,
+        ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
+    )
+    _init_csv(
+        val_legacy_case_csv_path,
+        ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
+    )
 
     iterator = tqdm(range(max_epoch), ncols=70)
     best_performance = 0.0
@@ -550,6 +636,13 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             "tight_box_points": 0,
             "background_full_box_only": 0,
         }
+        epoch_loss_sum = 0.0
+        epoch_loss_bce_sum = 0.0
+        epoch_loss_dice_sum = 0.0
+        epoch_loss_tversky_sum = 0.0
+        epoch_loss_focal_sum = 0.0
+        epoch_step_count = 0
+        train_step_rows = []
 
         for sampled_batch in trainloader:
             optimizer.zero_grad()
@@ -621,15 +714,72 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 lr_ = optimizer.param_groups[0]["lr"]
 
             iter_num += 1
-            logging.info(
-                "iteration %d : loss : %f, loss_bce: %f, loss_dice: %f loss_tversky: %f loss_focal: %f lr: %f"
-                % (iter_num, loss.item(), loss_bce.item(), loss_dice.item(), loss_tversky.item(), loss_focal.item(), lr_)
+            loss_value = float(loss.item())
+            loss_bce_value = float(loss_bce.item())
+            loss_dice_value = float(loss_dice.item())
+            loss_tversky_value = float(loss_tversky.item())
+            loss_focal_value = float(loss_focal.item())
+            epoch_loss_sum += loss_value
+            epoch_loss_bce_sum += loss_bce_value
+            epoch_loss_dice_sum += loss_dice_value
+            epoch_loss_tversky_sum += loss_tversky_value
+            epoch_loss_focal_sum += loss_focal_value
+            epoch_step_count += 1
+            train_step_rows.append(
+                [
+                    int(epoch_num),
+                    int(iter_num),
+                    loss_value,
+                    loss_bce_value,
+                    loss_dice_value,
+                    loss_tversky_value,
+                    loss_focal_value,
+                    float(lr_),
+                ]
             )
+
+        _append_csv_rows(train_step_csv_path, train_step_rows)
+
+        mean_loss = epoch_loss_sum / max(1, epoch_step_count)
+        mean_loss_bce = epoch_loss_bce_sum / max(1, epoch_step_count)
+        mean_loss_dice = epoch_loss_dice_sum / max(1, epoch_step_count)
+        mean_loss_tversky = epoch_loss_tversky_sum / max(1, epoch_step_count)
+        mean_loss_focal = epoch_loss_focal_sum / max(1, epoch_step_count)
+        _append_csv_rows(
+            train_epoch_csv_path,
+            [[
+                int(epoch_num),
+                float(mean_loss),
+                float(mean_loss_bce),
+                float(mean_loss_dice),
+                float(mean_loss_tversky),
+                float(mean_loss_focal),
+                float(lr_),
+                int(epoch_prompt_counts["full_box_points"]),
+                int(epoch_prompt_counts["full_box_only"]),
+                int(epoch_prompt_counts["tight_box_points"]),
+                int(epoch_prompt_counts["background_full_box_only"]),
+            ]],
+        )
+        logging.info(
+            "Epoch %d/%d train: loss=%.4f bce=%.4f dice=%.4f tversky=%.4f focal=%.4f lr=%.6f"
+            % (
+                epoch_num + 1,
+                max_epoch,
+                mean_loss,
+                mean_loss_bce,
+                mean_loss_dice,
+                mean_loss_tversky,
+                mean_loss_focal,
+                float(lr_),
+            )
+        )
 
         if prompt_policy != "legacy":
             logging.info(
-                "Prompt schedule counts: full_box+points=%d full_box_only=%d tight_box+points=%d background_full_box_only=%d"
+                "Epoch %d prompt mix: full_box+points=%d full_box_only=%d tight_box+points=%d background_only=%d"
                 % (
+                    epoch_num + 1,
                     epoch_prompt_counts["full_box_points"],
                     epoch_prompt_counts["full_box_only"],
                     epoch_prompt_counts["tight_box_points"],
@@ -651,6 +801,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 image_size=int(args.img_size),
                 multimask_output=multimask_output,
                 use_amp=bool(getattr(args, "use_amp", False)),
+                case_metrics_csv_path=val_tile_case_csv_path,
+                epoch_num=epoch_num,
             )
             tile_continuity = _run_tiled_continuity_eval(
                 args.val_path,
@@ -663,18 +815,28 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 multimask_output=multimask_output,
                 use_amp=bool(getattr(args, "use_amp", False)),
             )
+            threshold_rows = []
             for thr in val_thresholds:
-                logging.info(
-                    "Validation threshold %.2f -> tile_full_image_iou: %f"
-                    % (float(thr), tile_by_thr[float(thr)][3])
+                threshold_rows.append(
+                    [
+                        int(epoch_num),
+                        "tile",
+                        float(thr),
+                        float(tile_by_thr[float(thr)][0]),
+                        float(tile_by_thr[float(thr)][1]),
+                        float(tile_by_thr[float(thr)][2]),
+                        float(tile_by_thr[float(thr)][3]),
+                    ]
                 )
+            _append_csv_rows(val_threshold_csv_path, threshold_rows)
             logging.info(
-                "Validation selected threshold %.2f tile_full_box: mean_pr: %f mean_re: %f mean_f1: %f mean_iou : %f"
-                % (tile_selected_thr, tile_metric[0], tile_metric[1], tile_metric[2], tile_metric[3])
+                "Epoch %d val(tile): thr=%.2f pr=%.4f re=%.4f f1=%.4f iou=%.4f"
+                % (epoch_num + 1, tile_selected_thr, tile_metric[0], tile_metric[1], tile_metric[2], tile_metric[3])
             )
             logging.info(
-                "Tile continuity @ %.2f: skeleton_dice=%f centerline_precision=%f centerline_recall=%f component_fragmentation=%f"
+                "Epoch %d continuity: thr=%.2f skeleton_dice=%.4f centerline_precision=%.4f centerline_recall=%.4f fragmentation=%.4f"
                 % (
+                    epoch_num + 1,
                     tile_selected_thr,
                     tile_continuity["skeleton_dice"],
                     tile_continuity["centerline_precision"],
@@ -694,15 +856,26 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     args,
                     multimask_output,
                     val_thresholds,
+                    case_metrics_csv_path=val_legacy_case_csv_path,
+                    epoch_num=epoch_num,
                 )
+                legacy_rows = []
                 for thr in val_thresholds:
-                    logging.info(
-                        "Legacy threshold %.2f -> box_iou: %f"
-                        % (float(thr), legacy_by_thr[float(thr)][3])
+                    legacy_rows.append(
+                        [
+                            int(epoch_num),
+                            "legacy",
+                            float(thr),
+                            float(legacy_by_thr[float(thr)][0]),
+                            float(legacy_by_thr[float(thr)][1]),
+                            float(legacy_by_thr[float(thr)][2]),
+                            float(legacy_by_thr[float(thr)][3]),
+                        ]
                     )
+                _append_csv_rows(val_threshold_csv_path, legacy_rows)
                 logging.info(
-                    "Legacy selected threshold %.2f crop+GT-box: mean_pr: %f mean_re: %f mean_f1: %f mean_iou : %f"
-                    % (legacy_selected_thr, legacy_metric[0], legacy_metric[1], legacy_metric[2], legacy_metric[3])
+                    "Epoch %d val(legacy): thr=%.2f pr=%.4f re=%.4f f1=%.4f iou=%.4f"
+                    % (epoch_num + 1, legacy_selected_thr, legacy_metric[0], legacy_metric[1], legacy_metric[2], legacy_metric[3])
                 )
 
             with open(csv_path, "a", newline="") as f:
