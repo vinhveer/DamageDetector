@@ -500,12 +500,12 @@ def run_training(args):
         )
         logging.info(f"Saved training config to: {config_path}")
 
-    # CSV Writer Init
-    csv_path = os.path.join(output_dir, "val_metrics.csv")
-    if rank == 0:
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["epoch", "train_loss", "val_loss", "val_dice", "val_iou", "lr"])
+    csv_paths = {
+        "train_steps": os.path.join(output_dir, "train_steps.csv"),
+        "train_epochs": os.path.join(output_dir, "train_epochs.csv"),
+        "val": os.path.join(output_dir, "val.csv"),
+        "val_thresholds": os.path.join(output_dir, "val_thresholds.csv"),
+    }
 
     try:
         train_model(
@@ -520,7 +520,7 @@ def run_training(args):
             output_dir=output_dir,
             model_config=model_config,
             use_amp=(device.type == "cuda" and not bool(getattr(args, "no_amp", False))),
-            csv_path=csv_path,  # Pass CSV path
+            csv_paths=csv_paths,
             grad_accum_steps=getattr(args, "grad_accum_steps", 1),
         )
     finally:

@@ -179,7 +179,21 @@ import logging
 from model_io import save_checkpoint
 
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, model_config=None, csv_path=None, grad_accum_steps=1, use_amp=False):
+def _init_csv(path, header):
+    if not path:
+        return
+    with open(path, "w", newline="") as f:
+        csv.writer(f).writerow(header)
+
+
+def _append_csv_row(path, row):
+    if not path:
+        return
+    with open(path, "a", newline="") as f:
+        csv.writer(f).writerow(row)
+
+
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, model_config=None, csv_paths=None, grad_accum_steps=1, use_amp=False):
     # Ensure the output directory exists.
     os.makedirs(output_dir, exist_ok=True)
 
@@ -202,6 +216,41 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     patience = int(getattr(train_model, "_early_stop_patience", 15))
     counter = 0
     iter_num = 0
+    csv_paths = csv_paths or {}
+    train_steps_csv = csv_paths.get("train_steps")
+    train_epochs_csv = csv_paths.get("train_epochs")
+    val_csv = csv_paths.get("val")
+    val_thresholds_csv = csv_paths.get("val_thresholds")
+
+    if is_main:
+        _init_csv(
+            train_steps_csv,
+            ["epoch", "step_in_epoch", "global_step", "loss", "loss_bce", "loss_dice", "loss_focal", "lr"],
+        )
+        _init_csv(
+            train_epochs_csv,
+            ["epoch", "train_loss", "lr"],
+        )
+        _init_csv(
+            val_csv,
+            [
+                "epoch",
+                "val_loss",
+                "val_dice",
+                "val_iou",
+                "metric_threshold",
+                "best_iou_sweep",
+                "best_iou_sweep_threshold",
+                "best_dice_sweep",
+                "best_dice_sweep_threshold",
+                "reconstructed_image_count",
+                "lr",
+            ],
+        )
+        _init_csv(
+            val_thresholds_csv,
+            ["epoch", "threshold", "dice", "iou"],
+        )
 
     for epoch in range(num_epochs):
         if hasattr(getattr(train_loader, "sampler", None), "set_epoch"):
@@ -244,22 +293,23 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             train_steps += 1
             iter_num += 1
 
-            log_every = int(getattr(train_model, "_log_every", 1))
-            if is_main and log_every > 0 and (iter_num % log_every == 0):
+            if is_main:
                 current_lr = optimizer.param_groups[0]["lr"]
                 loss_bce = float(loss_components.get("loss_bce", torch.tensor(0.0)).item())
                 loss_dice = float(loss_components.get("loss_dice", torch.tensor(0.0)).item())
                 loss_focal = float(loss_components.get("loss_focal", torch.tensor(0.0)).item())
-                logging.info(
-                    "iteration %d : loss : %.6f, loss_bce: %.6f, loss_dice: %.6f, loss_focal: %.6f lr: %.7f"
-                    % (
+                _append_csv_row(
+                    train_steps_csv,
+                    [
+                        epoch + 1,
+                        train_steps,
                         iter_num,
-                        loss.item(),
+                        float(loss.item()),
                         loss_bce,
                         loss_dice,
                         loss_focal,
-                        current_lr,
-                    )
+                        float(current_lr),
+                    ],
                 )
 
         train_loss_sum = _all_reduce_sum(train_loss, device=device)
@@ -397,11 +447,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         val_losses.append(avg_val_loss)
 
         if is_main:
-            logging.info(f"Epoch {epoch+1}/{num_epochs}:")
-            logging.info(f"Train Loss: {avg_train_loss:.4f}")
+            logging.info(f"Epoch {epoch+1}/{num_epochs} train: loss={avg_train_loss:.4f}")
             thr = metric_threshold
             logging.info(
-                f"Val Loss: {avg_val_loss:.4f} | Val Dice@{thr}: {avg_val_dice:.4f} | Val IoU@{thr}: {avg_val_iou:.4f}"
+                f"Epoch {epoch+1}/{num_epochs} val: loss={avg_val_loss:.4f} | dice@{thr:.2f}={avg_val_dice:.4f} | iou@{thr:.2f}={avg_val_iou:.4f}"
             )
             if reconstructed_metrics is not None:
                 logging.info(
@@ -433,11 +482,30 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         if is_main:
             logging.info(f"Current learning rate: {current_lr:.7f}")
 
-        # CSV Logging
-        if csv_path and is_main:
-            with open(csv_path, "a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([epoch + 1, avg_train_loss, avg_val_loss, avg_val_dice, avg_val_iou, current_lr])
+        if is_main:
+            _append_csv_row(train_epochs_csv, [epoch + 1, avg_train_loss, float(current_lr)])
+            _append_csv_row(
+                val_csv,
+                [
+                    epoch + 1,
+                    avg_val_loss,
+                    avg_val_dice,
+                    avg_val_iou,
+                    float(metric_threshold),
+                    sweep_best_iou,
+                    float(sweep_best_iou_thr),
+                    sweep_best_dice,
+                    float(sweep_best_dice_thr),
+                    int(reconstructed_metrics["image_count"]) if reconstructed_metrics is not None else 0,
+                    float(current_lr),
+                ],
+            )
+            if val_thr_report:
+                for t in sorted(val_thr_report.keys(), key=float):
+                    _append_csv_row(
+                        val_thresholds_csv,
+                        [epoch + 1, float(t), float(val_thr_report[t]["dice_avg"]), float(val_thr_report[t]["iou_avg"])],
+                    )
 
         metrics = {
             "train_loss": avg_train_loss,
