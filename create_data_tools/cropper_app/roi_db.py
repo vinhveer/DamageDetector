@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from cropper_app.domain import Roi
+from create_data_tools.cropper_app.domain import Roi
 
 
 class RoiDatabase:

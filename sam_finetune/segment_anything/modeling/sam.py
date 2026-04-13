@@ -56,17 +56,33 @@ class Sam(nn.Module):
 
     def forward_train(self, batched_input, multimask_output, image_size, boxes=None, points=None):
         input_images = self.preprocess(batched_input)
-        image_embeddings = self.image_encoder(input_images)
+        requires_image_features = bool(getattr(self.mask_decoder, "requires_image_features", False))
+        if requires_image_features:
+            image_embeddings, interm_embeddings = self.image_encoder(input_images, return_interm_embeddings=True)
+        else:
+            image_embeddings = self.image_encoder(input_images)
+            interm_embeddings = None
         sparse_embeddings, dense_embeddings = self.prompt_encoder(
             points=points, boxes=boxes, masks=None
         )
-        output_masks, iou_predictions = self.mask_decoder(
-            image_embeddings=image_embeddings,
-            image_pe=self.prompt_encoder.get_dense_pe(),
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            multimask_output=multimask_output
-        )
+        if requires_image_features:
+            output_masks, iou_predictions = self.mask_decoder(
+                image_embeddings=image_embeddings,
+                image_pe=self.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=multimask_output,
+                hq_token_only=False,
+                interm_embeddings=interm_embeddings,
+            )
+        else:
+            output_masks, iou_predictions = self.mask_decoder(
+                image_embeddings=image_embeddings,
+                image_pe=self.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=multimask_output
+            )
         # masks = self.postprocess_masks(
         #     output_masks,
         #     input_size=(image_size, image_size),
@@ -120,10 +136,15 @@ class Sam(nn.Module):
                 of mask quality, in shape BxC.
         """
         input_images = torch.stack([self.preprocess(x["image"]) for x in batched_input], dim=0)
-        image_embeddings = self.image_encoder(input_images)
+        requires_image_features = bool(getattr(self.mask_decoder, "requires_image_features", False))
+        if requires_image_features:
+            image_embeddings, interm_embeddings = self.image_encoder(input_images, return_interm_embeddings=True)
+        else:
+            image_embeddings = self.image_encoder(input_images)
+            interm_embeddings = None
 
         outputs = []
-        for image_record, curr_embedding in zip(batched_input, image_embeddings):
+        for index, (image_record, curr_embedding) in enumerate(zip(batched_input, image_embeddings)):
             if "point_coords" in image_record:
                 points = (image_record["point_coords"], image_record["point_labels"])
             else:
@@ -133,13 +154,24 @@ class Sam(nn.Module):
                 boxes=image_record.get("boxes", None),
                 masks=image_record.get("mask_inputs", None),
             )
-            output_masks, iou_predictions = self.mask_decoder(
-                image_embeddings=curr_embedding.unsqueeze(0),
-                image_pe=self.prompt_encoder.get_dense_pe(),
-                sparse_prompt_embeddings=sparse_embeddings,
-                dense_prompt_embeddings=dense_embeddings,
-                multimask_output=multimask_output,
-            )
+            if requires_image_features:
+                output_masks, iou_predictions = self.mask_decoder(
+                    image_embeddings=curr_embedding.unsqueeze(0),
+                    image_pe=self.prompt_encoder.get_dense_pe(),
+                    sparse_prompt_embeddings=sparse_embeddings,
+                    dense_prompt_embeddings=dense_embeddings,
+                    multimask_output=multimask_output,
+                    hq_token_only=False,
+                    interm_embeddings=interm_embeddings[index].unsqueeze(0),
+                )
+            else:
+                output_masks, iou_predictions = self.mask_decoder(
+                    image_embeddings=curr_embedding.unsqueeze(0),
+                    image_pe=self.prompt_encoder.get_dense_pe(),
+                    sparse_prompt_embeddings=sparse_embeddings,
+                    dense_prompt_embeddings=dense_embeddings,
+                    multimask_output=multimask_output,
+                )
             # masks = self.postprocess_masks(
             #     output_masks,
             #     input_size=image_record["image"].shape[-2:],
@@ -197,4 +229,3 @@ class Sam(nn.Module):
         padw = self.image_encoder.img_size - w
         x = F.pad(x, (0, padw, 0, padh))
         return x
-

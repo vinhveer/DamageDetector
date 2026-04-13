@@ -66,9 +66,15 @@ class SamFinetuneRunner:
     def ensure_model_loaded(self, params: SamFinetuneParams, *, log_fn=None) -> tuple[Any, str]:
         self._ensure_import_paths()
 
-        from sam.runtime import load_sam_model
-        from segment_anything import SamPredictor
-        from sam_finetune.runtime import apply_delta_to_sam, infer_delta_type_from_path, resolve_best_delta_checkpoint
+        from sam_finetune.segment_anything import SamPredictor
+        from sam_finetune.runtime import (
+            apply_delta_to_sam,
+            infer_delta_type_from_path,
+            load_inference_config,
+            load_sam_model,
+            resolve_best_delta_checkpoint,
+            resolve_decoder_type,
+        )
 
         device = select_device_str(params.device)
         fallback = describe_device_fallback(params.device, device)
@@ -76,12 +82,17 @@ class SamFinetuneRunner:
             log_fn(fallback)
         delta_type = str(params.delta_type or "").strip().lower()
         delta_path = resolve_best_delta_checkpoint(delta_type, str(params.delta_checkpoint or "auto"))
+        inference_config = load_inference_config(delta_path)
+        model_image_size = int(inference_config.get("img_size", 1024))
+        decoder_type = resolve_decoder_type(delta_path, inference_config.get("decoder_type"))
         inferred = infer_delta_type_from_path(delta_path)
         if inferred is not None and inferred != delta_type:
             raise ValueError(f"Delta checkpoint mismatch: checkpoint looks like {inferred}, expected {delta_type}.")
         delta_sig = (
             delta_type,
             delta_path,
+            decoder_type,
+            model_image_size,
             int(params.middle_dim),
             float(params.scaling_factor),
             int(params.rank),
@@ -97,8 +108,15 @@ class SamFinetuneRunner:
         if not needs_reload:
             return self._predictor, device
         if log_fn is not None:
-            log_fn("Loading SAM checkpoint...")
-        sam_model, used_model_type = load_sam_model(params.sam_checkpoint, params.sam_model_type)
+            log_fn(f"Loading SAM checkpoint... decoder={decoder_type} image_size={model_image_size}")
+        sam_model, used_model_type = load_sam_model(
+            params.sam_checkpoint,
+            params.sam_model_type,
+            image_size=model_image_size,
+            pixel_mean=[0.485, 0.456, 0.406],
+            pixel_std=[0.229, 0.224, 0.225],
+            decoder_type=decoder_type,
+        )
         if log_fn is not None:
             log_fn(f"Applying delta to SAM... type={delta_type} ckpt={delta_path}")
         apply_delta_to_sam(

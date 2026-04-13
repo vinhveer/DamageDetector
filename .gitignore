@@ -43,6 +43,15 @@ wandb/
 checkpoints/*.pth
 checkpoints/*.pt
 crack500_crop/
+embedding_cache.pkl
+split_assignments.xlsx
+
+# DINO local artifacts
+dino/cache/
+dino/outputs/
+dino/tmp/
+dino/models/**/pytorch_model*.bin
+dino/models/**/model*.safetensors
 
 # Prevent accidentally committing embedded repos
 **/.git/

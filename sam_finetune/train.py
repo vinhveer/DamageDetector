@@ -41,6 +41,7 @@ parser.add_argument('--delta_type', type=str, default='adapter', help='choose fr
 parser.add_argument('--middle_dim', type=int, default=32, help='Middle dim of adapter')
 parser.add_argument('--scaling_factor', type=float, default=0.1, help='Scaling_factor of adapter')
 parser.add_argument('--rank', type=int, default=4, help='Rank for LoRA adaptation')
+parser.add_argument('--decoder_type', type=str, default='baseline', choices=['baseline', 'hq'], help='Mask decoder type')
 parser.add_argument('--warmup', action='store_true', help='If activated, warp up the learning from a lower lr to the base_lr')
 parser.add_argument('--warmup_period', type=int, default=300,
                     help='Warp up iterations, only valid whrn warmup is activated')
@@ -76,6 +77,14 @@ parser.add_argument('--tile_overlap', type=int, default=-1, help='Tile overlap f
 parser.add_argument('--legacy_box_eval', action='store_true', help='Also run legacy crop+GT-box validation diagnostics')
 
 args = parser.parse_args()
+
+
+def _configure_hq_lora_training(net) -> None:
+    sam_model = getattr(net, "sam", net)
+    mask_decoder = getattr(sam_model, "mask_decoder", None)
+    if mask_decoder is None or not hasattr(mask_decoder, "set_hq_only_trainable"):
+        return
+    mask_decoder.set_hq_only_trainable()
 
 if __name__ == "__main__":
     if args.tf32:
@@ -123,7 +132,8 @@ if __name__ == "__main__":
                                                                 num_classes=NUM_CLASSES,
                                                                 checkpoint=args.ckpt, 
                                                                 pixel_mean=[0.485, 0.456, 0.406],
-                                                                pixel_std=[0.229, 0.224, 0.225])
+                                                                pixel_std=[0.229, 0.224, 0.225],
+                                                                decoder_type=args.decoder_type)
 
     if args.delta_type == 'adapter':
         pkg = import_module('delta.sam_adapter_image_encoder')
@@ -137,6 +147,9 @@ if __name__ == "__main__":
 
     if args.delta_ckpt is not None:
         net.load_delta_parameters(args.delta_ckpt)
+
+    if str(args.decoder_type).strip().lower() == "hq":
+        _configure_hq_lora_training(net)
 
     multimask_output = False
 

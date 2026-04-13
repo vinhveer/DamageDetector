@@ -33,7 +33,11 @@ class SamPredictor:
         self.original_size = original_image_size
         self.input_size = tuple(transformed_image.shape[-2:])
         input_image = self.model.preprocess(transformed_image)
-        self.features = self.model.image_encoder(input_image)
+        if bool(getattr(self.model.mask_decoder, "requires_image_features", False)):
+            self.features, self.interm_features = self.model.image_encoder(input_image, return_interm_embeddings=True)
+        else:
+            self.features = self.model.image_encoder(input_image)
+            self.interm_features = None
         self.is_image_set = True
 
     def predict(
@@ -94,13 +98,17 @@ class SamPredictor:
             boxes=boxes,
             masks=mask_input,
         )
-        low_res_masks, iou_predictions = self.model.mask_decoder(
+        decoder_kwargs = dict(
             image_embeddings=self.features,
             image_pe=self.model.prompt_encoder.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
             multimask_output=multimask_output,
         )
+        if bool(getattr(self.model.mask_decoder, "requires_image_features", False)):
+            decoder_kwargs["hq_token_only"] = False
+            decoder_kwargs["interm_embeddings"] = self.interm_features
+        low_res_masks, iou_predictions = self.model.mask_decoder(**decoder_kwargs)
         masks = self.model.postprocess_masks(low_res_masks, self.input_size, self.original_size)
         if not return_logits:
             masks = masks > self.model.mask_threshold
@@ -119,5 +127,6 @@ class SamPredictor:
     def reset_image(self) -> None:
         self.is_image_set = False
         self.features = None
+        self.interm_features = None
         self.original_size = None
         self.input_size = None

@@ -6,6 +6,8 @@ import tempfile
 import json
 from importlib import import_module
 
+from sam.runtime import infer_sam_model_type_from_state_dict, load_checkpoint_state_dict
+
 from torch_runtime import get_torch
 
 
@@ -81,6 +83,33 @@ def load_inference_config(delta_checkpoint: str | None) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def infer_decoder_type_from_path(delta_checkpoint: str | None) -> str | None:
+    if not delta_checkpoint or not os.path.isfile(delta_checkpoint):
+        return None
+    config = load_inference_config(delta_checkpoint)
+    decoder_type = str(config.get("decoder_type", "")).strip().lower()
+    if decoder_type in {"baseline", "hq"}:
+        return decoder_type
+    torch = get_torch()
+    try:
+        state_dict = torch.load(delta_checkpoint, map_location="cpu", weights_only=True)
+    except Exception:
+        state_dict = torch.load(delta_checkpoint, map_location="cpu", weights_only=False)
+    if not isinstance(state_dict, dict):
+        return None
+    if any(str(key).startswith("mask_decoder.hf_") for key in state_dict.keys()):
+        return "hq"
+    return "baseline"
+
+
+def resolve_decoder_type(delta_checkpoint: str | None, decoder_type: str | None = None) -> str:
+    requested = str(decoder_type or "auto").strip().lower()
+    if requested in {"baseline", "hq"}:
+        return requested
+    inferred = infer_decoder_type_from_path(delta_checkpoint)
+    return inferred or "baseline"
+
+
 def resolve_predict_threshold(delta_checkpoint: str | None, threshold: str | float | None) -> float:
     if threshold is not None and str(threshold).strip().lower() != "auto":
         return float(threshold)
@@ -131,6 +160,52 @@ def resolve_tile_settings(delta_checkpoint: str | None, tile_size: int | None, t
             overlap = size // 2
     overlap = max(0, min(overlap, max(0, size - 1)))
     return int(size), int(overlap)
+
+
+def load_sam_model(
+    checkpoint_path: str,
+    requested_model_type: str,
+    *,
+    image_size: int = 1024,
+    pixel_mean=None,
+    pixel_std=None,
+    decoder_type: str = "baseline",
+):
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"SAM checkpoint not found: {checkpoint_path}")
+    state_dict = load_checkpoint_state_dict(checkpoint_path)
+    inferred = infer_sam_model_type_from_state_dict(state_dict)
+    requested = (requested_model_type or "auto").strip().lower()
+    if requested == "auto":
+        if inferred is None:
+            raise RuntimeError(
+                "Cannot infer SAM model type from checkpoint. Choose the correct one explicitly: vit_b, vit_l, or vit_h."
+            )
+        model_type = inferred
+    else:
+        model_type = inferred or requested
+    from sam_finetune.segment_anything import sam_model_registry
+
+    if model_type not in sam_model_registry:
+        raise ValueError(f"Unknown SAM model type: {model_type!r}")
+    kwargs = {
+        "image_size": int(image_size),
+        "num_classes": 1,
+        "checkpoint": None,
+        "decoder_type": resolve_decoder_type(None, decoder_type),
+    }
+    if pixel_mean is not None:
+        kwargs["pixel_mean"] = pixel_mean
+    if pixel_std is not None:
+        kwargs["pixel_std"] = pixel_std
+    sam_model, _ = sam_model_registry[model_type](**kwargs)
+    try:
+        sam_model.load_state_dict(state_dict)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"SAM checkpoint/model type mismatch. requested={requested_model_type!r}, inferred={inferred!r}.\n{exc}"
+        ) from exc
+    return sam_model, model_type
 
 
 def apply_delta_to_sam(

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from cropper_app.domain import Roi
+from create_data_tools.cropper_app.domain import Roi
 
 
 @dataclass(frozen=True)

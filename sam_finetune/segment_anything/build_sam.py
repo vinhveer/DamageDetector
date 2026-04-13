@@ -7,11 +7,11 @@
 from torch_runtime import torch
 from torch_runtime import F
 from functools import partial
-from .modeling import ImageEncoderViT, MaskDecoder, PromptEncoder, Sam, TwoWayTransformer
+from .modeling import ImageEncoderViT, MaskDecoder, MaskDecoderHQ, PromptEncoder, Sam, TwoWayTransformer
 
 
 def build_sam_vit_h(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],
-                    checkpoint=None):
+                    checkpoint=None, decoder_type: str = "baseline"):
     return _build_sam(
         encoder_embed_dim=1280,
         encoder_depth=32,
@@ -21,7 +21,8 @@ def build_sam_vit_h(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53
         num_classes=num_classes,
         image_size=image_size,
         pixel_mean=pixel_mean,
-        pixel_std=pixel_std
+        pixel_std=pixel_std,
+        decoder_type=decoder_type,
     )
 
 
@@ -29,7 +30,7 @@ build_sam = build_sam_vit_h
 
 
 def build_sam_vit_l(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],
-                    checkpoint=None):
+                    checkpoint=None, decoder_type: str = "baseline"):
     return _build_sam(
         encoder_embed_dim=1024,
         encoder_depth=24,
@@ -39,12 +40,13 @@ def build_sam_vit_l(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53
         num_classes=num_classes,
         image_size=image_size,
         pixel_mean=pixel_mean,
-        pixel_std=pixel_std
+        pixel_std=pixel_std,
+        decoder_type=decoder_type,
     )
 
 
 def build_sam_vit_b(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],
-                    checkpoint=None):
+                    checkpoint=None, decoder_type: str = "baseline"):
     return _build_sam(
         encoder_embed_dim=768,
         encoder_depth=12,
@@ -55,7 +57,8 @@ def build_sam_vit_b(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53
         num_classes=num_classes,
         image_size=image_size,
         pixel_mean=pixel_mean,
-        pixel_std=pixel_std
+        pixel_std=pixel_std,
+        decoder_type=decoder_type,
     )
 
 
@@ -76,6 +79,7 @@ def _build_sam(
         image_size,
         pixel_mean,
         pixel_std,
+        decoder_type="baseline",
         checkpoint=None,
 ):
     prompt_embed_dim = 256
@@ -83,6 +87,35 @@ def _build_sam(
     vit_patch_size = 16
     image_embedding_size = image_size // vit_patch_size  # Divide by 16 here
     multimask_outputs = int(num_classes) if int(num_classes) > 1 else 0
+    normalized_decoder_type = str(decoder_type or "baseline").strip().lower()
+    if normalized_decoder_type == "hq":
+        mask_decoder = MaskDecoderHQ(
+            num_multimask_outputs=multimask_outputs,
+            transformer=TwoWayTransformer(
+                depth=2,
+                embedding_dim=prompt_embed_dim,
+                mlp_dim=2048,
+                num_heads=8,
+            ),
+            transformer_dim=prompt_embed_dim,
+            iou_head_depth=3,
+            iou_head_hidden_dim=256,
+            vit_dim=encoder_embed_dim,
+            output_scale_factor=4,
+        )
+    else:
+        mask_decoder = MaskDecoder(
+            num_multimask_outputs=multimask_outputs,
+            transformer=TwoWayTransformer(
+                depth=2,
+                embedding_dim=prompt_embed_dim,
+                mlp_dim=2048,
+                num_heads=8,
+            ),
+            transformer_dim=prompt_embed_dim,
+            iou_head_depth=3,
+            iou_head_hidden_dim=256,
+        )
     sam = Sam(
         image_encoder=ImageEncoderViT(
             depth=encoder_depth,
@@ -104,18 +137,7 @@ def _build_sam(
             input_image_size=(image_size, image_size),
             mask_in_chans=16,
         ),
-        mask_decoder=MaskDecoder(
-            num_multimask_outputs=multimask_outputs,
-            transformer=TwoWayTransformer(
-                depth=2,
-                embedding_dim=prompt_embed_dim,
-                mlp_dim=2048,
-                num_heads=8,
-            ),
-            transformer_dim=prompt_embed_dim,
-            iou_head_depth=3,
-            iou_head_hidden_dim=256,
-        ),
+        mask_decoder=mask_decoder,
         # pixel_mean=[123.675, 116.28, 103.53],
         # pixel_std=[58.395, 57.12, 57.375],
         pixel_mean=pixel_mean,
@@ -131,6 +153,8 @@ def _build_sam(
         except:
             new_state_dict = load_from(sam, state_dict, image_size, vit_patch_size, encoder_global_attn_indexes)
             sam.load_state_dict(new_state_dict)
+        if normalized_decoder_type == "hq" and hasattr(sam.mask_decoder, "initialize_from_sam_state_dict"):
+            sam.mask_decoder.initialize_from_sam_state_dict(state_dict)
     return sam, image_embedding_size
 
 

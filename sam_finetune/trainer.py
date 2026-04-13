@@ -151,6 +151,7 @@ def _write_inference_config(snapshot_path: str, args, best_threshold: float | No
         "img_size": int(args.img_size),
         "tile_overlap": int(tile_overlap),
         "best_threshold": None if best_threshold is None else float(best_threshold),
+        "decoder_type": str(getattr(args, "decoder_type", "baseline")).strip().lower(),
         "primary_val_mode": "tile_full_box",
         "prompt_schedule": "legacy_v1" if prompt_policy == "legacy" else prompt_policy,
         "predict_mode": "tile_full_box",

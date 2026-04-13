@@ -242,6 +242,7 @@ if __name__ == "__main__":
     parser.add_argument("--middle_dim", type=int, default=32, help="Middle dim of adapter")
     parser.add_argument("--scaling_factor", type=float, default=0.1, help="Scaling_factor of adapter")
     parser.add_argument("--rank", type=int, default=4, help="Rank for LoRA adaptation")
+    parser.add_argument("--decoder_type", type=str, default="baseline", choices=["baseline", "hq"], help="Mask decoder type")
     parser.add_argument("--pred_threshold", default="auto", help="Probability threshold as float or 'auto'")
     parser.add_argument("--val_thresholds", type=float, nargs="+", default=[0.35, 0.4, 0.45, 0.5, 0.55, 0.6], help="Candidate probability thresholds")
     parser.add_argument("--eval_mode", default="auto", choices=["auto", "tile_full_box", "legacy_full_box"], help="Primary evaluation mode")
@@ -295,6 +296,7 @@ if __name__ == "__main__":
         checkpoint=args.ckpt,
         pixel_mean=[0.485, 0.456, 0.406],
         pixel_std=[0.229, 0.224, 0.225],
+        decoder_type=args.decoder_type,
     )
     apply_delta_to_sam(
         sam=sam,
