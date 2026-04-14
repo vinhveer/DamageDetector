@@ -6,7 +6,7 @@ import random
 import sys
 
 import numpy as np
-from torch_runtime import DataLoader
+from torch_runtime import DataLoader, get_torch_utils_data
 from torch_runtime import nn, optim, torch
 from tqdm import tqdm
 
@@ -18,7 +18,15 @@ try:
         threshold_sweep,
         tiled_model_score_map,
     )
-    from utils import BinaryDiceLoss, BinaryFocalWithLogitsLoss, BinaryTverskyLoss, test_single_volume
+    from utils import (
+        BinaryCenterlineDiceLoss,
+        BinaryClDiceLoss,
+        BinaryDiceLoss,
+        BinaryFocalWithLogitsLoss,
+        BinaryTverskyLoss,
+        centerline_target_batch,
+        test_single_volume,
+    )
 except ImportError:
     from .tiled_inference import (
         best_threshold_result,
@@ -27,7 +35,15 @@ except ImportError:
         threshold_sweep,
         tiled_model_score_map,
     )
-    from .utils import BinaryDiceLoss, BinaryFocalWithLogitsLoss, BinaryTverskyLoss, test_single_volume
+    from .utils import (
+        BinaryCenterlineDiceLoss,
+        BinaryClDiceLoss,
+        BinaryDiceLoss,
+        BinaryFocalWithLogitsLoss,
+        BinaryTverskyLoss,
+        centerline_target_batch,
+        test_single_volume,
+    )
 
 
 PROMPT_SCHEDULES = {
@@ -66,11 +82,15 @@ def calc_loss(
     dice_loss,
     tversky_loss,
     focal_loss,
+    cldice_loss,
+    centerline_loss,
     *,
     bce_weight: float,
     dice_weight: float,
     tversky_weight: float,
     focal_weight: float,
+    cldice_weight: float,
+    centerline_aux_weight: float,
 ):
     masks = outputs["masks"]
     if masks.shape[1] == 1:
@@ -88,13 +108,21 @@ def calc_loss(
     loss_dice = dice_loss(logits, high_res_label_batch)
     loss_tversky = tversky_loss(logits, high_res_label_batch)
     loss_focal = focal_loss(logits, high_res_label_batch)
+    loss_cldice = cldice_loss(logits, high_res_label_batch) if float(cldice_weight) > 0.0 else logits.new_tensor(0.0)
+    if float(centerline_aux_weight) > 0.0:
+        centerline_target = centerline_target_batch(high_res_label_batch)
+        loss_centerline = centerline_loss(logits, centerline_target)
+    else:
+        loss_centerline = logits.new_tensor(0.0)
     loss = (
         float(bce_weight) * loss_bce
         + float(dice_weight) * loss_dice
         + float(tversky_weight) * loss_tversky
         + float(focal_weight) * loss_focal
+        + float(cldice_weight) * loss_cldice
+        + float(centerline_aux_weight) * loss_centerline
     )
-    return loss, loss_bce, loss_dice, loss_tversky, loss_focal
+    return loss, loss_bce, loss_dice, loss_tversky, loss_focal, loss_cldice, loss_centerline
 
 
 def _safe_thresholds(args) -> list[float]:
@@ -155,6 +183,48 @@ def _estimate_pos_weight(mask_dir, sample_list, sample_size=200, min_weight=1.0,
         weight = (1.0 - pos_ratio) / pos_ratio
     weight = max(float(min_weight), min(float(max_weight), float(weight)))
     return float(weight), float(pos_ratio), int(used)
+
+
+def _estimate_pos_weight_across_roots(roots, sample_size=200, min_weight=1.0, max_weight=20.0):
+    try:
+        from datasets.dataset_generic import list_image_files
+    except ImportError:
+        from .datasets.dataset_generic import list_image_files
+
+    weighted_ratio = 0.0
+    used_total = 0
+    counted_roots = 0
+    for root in roots:
+        mask_dir = os.path.join(root, "masks")
+        img_dir = os.path.join(root, "images")
+        if not os.path.isdir(mask_dir) or not os.path.isdir(img_dir):
+            continue
+        sample_list = list_image_files(img_dir)
+        result = _estimate_pos_weight(
+            mask_dir=mask_dir,
+            sample_list=sample_list,
+            sample_size=sample_size,
+            min_weight=min_weight,
+            max_weight=max_weight,
+        )
+        if result is None:
+            continue
+        _weight, pos_ratio, used = result
+        if used <= 0:
+            continue
+        weighted_ratio += float(pos_ratio) * float(used)
+        used_total += int(used)
+        counted_roots += 1
+
+    if counted_roots == 0 or used_total == 0:
+        return None
+    pos_ratio = weighted_ratio / float(used_total)
+    if pos_ratio <= 0:
+        weight = float(max_weight)
+    else:
+        weight = (1.0 - pos_ratio) / pos_ratio
+    weight = max(float(min_weight), min(float(max_weight), float(weight)))
+    return float(weight), float(pos_ratio), int(used_total)
 
 
 def _save_delta_model(model, path: str) -> None:
@@ -440,6 +510,37 @@ def _run_legacy_box_eval(
     return selected_thr, metric, metric_by_thr, total_cases
 
 
+def _build_train_dataset(args, *, split: str, transform, patches_per_image: int, use_full_image_box: bool):
+    try:
+        from datasets.dataset_generic import GenericDataset
+    except ImportError:
+        from .datasets.dataset_generic import GenericDataset
+
+    utils_data = get_torch_utils_data()
+    roots = [args.root_path]
+    for collection in (
+        getattr(args, "extra_train_roots", None) or [],
+        getattr(args, "pseudo_label_roots", None) or [],
+    ):
+        for root in collection:
+            if root and str(root).strip():
+                roots.append(str(root).strip())
+
+    datasets = [
+        GenericDataset(
+            base_dir=root,
+            split=split,
+            transform=transform,
+            patches_per_image=patches_per_image,
+            use_full_image_box=use_full_image_box,
+        )
+        for root in roots
+    ]
+    if len(datasets) == 1:
+        return datasets[0], roots
+    return utils_data.ConcatDataset(datasets), roots
+
+
 def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     try:
         from datasets.dataset_generic import GenericDataset, RandomGenerator, RefineRandomGenerator, ValGenerator, list_image_files
@@ -469,25 +570,26 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         split="val_vol",
         transform=ValGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res]),
     )
-    db_train = GenericDataset(
-        base_dir=args.root_path,
-        split="train",
-        transform=train_generator_cls(
-            output_size=[train_patch_size, train_patch_size],
-            low_res=[low_res, low_res],
-            background_crop_prob=args.background_crop_prob,
-            near_background_crop_prob=args.near_background_crop_prob,
-            hard_negative_crop_prob=getattr(args, "hard_negative_crop_prob", 0.10),
-            augment_profile=getattr(args, "augment_profile", "balanced"),
-            **(
-                {
-                    "roi_positive_band_low": float(getattr(args, "roi_positive_band_low", 0.20)),
-                    "roi_positive_band_high": float(getattr(args, "roi_positive_band_high", 0.90)),
-                }
-                if pipeline_stage == "refine"
-                else {}
-            ),
+    train_transform = train_generator_cls(
+        output_size=[train_patch_size, train_patch_size],
+        low_res=[low_res, low_res],
+        background_crop_prob=args.background_crop_prob,
+        near_background_crop_prob=args.near_background_crop_prob,
+        hard_negative_crop_prob=getattr(args, "hard_negative_crop_prob", 0.10),
+        augment_profile=getattr(args, "augment_profile", "balanced"),
+        **(
+            {
+                "roi_positive_band_low": float(getattr(args, "roi_positive_band_low", 0.20)),
+                "roi_positive_band_high": float(getattr(args, "roi_positive_band_high", 0.90)),
+            }
+            if pipeline_stage == "refine"
+            else {}
         ),
+    )
+    db_train, train_roots = _build_train_dataset(
+        args,
+        split="train",
+        transform=train_transform,
         patches_per_image=refine_patches_per_image,
         use_full_image_box=bool(getattr(args, "train_full_image_box", False)),
     )
@@ -523,9 +625,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     pos_weight_value = args.pos_weight
     auto_requested = isinstance(pos_weight_value, str) and str(pos_weight_value).lower() == "auto"
     if auto_requested:
-        auto_info = _estimate_pos_weight(
-            mask_dir=db_train.mask_dir,
-            sample_list=db_train.sample_list,
+        auto_info = _estimate_pos_weight_across_roots(
+            train_roots,
             sample_size=int(getattr(args, "pos_weight_sample", 200)),
             min_weight=float(getattr(args, "pos_weight_min", 1.0)),
             max_weight=float(getattr(args, "pos_weight_max", 20.0)),
@@ -548,6 +649,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     dice_loss = BinaryDiceLoss()
     tversky_loss = BinaryTverskyLoss(alpha=args.tversky_alpha, beta=args.tversky_beta)
     focal_loss = BinaryFocalWithLogitsLoss(alpha=args.focal_alpha, gamma=args.focal_gamma)
+    cldice_loss = BinaryClDiceLoss(iterations=int(getattr(args, "cldice_iters", 20)))
+    centerline_loss = BinaryCenterlineDiceLoss()
     val_thresholds = _safe_thresholds(args)
     b_lr = base_lr / args.warmup_period if args.warmup else base_lr
     decoder_lr_mult = float(getattr(args, "decoder_lr_mult", 0.1))
@@ -622,7 +725,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     )
     _init_csv(
         train_step_csv_path,
-        ["epoch", "iteration", "loss", "loss_bce", "loss_dice", "loss_tversky", "loss_focal", "lr"],
+        ["epoch", "iteration", "loss", "loss_bce", "loss_dice", "loss_tversky", "loss_focal", "loss_cldice", "loss_centerline", "lr"],
     )
     _init_csv(
         train_epoch_csv_path,
@@ -633,6 +736,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             "mean_loss_dice",
             "mean_loss_tversky",
             "mean_loss_focal",
+            "mean_loss_cldice",
+            "mean_loss_centerline",
             "lr",
             "full_box_points",
             "full_box_only",
@@ -653,7 +758,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
     )
     logging.info(
-        "Effective training profile: pipeline_stage=%s prompt_policy=%s augment_profile=%s background_crop_prob=%.3f near_background_crop_prob=%.3f hard_negative_crop_prob=%.3f decoder_lr_mult=%.3f hq_trainable_mode=%s tversky_alpha=%.3f tversky_beta=%.3f"
+        "Effective training profile: pipeline_stage=%s prompt_policy=%s augment_profile=%s background_crop_prob=%.3f near_background_crop_prob=%.3f hard_negative_crop_prob=%.3f decoder_lr_mult=%.3f hq_trainable_mode=%s tversky_alpha=%.3f tversky_beta=%.3f cldice_weight=%.3f centerline_aux_weight=%.3f train_roots=%s"
         % (
             pipeline_stage,
             prompt_policy,
@@ -665,6 +770,9 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             str(getattr(args, "hq_trainable_mode", "balanced")),
             float(getattr(args, "tversky_alpha", 0.3)),
             float(getattr(args, "tversky_beta", 0.7)),
+            float(getattr(args, "cldice_weight", 0.0)),
+            float(getattr(args, "centerline_aux_weight", 0.0)),
+            ",".join(train_roots),
         )
     )
 
@@ -688,6 +796,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         epoch_loss_dice_sum = 0.0
         epoch_loss_tversky_sum = 0.0
         epoch_loss_focal_sum = 0.0
+        epoch_loss_cldice_sum = 0.0
+        epoch_loss_centerline_sum = 0.0
         epoch_step_count = 0
         for sampled_batch in trainloader:
             optimizer.zero_grad()
@@ -714,17 +824,21 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             if args.use_amp:
                 with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=args.use_amp):
                     outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)
-                    loss, loss_bce, loss_dice, loss_tversky, loss_focal = calc_loss(
+                    loss, loss_bce, loss_dice, loss_tversky, loss_focal, loss_cldice_value_t, loss_centerline_value_t = calc_loss(
                         outputs,
                         label_batch,
                         bce_loss,
                         dice_loss,
                         tversky_loss,
                         focal_loss,
+                        cldice_loss,
+                        centerline_loss,
                         bce_weight=args.bce_weight,
                         dice_weight=args.dice_weight,
                         tversky_weight=args.tversky_weight,
                         focal_weight=args.focal_weight,
+                        cldice_weight=getattr(args, "cldice_weight", 0.0),
+                        centerline_aux_weight=getattr(args, "centerline_aux_weight", 0.0),
                     )
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -733,17 +847,21 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 scaler.update()
             else:
                 outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)
-                loss, loss_bce, loss_dice, loss_tversky, loss_focal = calc_loss(
+                loss, loss_bce, loss_dice, loss_tversky, loss_focal, loss_cldice_value_t, loss_centerline_value_t = calc_loss(
                     outputs,
                     label_batch,
                     bce_loss,
                     dice_loss,
                     tversky_loss,
                     focal_loss,
+                    cldice_loss,
+                    centerline_loss,
                     bce_weight=args.bce_weight,
                     dice_weight=args.dice_weight,
                     tversky_weight=args.tversky_weight,
                     focal_weight=args.focal_weight,
+                    cldice_weight=getattr(args, "cldice_weight", 0.0),
+                    centerline_aux_weight=getattr(args, "centerline_aux_weight", 0.0),
                 )
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -764,11 +882,15 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             loss_dice_value = float(loss_dice.item())
             loss_tversky_value = float(loss_tversky.item())
             loss_focal_value = float(loss_focal.item())
+            loss_cldice_value = float(loss_cldice_value_t.item())
+            loss_centerline_value = float(loss_centerline_value_t.item())
             epoch_loss_sum += loss_value
             epoch_loss_bce_sum += loss_bce_value
             epoch_loss_dice_sum += loss_dice_value
             epoch_loss_tversky_sum += loss_tversky_value
             epoch_loss_focal_sum += loss_focal_value
+            epoch_loss_cldice_sum += loss_cldice_value
+            epoch_loss_centerline_sum += loss_centerline_value
             epoch_step_count += 1
             _append_csv_row(
                 train_step_csv_path,
@@ -780,6 +902,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     loss_dice_value,
                     loss_tversky_value,
                     loss_focal_value,
+                    loss_cldice_value,
+                    loss_centerline_value,
                     float(lr_),
                 ],
             )
@@ -789,6 +913,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         mean_loss_dice = epoch_loss_dice_sum / max(1, epoch_step_count)
         mean_loss_tversky = epoch_loss_tversky_sum / max(1, epoch_step_count)
         mean_loss_focal = epoch_loss_focal_sum / max(1, epoch_step_count)
+        mean_loss_cldice = epoch_loss_cldice_sum / max(1, epoch_step_count)
+        mean_loss_centerline = epoch_loss_centerline_sum / max(1, epoch_step_count)
         _append_csv_rows(
             train_epoch_csv_path,
             [[
@@ -798,6 +924,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 float(mean_loss_dice),
                 float(mean_loss_tversky),
                 float(mean_loss_focal),
+                float(mean_loss_cldice),
+                float(mean_loss_centerline),
                 float(lr_),
                 int(epoch_prompt_counts["full_box_points"]),
                 int(epoch_prompt_counts["full_box_only"]),
@@ -806,7 +934,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             ]],
         )
         logging.info(
-            "Epoch %d/%d train: loss=%.4f bce=%.4f dice=%.4f tversky=%.4f focal=%.4f lr=%.6f"
+            "Epoch %d/%d train: loss=%.4f bce=%.4f dice=%.4f tversky=%.4f focal=%.4f cldice=%.4f centerline=%.4f lr=%.6f"
             % (
                 epoch_num + 1,
                 max_epoch,
@@ -815,6 +943,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 mean_loss_dice,
                 mean_loss_tversky,
                 mean_loss_focal,
+                mean_loss_cldice,
+                mean_loss_centerline,
                 float(lr_),
             )
         )

@@ -100,6 +100,31 @@ def _load_finetuned_sam(
     return sam.cuda(), int(image_size), decoder
 
 
+def _tiled_score_map_ensemble(
+    image_hwc: np.ndarray,
+    models: list,
+    image_sizes: list[int],
+    *,
+    tile_size: int,
+    tile_overlap: int,
+    multimask_output: bool,
+) -> np.ndarray:
+    score_maps = []
+    for model, image_size in zip(models, image_sizes):
+        score_maps.append(
+            tiled_model_score_map(
+                image_hwc,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                model=model,
+                image_size=int(image_size),
+                multimask_output=multimask_output,
+                use_amp=False,
+            )
+        )
+    return np.mean(np.stack(score_maps, axis=0), axis=0).astype(np.float32)
+
+
 def _save_case_outputs(test_save_path, case_name: str, image_hwc: np.ndarray, prob_map: np.ndarray, label: np.ndarray, threshold: float) -> None:
     pred = (prob_map >= float(threshold)).astype(np.uint8) * 255
     image_uint8 = image_hwc
@@ -114,7 +139,7 @@ def _save_case_outputs(test_save_path, case_name: str, image_hwc: np.ndarray, pr
     Image.fromarray((label.astype(np.uint8) * 255)).save(os.path.join(test_save_path, "gt", case_name + "_img.jpg"))
 
 
-def _run_tiled_eval(args, model, multimask_output, test_save_path=None):
+def _run_tiled_eval(args, model, multimask_output, test_save_path=None, *, ensemble_models=None, ensemble_image_sizes=None):
     case_names = list_image_files(os.path.join(args.volume_path, "images"))
     logging.info("%d tiled full-image test iterations", len(case_names))
 
@@ -125,15 +150,25 @@ def _run_tiled_eval(args, model, multimask_output, test_save_path=None):
 
     for i_batch, case_name in enumerate(case_names):
         image_hwc, label = load_image_mask_arrays(args.volume_path, case_name)
-        score_map = tiled_model_score_map(
-            image_hwc,
-            tile_size=tile_size,
-            tile_overlap=tile_overlap,
-            model=model,
-            image_size=int(args.img_size),
-            multimask_output=multimask_output,
-            use_amp=False,
-        )
+        if ensemble_models:
+            score_map = _tiled_score_map_ensemble(
+                image_hwc,
+                ensemble_models,
+                ensemble_image_sizes,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                multimask_output=multimask_output,
+            )
+        else:
+            score_map = tiled_model_score_map(
+                image_hwc,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                model=model,
+                image_size=int(args.img_size),
+                multimask_output=multimask_output,
+                use_amp=False,
+            )
         sweep = threshold_sweep(score_map, label, args.val_thresholds)
         total_cases += 1
         case_logs = []
@@ -169,15 +204,25 @@ def _run_tiled_eval(args, model, multimask_output, test_save_path=None):
     else:
         for case_name in case_names:
             image_hwc, label = load_image_mask_arrays(args.volume_path, case_name)
-            score_map = tiled_model_score_map(
-                image_hwc,
-                tile_size=tile_size,
-                tile_overlap=tile_overlap,
-                model=model,
-                image_size=int(args.img_size),
-                multimask_output=multimask_output,
-                use_amp=False,
-            )
+            if ensemble_models:
+                score_map = _tiled_score_map_ensemble(
+                    image_hwc,
+                    ensemble_models,
+                    ensemble_image_sizes,
+                    tile_size=tile_size,
+                    tile_overlap=tile_overlap,
+                    multimask_output=multimask_output,
+                )
+            else:
+                score_map = tiled_model_score_map(
+                    image_hwc,
+                    tile_size=tile_size,
+                    tile_overlap=tile_overlap,
+                    model=model,
+                    image_size=int(args.img_size),
+                    multimask_output=multimask_output,
+                    use_amp=False,
+                )
             metrics = continuity_metrics((score_map >= float(best_thr)).astype(np.uint8), label)
             for key in continuity_totals:
                 continuity_totals[key] += float(metrics[key])
@@ -432,6 +477,10 @@ if __name__ == "__main__":
     parser.add_argument("--refine_score_threshold", type=float, default=0.15, help="Candidate ROI heat threshold")
     parser.add_argument("--roi_positive_band_low", type=float, default=0.20, help="Low end of coarse-score band for ROI mining")
     parser.add_argument("--roi_positive_band_high", type=float, default=0.90, help="High end of coarse-score band for ROI mining")
+    parser.add_argument("--ensemble_delta_ckpts", type=str, nargs="*", default=None, help="Additional coarse checkpoints for probability-map ensembling")
+    parser.add_argument("--ensemble_delta_types", type=str, nargs="*", default=None, help="Delta types for ensemble checkpoints; defaults to primary delta_type")
+    parser.add_argument("--ensemble_ranks", type=int, nargs="*", default=None, help="LoRA ranks for ensemble checkpoints; defaults to primary rank")
+    parser.add_argument("--ensemble_decoder_types", type=str, nargs="*", default=None, help="Decoder types for ensemble checkpoints; defaults to primary decoder type")
     parser.add_argument("--legacy_box_eval", action="store_true", help="Also run legacy box-only diagnostics")
     parser.add_argument("--full_image_eval", action="store_true", help="Legacy mode: use full-image box prompt instead of dataset box")
 
@@ -487,6 +536,29 @@ if __name__ == "__main__":
     )
     args.img_size = int(coarse_img_size)
     args.decoder_type = coarse_decoder
+    ensemble_models = [sam]
+    ensemble_image_sizes = [int(coarse_img_size)]
+    extra_ckpts = list(getattr(args, "ensemble_delta_ckpts", None) or [])
+    extra_types = list(getattr(args, "ensemble_delta_types", None) or [])
+    extra_ranks = list(getattr(args, "ensemble_ranks", None) or [])
+    extra_decoders = list(getattr(args, "ensemble_decoder_types", None) or [])
+    for idx, extra_ckpt in enumerate(extra_ckpts):
+        extra_delta_type = extra_types[idx] if idx < len(extra_types) else args.delta_type
+        extra_rank = extra_ranks[idx] if idx < len(extra_ranks) else args.rank
+        extra_decoder = extra_decoders[idx] if idx < len(extra_decoders) else args.decoder_type
+        extra_model, extra_image_size, _extra_decoder = _load_finetuned_sam(
+            ckpt=args.ckpt,
+            vit_name=args.vit_name,
+            img_size=args.img_size,
+            delta_type=extra_delta_type,
+            delta_ckpt=extra_ckpt,
+            middle_dim=args.middle_dim,
+            scaling_factor=args.scaling_factor,
+            rank=extra_rank,
+            decoder_type=extra_decoder,
+        )
+        ensemble_models.append(extra_model)
+        ensemble_image_sizes.append(int(extra_image_size))
     refine_sam = None
     if resolved_mode == "coarse_refine":
         if not str(args.refine_delta_ckpt or "").strip():
@@ -536,7 +608,14 @@ if __name__ == "__main__":
     elif resolved_mode == "coarse_refine":
         primary = _run_coarse_refine_eval(args, sam, refine_sam, multimask_output, test_save_path)
     else:
-        primary = _run_tiled_eval(args, sam, multimask_output, test_save_path)
+        primary = _run_tiled_eval(
+            args,
+            sam,
+            multimask_output,
+            test_save_path,
+            ensemble_models=ensemble_models if len(ensemble_models) > 1 else None,
+            ensemble_image_sizes=ensemble_image_sizes if len(ensemble_models) > 1 else None,
+        )
         if args.legacy_box_eval:
             _run_legacy_eval(args, sam, multimask_output, None)
 

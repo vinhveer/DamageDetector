@@ -4,6 +4,7 @@ from scipy.ndimage import zoom
 from torch_runtime import nn
 from torch_runtime import F
 from PIL import Image
+import cv2
 
 class Focal_loss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2, num_classes=3, size_average=True):
@@ -160,6 +161,106 @@ class BinaryFocalWithLogitsLoss(nn.Module):
         if self.reduction == "none":
             return loss
         return loss.mean()
+
+
+def _soft_erode(img: torch.Tensor) -> torch.Tensor:
+    if img.ndim != 4:
+        raise ValueError(f"Expected 4D tensor, got {tuple(img.shape)}")
+    p1 = -F.max_pool2d(-img, kernel_size=(3, 1), stride=1, padding=(1, 0))
+    p2 = -F.max_pool2d(-img, kernel_size=(1, 3), stride=1, padding=(0, 1))
+    return torch.minimum(p1, p2)
+
+
+def _soft_dilate(img: torch.Tensor) -> torch.Tensor:
+    if img.ndim != 4:
+        raise ValueError(f"Expected 4D tensor, got {tuple(img.shape)}")
+    return F.max_pool2d(img, kernel_size=3, stride=1, padding=1)
+
+
+def _soft_open(img: torch.Tensor) -> torch.Tensor:
+    return _soft_dilate(_soft_erode(img))
+
+
+def soft_skeletonize(img: torch.Tensor, iterations: int = 20) -> torch.Tensor:
+    img = torch.clamp(img, 0.0, 1.0)
+    skeleton = F.relu(img - _soft_open(img))
+    work = img
+    for _ in range(max(0, int(iterations) - 1)):
+        work = _soft_erode(work)
+        delta = F.relu(work - _soft_open(work))
+        skeleton = skeleton + F.relu(delta - skeleton * delta)
+    return torch.clamp(skeleton, 0.0, 1.0)
+
+
+class BinaryClDiceLoss(nn.Module):
+    def __init__(self, iterations: int = 20, smooth: float = 1.0):
+        super().__init__()
+        self.iterations = int(iterations)
+        self.smooth = float(smooth)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        target = target.float()
+        if target.ndim == 3:
+            target = target.unsqueeze(1)
+
+        skel_pred = soft_skeletonize(probs, iterations=self.iterations)
+        skel_true = soft_skeletonize(target, iterations=self.iterations)
+
+        tprec_num = (skel_pred * target).sum(dim=(1, 2, 3))
+        tprec_den = skel_pred.sum(dim=(1, 2, 3))
+        tsens_num = (skel_true * probs).sum(dim=(1, 2, 3))
+        tsens_den = skel_true.sum(dim=(1, 2, 3))
+
+        tprec = (tprec_num + self.smooth) / (tprec_den + self.smooth)
+        tsens = (tsens_num + self.smooth) / (tsens_den + self.smooth)
+        cl_dice = (2.0 * tprec * tsens) / (tprec + tsens + 1e-8)
+        return 1.0 - cl_dice.mean()
+
+
+def centerline_target_batch(target: torch.Tensor) -> torch.Tensor:
+    target = target.float()
+    if target.ndim == 4 and target.shape[1] == 1:
+        target = target[:, 0]
+    elif target.ndim != 3:
+        raise ValueError(f"Expected target shape (B,H,W) or (B,1,H,W), got {tuple(target.shape)}")
+
+    target_np = (target.detach().cpu().numpy() > 0.5).astype(np.uint8)
+    centerlines = []
+    for mask in target_np:
+        work = mask.copy()
+        skeleton = np.zeros_like(work, dtype=np.uint8)
+        element = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        while True:
+            eroded = cv2.erode(work, element)
+            opened = cv2.dilate(eroded, element)
+            temp = cv2.subtract(work, opened)
+            skeleton = cv2.bitwise_or(skeleton, temp)
+            work = eroded
+            if cv2.countNonZero(work) == 0:
+                break
+        centerlines.append(skeleton.astype(np.float32))
+    centerline = torch.from_numpy(np.stack(centerlines, axis=0)).to(device=target.device, dtype=torch.float32)
+    return centerline.unsqueeze(1)
+
+
+class BinaryCenterlineDiceLoss(nn.Module):
+    def __init__(self, smooth: float = 1.0):
+        super().__init__()
+        self.smooth = float(smooth)
+
+    def forward(self, logits: torch.Tensor, centerline_target: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        if centerline_target.ndim == 3:
+            centerline_target = centerline_target.unsqueeze(1)
+        centerline_target = centerline_target.float()
+
+        probs = probs.reshape(probs.shape[0], -1)
+        centerline_target = centerline_target.reshape(centerline_target.shape[0], -1)
+        intersect = (probs * centerline_target).sum(dim=1)
+        denom = probs.sum(dim=1) + centerline_target.sum(dim=1)
+        dice = (2 * intersect + self.smooth) / (denom + self.smooth)
+        return 1.0 - dice.mean()
 
 
 def calculate_metric_percase(pred, gt):
