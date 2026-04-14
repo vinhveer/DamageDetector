@@ -144,6 +144,18 @@ def resolve_predict_mode(delta_checkpoint: str | None, predict_mode: str | None)
     return mode or "tile_full_box"
 
 
+def resolve_image_size(delta_checkpoint: str | None, image_size: int | None = None) -> int:
+    size = int(image_size) if image_size is not None else -1
+    if size > 0:
+        return size
+    config = load_inference_config(delta_checkpoint)
+    try:
+        size = int(config.get("img_size", 512))
+    except Exception:
+        size = 512
+    return max(1, int(size))
+
+
 def resolve_tile_settings(delta_checkpoint: str | None, tile_size: int | None, tile_overlap: int | None) -> tuple[int, int]:
     config = load_inference_config(delta_checkpoint)
     size = int(tile_size) if tile_size is not None else -1
@@ -160,6 +172,78 @@ def resolve_tile_settings(delta_checkpoint: str | None, tile_size: int | None, t
             overlap = size // 2
     overlap = max(0, min(overlap, max(0, size - 1)))
     return int(size), int(overlap)
+
+
+def resolve_refine_settings(
+    delta_checkpoint: str | None,
+    *,
+    refine_tile_size: int | None = None,
+    refine_max_rois: int | None = None,
+    refine_roi_padding: int | None = None,
+    refine_merge_mode: str | None = None,
+    refine_score_threshold: float | None = None,
+    positive_band_low: float | None = None,
+    positive_band_high: float | None = None,
+) -> dict:
+    config = load_inference_config(delta_checkpoint)
+    tile_size = int(refine_tile_size) if refine_tile_size is not None else -1
+    if tile_size <= 0:
+        try:
+            tile_size = int(config.get("refine_tile_size", 768))
+        except Exception:
+            tile_size = 768
+
+    max_rois = int(refine_max_rois) if refine_max_rois is not None else -1
+    if max_rois <= 0:
+        try:
+            max_rois = int(config.get("refine_max_rois", 16))
+        except Exception:
+            max_rois = 16
+
+    roi_padding = int(refine_roi_padding) if refine_roi_padding is not None else -1
+    if roi_padding < 0:
+        try:
+            roi_padding = int(config.get("refine_roi_padding", 64))
+        except Exception:
+            roi_padding = 64
+
+    merge_mode = str(refine_merge_mode or config.get("refine_merge_mode", "weighted_replace")).strip().lower()
+    if not merge_mode:
+        merge_mode = "weighted_replace"
+
+    if refine_score_threshold is None:
+        try:
+            score_threshold = float(config.get("refine_score_threshold", 0.15))
+        except Exception:
+            score_threshold = 0.15
+    else:
+        score_threshold = float(refine_score_threshold)
+
+    if positive_band_low is None:
+        try:
+            band_low = float(config.get("refine_positive_band_low", 0.20))
+        except Exception:
+            band_low = 0.20
+    else:
+        band_low = float(positive_band_low)
+
+    if positive_band_high is None:
+        try:
+            band_high = float(config.get("refine_positive_band_high", 0.90))
+        except Exception:
+            band_high = 0.90
+    else:
+        band_high = float(positive_band_high)
+
+    return {
+        "refine_tile_size": max(1, int(tile_size)),
+        "refine_max_rois": max(1, int(max_rois)),
+        "refine_roi_padding": max(0, int(roi_padding)),
+        "refine_merge_mode": merge_mode,
+        "refine_score_threshold": float(score_threshold),
+        "positive_band_low": float(band_low),
+        "positive_band_high": float(band_high),
+    }
 
 
 def load_sam_model(

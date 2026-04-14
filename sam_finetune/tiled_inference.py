@@ -226,6 +226,256 @@ def tiled_model_score_map(
     return value_sum / weight_sum
 
 
+def _clip_box_to_image(box: tuple[int, int, int, int], image_h: int, image_w: int) -> tuple[int, int, int, int]:
+    x1, y1, x2, y2 = [int(v) for v in box]
+    x1 = max(0, min(x1, image_w))
+    y1 = max(0, min(y1, image_h))
+    x2 = max(0, min(x2, image_w))
+    y2 = max(0, min(y2, image_h))
+    if x2 <= x1:
+        x2 = min(image_w, x1 + 1)
+    if y2 <= y1:
+        y2 = min(image_h, y1 + 1)
+    return x1, y1, x2, y2
+
+
+def _fixed_size_box(
+    center_x: int,
+    center_y: int,
+    *,
+    roi_size: int,
+    image_h: int,
+    image_w: int,
+) -> tuple[int, int, int, int]:
+    half = int(max(1, roi_size)) // 2
+    x1 = center_x - half
+    y1 = center_y - half
+    x2 = x1 + int(roi_size)
+    y2 = y1 + int(roi_size)
+    if x1 < 0:
+        x2 -= x1
+        x1 = 0
+    if y1 < 0:
+        y2 -= y1
+        y1 = 0
+    if x2 > image_w:
+        shift = x2 - image_w
+        x1 -= shift
+        x2 = image_w
+    if y2 > image_h:
+        shift = y2 - image_h
+        y1 -= shift
+        y2 = image_h
+    return _clip_box_to_image((x1, y1, x2, y2), image_h, image_w)
+
+
+def _box_iou(box_a: tuple[int, int, int, int], box_b: tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0, inter_x2 - inter_x1)
+    inter_h = max(0, inter_y2 - inter_y1)
+    inter = float(inter_w * inter_h)
+    if inter <= 0.0:
+        return 0.0
+    area_a = float(max(0, ax2 - ax1) * max(0, ay2 - ay1))
+    area_b = float(max(0, bx2 - bx1) * max(0, by2 - by1))
+    union = max(1e-6, area_a + area_b - inter)
+    return inter / union
+
+
+def nms_boxes(
+    boxes: list[tuple[int, int, int, int]],
+    scores: list[float],
+    *,
+    iou_threshold: float = 0.3,
+    max_keep: int | None = None,
+) -> list[int]:
+    order = sorted(range(len(boxes)), key=lambda idx: float(scores[idx]), reverse=True)
+    keep: list[int] = []
+    for idx in order:
+        if any(_box_iou(boxes[idx], boxes[kept]) > float(iou_threshold) for kept in keep):
+            continue
+        keep.append(idx)
+        if max_keep is not None and len(keep) >= int(max_keep):
+            break
+    return keep
+
+
+def score_uncertainty_map(score_map: np.ndarray, threshold: float) -> np.ndarray:
+    prob = np.asarray(score_map, dtype=np.float32)
+    thr = float(threshold)
+    uncertainty = 1.0 - (np.abs(prob - thr) / 0.5)
+    return np.clip(uncertainty, 0.0, 1.0).astype(np.float32)
+
+
+def mine_refine_rois(
+    score_map: np.ndarray,
+    *,
+    threshold: float,
+    roi_size: int = 768,
+    max_rois: int = 16,
+    roi_padding: int = 64,
+    positive_band_low: float = 0.20,
+    positive_band_high: float = 0.90,
+    score_threshold: float = 0.15,
+    nms_iou_threshold: float = 0.3,
+) -> list[dict[str, float | tuple[int, int, int, int]]]:
+    prob = np.asarray(score_map, dtype=np.float32)
+    if prob.ndim != 2:
+        raise ValueError(f"Expected score map shape (H, W), got {tuple(prob.shape)}")
+
+    image_h, image_w = prob.shape
+    uncertainty = score_uncertainty_map(prob, threshold)
+    candidate_mask = np.logical_and(prob >= float(positive_band_low), prob <= float(positive_band_high))
+    candidate_score = ((0.6 * uncertainty) + (0.4 * prob)) * candidate_mask.astype(np.float32)
+    heat = np.clip(candidate_score, 0.0, 1.0)
+
+    binary = (heat >= float(score_threshold)).astype(np.uint8)
+    num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+    candidates: list[dict[str, float | tuple[int, int, int, int]]] = []
+    for label_idx in range(1, int(num_labels)):
+        x = int(stats[label_idx, cv2.CC_STAT_LEFT])
+        y = int(stats[label_idx, cv2.CC_STAT_TOP])
+        w = int(stats[label_idx, cv2.CC_STAT_WIDTH])
+        h = int(stats[label_idx, cv2.CC_STAT_HEIGHT])
+        if w <= 0 or h <= 0:
+            continue
+        x1 = max(0, x - int(roi_padding))
+        y1 = max(0, y - int(roi_padding))
+        x2 = min(image_w, x + w + int(roi_padding))
+        y2 = min(image_h, y + h + int(roi_padding))
+        center_x = int(round((x1 + x2) / 2.0))
+        center_y = int(round((y1 + y2) / 2.0))
+        box = _fixed_size_box(center_x, center_y, roi_size=int(roi_size), image_h=image_h, image_w=image_w)
+        bx1, by1, bx2, by2 = box
+        local = heat[by1:by2, bx1:bx2]
+        score = float(local.mean()) if local.size > 0 else 0.0
+        candidates.append({"box": box, "score": score})
+
+    if len(candidates) < int(max_rois):
+        flat = heat.reshape(-1)
+        if flat.size > 0:
+            top_k = min(int(max_rois) * 8, flat.size)
+            top_indices = np.argpartition(flat, -top_k)[-top_k:]
+            top_indices = top_indices[np.argsort(flat[top_indices])[::-1]]
+            for flat_idx in top_indices:
+                score = float(flat[flat_idx])
+                if score < float(score_threshold):
+                    break
+                cy, cx = np.unravel_index(int(flat_idx), heat.shape)
+                box = _fixed_size_box(int(cx), int(cy), roi_size=int(roi_size), image_h=image_h, image_w=image_w)
+                candidates.append({"box": box, "score": score})
+                if len(candidates) >= int(max_rois) * 4:
+                    break
+
+    if not candidates:
+        return []
+
+    boxes = [item["box"] for item in candidates]
+    scores = [float(item["score"]) for item in candidates]
+    keep = nms_boxes(boxes, scores, iou_threshold=float(nms_iou_threshold), max_keep=int(max_rois))
+    return [candidates[idx] for idx in keep]
+
+
+def crop_box_from_image(image_hwc: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
+    x1, y1, x2, y2 = [int(v) for v in box]
+    return np.asarray(image_hwc)[y1:y2, x1:x2]
+
+
+def merge_refined_score_map(
+    coarse_score_map: np.ndarray,
+    refine_outputs: list[dict[str, object]],
+    *,
+    merge_mode: str = "weighted_replace",
+) -> np.ndarray:
+    merged = np.asarray(coarse_score_map, dtype=np.float32).copy()
+    if not refine_outputs:
+        return merged
+    mode = str(merge_mode or "weighted_replace").strip().lower()
+    if mode != "weighted_replace":
+        raise ValueError(f"Unsupported refine merge mode: {merge_mode!r}")
+
+    for item in refine_outputs:
+        box = item["box"]
+        prob_map = np.asarray(item["prob_map"], dtype=np.float32)
+        x1, y1, x2, y2 = [int(v) for v in box]
+        expected_shape = (max(0, y2 - y1), max(0, x2 - x1))
+        if prob_map.shape != expected_shape:
+            raise ValueError(f"Refine prob map shape {tuple(prob_map.shape)} does not match ROI {expected_shape}")
+        local_weight = make_center_weight_2d(expected_shape[0], expected_shape[1], edge_floor=0.15)
+        coarse_local = merged[y1:y2, x1:x2]
+        merged[y1:y2, x1:x2] = (coarse_local * (1.0 - local_weight)) + (prob_map * local_weight)
+    return merged.astype(np.float32)
+
+
+def coarse_refine_model_score_map(
+    image_hwc: np.ndarray,
+    *,
+    coarse_model,
+    coarse_image_size: int,
+    coarse_tile_size: int,
+    coarse_tile_overlap: int,
+    refine_model,
+    refine_image_size: int,
+    refine_tile_size: int = 768,
+    refine_max_rois: int = 16,
+    refine_roi_padding: int = 64,
+    refine_merge_mode: str = "weighted_replace",
+    refine_score_threshold: float = 0.15,
+    positive_band_low: float = 0.20,
+    positive_band_high: float = 0.90,
+    threshold: float = 0.5,
+    multimask_output: bool = False,
+    use_amp: bool = False,
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, object]]]:
+    coarse_score_map = tiled_model_score_map(
+        image_hwc,
+        coarse_tile_size,
+        coarse_tile_overlap,
+        model=coarse_model,
+        image_size=coarse_image_size,
+        multimask_output=multimask_output,
+        use_amp=use_amp,
+    )
+    roi_candidates = mine_refine_rois(
+        coarse_score_map,
+        threshold=float(threshold),
+        roi_size=int(refine_tile_size),
+        max_rois=int(refine_max_rois),
+        roi_padding=int(refine_roi_padding),
+        positive_band_low=float(positive_band_low),
+        positive_band_high=float(positive_band_high),
+        score_threshold=float(refine_score_threshold),
+    )
+    if not roi_candidates:
+        return coarse_score_map, coarse_score_map.copy(), []
+
+    refine_outputs: list[dict[str, object]] = []
+    for item in roi_candidates:
+        box = item["box"]
+        crop = crop_box_from_image(image_hwc, box)
+        prob_map = model_tile_prob_map(
+            refine_model,
+            crop,
+            image_size=int(refine_image_size),
+            multimask_output=multimask_output,
+            use_amp=use_amp,
+        )
+        refine_outputs.append({"box": box, "score": float(item["score"]), "prob_map": prob_map})
+
+    merged_score_map = merge_refined_score_map(
+        coarse_score_map,
+        refine_outputs,
+        merge_mode=refine_merge_mode,
+    )
+    return merged_score_map, coarse_score_map, refine_outputs
+
+
 def binary_mask_from_score_map(score_map: np.ndarray, threshold: float) -> np.ndarray:
     return (np.asarray(score_map, dtype=np.float32) >= float(threshold)).astype(np.uint8)
 

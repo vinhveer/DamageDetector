@@ -24,6 +24,17 @@ def _common_params(args: argparse.Namespace) -> dict:
         "tile_size": int(args.tile_size),
         "tile_overlap": int(args.tile_overlap),
         "threshold": args.threshold,
+        "refine_delta_checkpoint": args.refine_delta_checkpoint,
+        "refine_delta_type": args.refine_delta_type,
+        "refine_rank": int(args.refine_rank),
+        "refine_decoder_type": args.refine_decoder_type,
+        "refine_tile_size": int(args.refine_tile_size),
+        "refine_max_rois": int(args.refine_max_rois),
+        "refine_roi_padding": int(args.refine_roi_padding),
+        "refine_merge_mode": args.refine_merge_mode,
+        "refine_score_threshold": float(args.refine_score_threshold),
+        "refine_positive_band_low": float(args.refine_positive_band_low),
+        "refine_positive_band_high": float(args.refine_positive_band_high),
     }
     roi = parse_roi(args.roi)
     if roi is not None:
@@ -49,10 +60,21 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--dilate", type=int, default=0)
         subparser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
         subparser.add_argument("--output-dir", default="results_sam_finetune")
-        subparser.add_argument("--predict-mode", default="auto", choices=["auto", "tile_full_box", "legacy_full_box"])
+        subparser.add_argument("--predict-mode", default="auto", choices=["auto", "tile_full_box", "legacy_full_box", "coarse_refine"])
         subparser.add_argument("--tile-size", type=int, default=-1, help="Tile size for tile_full_box mode (-1 = use checkpoint metadata or 512).")
         subparser.add_argument("--tile-overlap", type=int, default=-1, help="Tile overlap for tile_full_box mode (-1 = use checkpoint metadata or tile_size // 2).")
         subparser.add_argument("--threshold", default="auto", help="Mask threshold as float or 'auto' to use best_threshold.txt.")
+        subparser.add_argument("--refine-delta-checkpoint", default="")
+        subparser.add_argument("--refine-delta-type", default="")
+        subparser.add_argument("--refine-rank", type=int, default=-1)
+        subparser.add_argument("--refine-decoder-type", default="auto", choices=["auto", "baseline", "hq"])
+        subparser.add_argument("--refine-tile-size", type=int, default=-1)
+        subparser.add_argument("--refine-max-rois", type=int, default=16)
+        subparser.add_argument("--refine-roi-padding", type=int, default=64)
+        subparser.add_argument("--refine-merge-mode", default="weighted_replace")
+        subparser.add_argument("--refine-score-threshold", type=float, default=0.15)
+        subparser.add_argument("--refine-positive-band-low", type=float, default=0.20)
+        subparser.add_argument("--refine-positive-band-high", type=float, default=0.90)
         subparser.add_argument("--roi", nargs=4, type=int, metavar=("X1", "Y1", "X2", "Y2"))
 
     warmup = sub.add_parser("warmup", help="Warm up the SAM finetune engine.")

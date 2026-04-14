@@ -31,6 +31,17 @@ class SamFinetuneParams:
     tile_size: int = -1
     tile_overlap: int = -1
     threshold: str = "auto"
+    refine_delta_checkpoint: str = ""
+    refine_delta_type: str = ""
+    refine_rank: int = -1
+    refine_decoder_type: str = "auto"
+    refine_tile_size: int = -1
+    refine_max_rois: int = 16
+    refine_roi_padding: int = 64
+    refine_merge_mode: str = "weighted_replace"
+    refine_score_threshold: float = 0.15
+    refine_positive_band_low: float = 0.20
+    refine_positive_band_high: float = 0.90
     roi_box: tuple[int, int, int, int] | None = None
     task_group: str = "crack_only"
     more_damage_max_masks: int = 8
@@ -50,12 +61,8 @@ class SamFinetuneParams:
 
 class SamFinetuneRunner:
     def __init__(self) -> None:
-        self._device: str | None = None
-        self._sam_checkpoint: str | None = None
-        self._sam_model_type: str | None = None
-        self._delta_sig: tuple | None = None
+        self._predictor_cache: dict[tuple, dict[str, Any]] = {}
         self._resolved_delta_checkpoint: str | None = None
-        self._predictor: Any | None = None
 
     def _ensure_import_paths(self) -> None:
         here = Path(__file__).resolve()
@@ -63,7 +70,21 @@ class SamFinetuneRunner:
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
 
-    def ensure_model_loaded(self, params: SamFinetuneParams, *, log_fn=None) -> tuple[Any, str]:
+    def _ensure_predictor_loaded(
+        self,
+        *,
+        sam_checkpoint: str,
+        sam_model_type: str,
+        delta_type: str,
+        delta_checkpoint: str,
+        middle_dim: int,
+        scaling_factor: float,
+        rank: int,
+        decoder_type_hint: str | None = None,
+        device_request: str = "auto",
+        log_fn=None,
+        log_prefix: str = "coarse",
+    ) -> tuple[Any, str, str, dict]:
         self._ensure_import_paths()
 
         from sam_finetune.segment_anything import SamPredictor
@@ -76,67 +97,84 @@ class SamFinetuneRunner:
             resolve_decoder_type,
         )
 
-        device = select_device_str(params.device)
-        fallback = describe_device_fallback(params.device, device)
+        device = select_device_str(device_request)
+        fallback = describe_device_fallback(device_request, device)
         if fallback is not None and log_fn is not None:
             log_fn(fallback)
-        delta_type = str(params.delta_type or "").strip().lower()
-        delta_path = resolve_best_delta_checkpoint(delta_type, str(params.delta_checkpoint or "auto"))
+        normalized_delta_type = str(delta_type or "").strip().lower()
+        delta_path = resolve_best_delta_checkpoint(normalized_delta_type, str(delta_checkpoint or "auto"))
         inference_config = load_inference_config(delta_path)
         model_image_size = int(inference_config.get("img_size", 1024))
-        decoder_type = resolve_decoder_type(delta_path, inference_config.get("decoder_type"))
+        decoder_type = resolve_decoder_type(delta_path, decoder_type_hint or inference_config.get("decoder_type"))
         inferred = infer_delta_type_from_path(delta_path)
-        if inferred is not None and inferred != delta_type:
-            raise ValueError(f"Delta checkpoint mismatch: checkpoint looks like {inferred}, expected {delta_type}.")
+        if inferred is not None and inferred != normalized_delta_type:
+            raise ValueError(f"Delta checkpoint mismatch: checkpoint looks like {inferred}, expected {normalized_delta_type}.")
         delta_sig = (
-            delta_type,
-            delta_path,
-            decoder_type,
+            str(sam_checkpoint),
+            str(sam_model_type or "auto").strip().lower(),
+            normalized_delta_type,
+            str(delta_path),
+            str(decoder_type),
             model_image_size,
-            int(params.middle_dim),
-            float(params.scaling_factor),
-            int(params.rank),
+            int(middle_dim),
+            float(scaling_factor),
+            int(rank),
+            str(device),
         )
-        requested_model_type = str(params.sam_model_type or "auto").strip().lower()
-        needs_reload = (
-            self._predictor is None
-            or self._sam_checkpoint != params.sam_checkpoint
-            or (requested_model_type != "auto" and self._sam_model_type != requested_model_type)
-            or self._delta_sig != delta_sig
-            or self._device != device
-        )
-        if not needs_reload:
-            return self._predictor, device
+        cached = self._predictor_cache.get(delta_sig)
+        if cached is not None:
+            return cached["predictor"], device, str(delta_path), inference_config
+
+        requested_model_type = str(sam_model_type or "auto").strip().lower()
         if log_fn is not None:
-            log_fn(f"Loading SAM checkpoint... decoder={decoder_type} image_size={model_image_size}")
+            log_fn(f"Loading {log_prefix} SAM checkpoint... decoder={decoder_type} image_size={model_image_size}")
         sam_model, used_model_type = load_sam_model(
-            params.sam_checkpoint,
-            params.sam_model_type,
+            sam_checkpoint,
+            sam_model_type,
             image_size=model_image_size,
             pixel_mean=[0.485, 0.456, 0.406],
             pixel_std=[0.229, 0.224, 0.225],
             decoder_type=decoder_type,
         )
         if log_fn is not None:
-            log_fn(f"Applying delta to SAM... type={delta_type} ckpt={delta_path}")
+            log_fn(f"Applying {log_prefix} delta to SAM... type={normalized_delta_type} ckpt={delta_path}")
         apply_delta_to_sam(
             sam=sam_model,
-            delta_type=delta_type,
+            delta_type=normalized_delta_type,
             delta_ckpt_path=str(delta_path),
-            middle_dim=int(params.middle_dim),
-            scaling_factor=float(params.scaling_factor),
-            rank=int(params.rank),
+            middle_dim=int(middle_dim),
+            scaling_factor=float(scaling_factor),
+            rank=int(rank),
         )
         sam_model.to(device=device)
-        self._predictor = SamPredictor(sam_model)
-        self._sam_checkpoint = params.sam_checkpoint
-        self._sam_model_type = used_model_type
-        self._delta_sig = delta_sig
-        self._resolved_delta_checkpoint = str(delta_path)
-        self._device = device
+        predictor = SamPredictor(sam_model)
+        self._predictor_cache[delta_sig] = {
+            "predictor": predictor,
+            "used_model_type": used_model_type,
+            "delta_path": str(delta_path),
+            "device": device,
+            "inference_config": inference_config,
+        }
         if log_fn is not None:
-            log_fn(f"SAM finetune ready (type={used_model_type}, device={device}).")
-        return self._predictor, device
+            log_fn(f"{log_prefix.capitalize()} SAM finetune ready (type={used_model_type}, device={device}).")
+        return predictor, device, str(delta_path), inference_config
+
+    def ensure_model_loaded(self, params: SamFinetuneParams, *, log_fn=None) -> tuple[Any, str]:
+        predictor, device, delta_path, _config = self._ensure_predictor_loaded(
+            sam_checkpoint=params.sam_checkpoint,
+            sam_model_type=params.sam_model_type,
+            delta_type=params.delta_type,
+            delta_checkpoint=params.delta_checkpoint,
+            middle_dim=params.middle_dim,
+            scaling_factor=params.scaling_factor,
+            rank=params.rank,
+            decoder_type_hint=None,
+            device_request=params.device,
+            log_fn=log_fn,
+            log_prefix="coarse",
+        )
+        self._resolved_delta_checkpoint = delta_path
+        return predictor, device
 
     def _predict_score_map_tiled(self, predictor, rgb_image, *, tile_size: int, tile_overlap: int):
         from sam_finetune.tiled_inference import predictor_tile_mask_score, tiled_score_map
@@ -186,6 +224,17 @@ class SamFinetuneRunner:
                 tile_size=params.tile_size,
                 tile_overlap=params.tile_overlap,
                 threshold=params.threshold,
+                refine_delta_checkpoint=params.refine_delta_checkpoint,
+                refine_delta_type=params.refine_delta_type,
+                refine_rank=params.refine_rank,
+                refine_decoder_type=params.refine_decoder_type,
+                refine_tile_size=params.refine_tile_size,
+                refine_max_rois=params.refine_max_rois,
+                refine_roi_padding=params.refine_roi_padding,
+                refine_merge_mode=params.refine_merge_mode,
+                refine_score_threshold=params.refine_score_threshold,
+                refine_positive_band_low=params.refine_positive_band_low,
+                refine_positive_band_high=params.refine_positive_band_high,
                 roi_box=None,
                 task_group=params.task_group,
                 more_damage_max_masks=params.more_damage_max_masks,
@@ -231,10 +280,13 @@ class SamFinetuneRunner:
 
         from sam.runtime import ensure_dir, filter_small_components, overlay_mask, safe_basename
         from sam_finetune.runtime import (
+            resolve_image_size,
             resolve_predict_mode,
             resolve_predict_threshold,
+            resolve_refine_settings,
             resolve_tile_settings,
         )
+        from sam_finetune.tiled_inference import coarse_refine_model_score_map
 
         if params.roi_box is not None:
             return self._run_with_roi("predict", image_path, params, stop_checker=stop_checker, log_fn=log_fn)
@@ -247,6 +299,7 @@ class SamFinetuneRunner:
         predict_mode = resolve_predict_mode(delta_path, params.predict_mode)
         threshold = resolve_predict_threshold(delta_path, params.threshold)
         tile_size, tile_overlap = resolve_tile_settings(delta_path, params.tile_size, params.tile_overlap)
+        coarse_image_size = resolve_image_size(delta_path)
         bgr = cv2.imread(image_path)
         if bgr is None:
             raise FileNotFoundError(f"Cannot read image: {image_path}")
@@ -263,6 +316,10 @@ class SamFinetuneRunner:
                 log_fn(
                     f"SAM finetune tiled predict: tile_size={tile_size} tile_overlap={tile_overlap} threshold={threshold:.4f}"
                 )
+            elif predict_mode == "coarse_refine":
+                log_fn(
+                    f"SAM finetune coarse_refine predict: coarse_tile_size={tile_size} coarse_tile_overlap={tile_overlap} threshold={threshold:.4f}"
+                )
             else:
                 log_fn(f"SAM finetune legacy predict: threshold={threshold:.4f}")
 
@@ -278,6 +335,58 @@ class SamFinetuneRunner:
                 prob_map = masks[idx].astype(np.float32)
                 chosen = (prob_map >= float(threshold)).astype(np.uint8)
                 score = float(scores[idx])
+        elif predict_mode == "coarse_refine":
+            refine_delta_type = str(params.refine_delta_type or params.delta_type).strip().lower()
+            refine_delta_checkpoint = str(params.refine_delta_checkpoint or "").strip()
+            if not refine_delta_type:
+                raise ValueError("coarse_refine requires refine_delta_type.")
+            if not refine_delta_checkpoint or refine_delta_checkpoint.lower() == "auto":
+                raise ValueError("coarse_refine requires --refine-delta-checkpoint to point to a refine checkpoint.")
+            refine_rank = int(params.refine_rank if int(params.refine_rank) > 0 else params.rank)
+            refine_predictor, _refine_device, refine_delta_path, _refine_config = self._ensure_predictor_loaded(
+                sam_checkpoint=params.sam_checkpoint,
+                sam_model_type=params.sam_model_type,
+                delta_type=refine_delta_type,
+                delta_checkpoint=refine_delta_checkpoint,
+                middle_dim=params.middle_dim,
+                scaling_factor=params.scaling_factor,
+                rank=refine_rank,
+                decoder_type_hint=params.refine_decoder_type,
+                device_request=params.device,
+                log_fn=log_fn,
+                log_prefix="refine",
+            )
+            refine_settings = resolve_refine_settings(
+                refine_delta_path,
+                refine_tile_size=params.refine_tile_size,
+                refine_max_rois=params.refine_max_rois,
+                refine_roi_padding=params.refine_roi_padding,
+                refine_merge_mode=params.refine_merge_mode,
+                refine_score_threshold=params.refine_score_threshold,
+                positive_band_low=params.refine_positive_band_low,
+                positive_band_high=params.refine_positive_band_high,
+            )
+            merged_score_map, coarse_score_map, refine_outputs = coarse_refine_model_score_map(
+                rgb,
+                coarse_model=predictor.model,
+                coarse_image_size=int(coarse_image_size),
+                coarse_tile_size=int(tile_size),
+                coarse_tile_overlap=int(tile_overlap),
+                refine_model=refine_predictor.model,
+                refine_image_size=resolve_image_size(refine_delta_path),
+                refine_tile_size=int(refine_settings["refine_tile_size"]),
+                refine_max_rois=int(refine_settings["refine_max_rois"]),
+                refine_roi_padding=int(refine_settings["refine_roi_padding"]),
+                refine_merge_mode=str(refine_settings["refine_merge_mode"]),
+                refine_score_threshold=float(refine_settings["refine_score_threshold"]),
+                positive_band_low=float(refine_settings["positive_band_low"]),
+                positive_band_high=float(refine_settings["positive_band_high"]),
+                threshold=float(threshold),
+                multimask_output=False,
+                use_amp=False,
+            )
+            chosen = (merged_score_map >= float(threshold)).astype(np.uint8)
+            score = float(merged_score_map[chosen > 0].mean()) if int(np.count_nonzero(chosen)) > 0 else float(merged_score_map.max())
         else:
             score_map = self._predict_score_map_tiled(
                 predictor,
@@ -311,7 +420,7 @@ class SamFinetuneRunner:
                 "model_name": "SamFinetune",
             }
         ]
-        return {
+        result = {
             "image_path": str(image_path),
             "overlay_path": overlay_path,
             "mask_path": mask_path,
@@ -319,6 +428,14 @@ class SamFinetuneRunner:
             "masks_saved": 1 if int(np.count_nonzero(chosen)) > 0 else 0,
             "detections": detections,
         }
+        if predict_mode == "coarse_refine":
+            result["predict_mode"] = "coarse_refine"
+            result["refine_rois"] = [
+                {"box": [int(v) for v in item["box"]], "score": float(item["score"])}
+                for item in refine_outputs
+            ]
+            result["refine_roi_count"] = len(refine_outputs)
+        return result
 
     def segment_boxes(
         self,

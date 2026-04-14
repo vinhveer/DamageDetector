@@ -33,6 +33,7 @@ except ImportError:
 PROMPT_SCHEDULES = {
     "hybrid_v1": (0.50, 0.30, 0.20),
     "hybrid_val_aligned": (0.20, 0.55, 0.25),
+    "hybrid_val_balanced": (0.30, 0.40, 0.30),
     "hybrid_tight_heavy": (0.35, 0.25, 0.40),
     "points_heavy": (0.60, 0.10, 0.30),
 }
@@ -177,6 +178,15 @@ def _write_inference_config(snapshot_path: str, args, best_threshold: float | No
         "prompt_schedule": "legacy_v1" if prompt_policy == "legacy" else prompt_policy,
         "predict_mode": "tile_full_box",
         "merge_mode": "score_weighted_center_blend",
+        "pipeline_stage": str(getattr(args, "pipeline_stage", "coarse")).strip().lower(),
+        "refine_enabled": bool(getattr(args, "refine_enabled", False)),
+        "refine_tile_size": int(getattr(args, "refine_tile_size", getattr(args, "roi_size", 768))),
+        "refine_max_rois": int(getattr(args, "refine_max_rois", 16)),
+        "refine_roi_padding": int(getattr(args, "refine_roi_padding", 64)),
+        "refine_merge_mode": str(getattr(args, "refine_merge_mode", "weighted_replace")).strip().lower(),
+        "refine_score_threshold": float(getattr(args, "refine_score_threshold", 0.15)),
+        "refine_positive_band_low": float(getattr(args, "roi_positive_band_low", 0.20)),
+        "refine_positive_band_high": float(getattr(args, "roi_positive_band_high", 0.90)),
     }
     with open(os.path.join(snapshot_path, "inference_config.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
@@ -432,9 +442,9 @@ def _run_legacy_box_eval(
 
 def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     try:
-        from datasets.dataset_generic import GenericDataset, RandomGenerator, ValGenerator, list_image_files
+        from datasets.dataset_generic import GenericDataset, RandomGenerator, RefineRandomGenerator, ValGenerator, list_image_files
     except ImportError:
-        from .datasets.dataset_generic import GenericDataset, RandomGenerator, ValGenerator, list_image_files
+        from .datasets.dataset_generic import GenericDataset, RandomGenerator, RefineRandomGenerator, ValGenerator, list_image_files
     logging.basicConfig(
         filename=snapshot_path + "/log.txt",
         level=logging.INFO,
@@ -448,7 +458,11 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     batch_size = args.batch_size * args.n_gpu
     tile_overlap = resolve_tile_overlap(int(args.img_size), getattr(args, "tile_overlap", -1))
     prompt_policy = _normalize_prompt_policy(getattr(args, "prompt_policy", "hybrid_v1"))
+    pipeline_stage = str(getattr(args, "pipeline_stage", "coarse")).strip().lower()
     val_case_names = list_image_files(os.path.join(args.val_path, "images"))
+    train_patch_size = int(getattr(args, "roi_size", args.img_size)) if pipeline_stage == "refine" else int(args.img_size)
+    refine_patches_per_image = 4 if pipeline_stage == "refine" else int(args.patches_per_image)
+    train_generator_cls = RefineRandomGenerator if pipeline_stage == "refine" else RandomGenerator
 
     db_val_legacy = GenericDataset(
         base_dir=args.val_path,
@@ -458,15 +472,23 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     db_train = GenericDataset(
         base_dir=args.root_path,
         split="train",
-        transform=RandomGenerator(
-            output_size=[args.img_size, args.img_size],
+        transform=train_generator_cls(
+            output_size=[train_patch_size, train_patch_size],
             low_res=[low_res, low_res],
             background_crop_prob=args.background_crop_prob,
             near_background_crop_prob=args.near_background_crop_prob,
             hard_negative_crop_prob=getattr(args, "hard_negative_crop_prob", 0.10),
             augment_profile=getattr(args, "augment_profile", "balanced"),
+            **(
+                {
+                    "roi_positive_band_low": float(getattr(args, "roi_positive_band_low", 0.20)),
+                    "roi_positive_band_high": float(getattr(args, "roi_positive_band_high", 0.90)),
+                }
+                if pipeline_stage == "refine"
+                else {}
+            ),
         ),
-        patches_per_image=args.patches_per_image,
+        patches_per_image=refine_patches_per_image,
         use_full_image_box=bool(getattr(args, "train_full_image_box", False)),
     )
 
@@ -631,8 +653,9 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
     )
     logging.info(
-        "Effective training profile: prompt_policy=%s augment_profile=%s background_crop_prob=%.3f near_background_crop_prob=%.3f hard_negative_crop_prob=%.3f decoder_lr_mult=%.3f hq_trainable_mode=%s tversky_alpha=%.3f tversky_beta=%.3f"
+        "Effective training profile: pipeline_stage=%s prompt_policy=%s augment_profile=%s background_crop_prob=%.3f near_background_crop_prob=%.3f hard_negative_crop_prob=%.3f decoder_lr_mult=%.3f hq_trainable_mode=%s tversky_alpha=%.3f tversky_beta=%.3f"
         % (
+            pipeline_stage,
             prompt_policy,
             str(getattr(args, "augment_profile", "balanced")),
             float(getattr(args, "background_crop_prob", 0.2)),

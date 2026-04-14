@@ -205,6 +205,42 @@ class RandomGenerator(object):
                 best_coords = (y1, x1)
         return best_coords
 
+    def _choose_crop_coords(self, image: np.ndarray, label: np.ndarray, h: int, w: int, th: int, tw: int) -> tuple[int, int]:
+        y_inds, x_inds = np.where(label > 0)
+
+        if len(y_inds) > 0:
+            crop_mode = random.random()
+            if crop_mode < self.background_crop_prob:
+                y1, x1 = self._random_crop_coords(h, w, th, tw)
+            elif crop_mode < self.background_crop_prob + self.hard_negative_crop_prob:
+                y1, x1 = self._hard_negative_crop_coords(image, label, h, w, th, tw)
+            else:
+                idx = random.randint(0, len(y_inds) - 1)
+                cy, cx = y_inds[idx], x_inds[idx]
+
+                if crop_mode < self.background_crop_prob + self.hard_negative_crop_prob + self.near_background_crop_prob:
+                    offset_y = random.randint(-int(th * 0.9), int(th * 0.9))
+                    offset_x = random.randint(-int(tw * 0.9), int(tw * 0.9))
+                else:
+                    offset_y = random.randint(-int(th * 0.4), int(th * 0.4))
+                    offset_x = random.randint(-int(tw * 0.4), int(tw * 0.4))
+
+                cy += offset_y
+                cx += offset_x
+
+                y1 = max(0, cy - th // 2)
+                x1 = max(0, cx - tw // 2)
+                y1 = min(y1, h - th)
+                x1 = min(x1, w - tw)
+                y1 = int(max(0, y1))
+                x1 = int(max(0, x1))
+        else:
+            if random.random() < self.hard_negative_crop_prob:
+                y1, x1 = self._hard_negative_crop_coords(image, label, h, w, th, tw)
+            else:
+                y1, x1 = self._random_crop_coords(h, w, th, tw)
+        return int(y1), int(x1)
+
     def __call__(self, sample):
         image, label = sample['image'], sample['label']
         
@@ -247,41 +283,7 @@ class RandomGenerator(object):
             
             h, w = label.shape[:2] # Update shape
 
-        # 2. Find cracks
-        # Use a small threshold to find crack pixels (assuming label is float or binary)
-        y_inds, x_inds = np.where(label > 0)
-
-        if len(y_inds) > 0:
-            crop_mode = random.random()
-            if crop_mode < self.background_crop_prob:
-                y1, x1 = self._random_crop_coords(h, w, th, tw)
-            elif crop_mode < self.background_crop_prob + self.hard_negative_crop_prob:
-                y1, x1 = self._hard_negative_crop_coords(image, label, h, w, th, tw)
-            else:
-                idx = random.randint(0, len(y_inds) - 1)
-                cy, cx = y_inds[idx], x_inds[idx]
-
-                if crop_mode < self.background_crop_prob + self.hard_negative_crop_prob + self.near_background_crop_prob:
-                    offset_y = random.randint(-int(th * 0.9), int(th * 0.9))
-                    offset_x = random.randint(-int(tw * 0.9), int(tw * 0.9))
-                else:
-                    offset_y = random.randint(-int(th * 0.4), int(th * 0.4))
-                    offset_x = random.randint(-int(tw * 0.4), int(tw * 0.4))
-
-                cy += offset_y
-                cx += offset_x
-
-                y1 = max(0, cy - th // 2)
-                x1 = max(0, cx - tw // 2)
-                y1 = min(y1, h - th)
-                x1 = min(x1, w - tw)
-                y1 = int(max(0, y1))
-                x1 = int(max(0, x1))
-        else:
-            if random.random() < self.hard_negative_crop_prob:
-                y1, x1 = self._hard_negative_crop_coords(image, label, h, w, th, tw)
-            else:
-                y1, x1 = self._random_crop_coords(h, w, th, tw)
+        y1, x1 = self._choose_crop_coords(image, label, h, w, th, tw)
 
         # Perform the Crop
         image = image[y1:y1+th, x1:x1+tw, :]
@@ -355,6 +357,64 @@ class RandomGenerator(object):
         sample = {'image': image, 'label': label > 0.5} 
 
         return sample
+
+
+class RefineRandomGenerator(RandomGenerator):
+    def __init__(
+        self,
+        output_size,
+        low_res,
+        background_crop_prob: float = 0.1,
+        near_background_crop_prob: float = 0.2,
+        hard_negative_crop_prob: float = 0.1,
+        augment_profile: str = "balanced",
+        roi_positive_band_low: float = 0.20,
+        roi_positive_band_high: float = 0.90,
+    ):
+        super().__init__(
+            output_size=output_size,
+            low_res=low_res,
+            background_crop_prob=background_crop_prob,
+            near_background_crop_prob=near_background_crop_prob,
+            hard_negative_crop_prob=hard_negative_crop_prob,
+            augment_profile=augment_profile,
+        )
+        self.roi_positive_band_low = float(roi_positive_band_low)
+        self.roi_positive_band_high = float(roi_positive_band_high)
+
+    def _choose_crop_coords(self, image: np.ndarray, label: np.ndarray, h: int, w: int, th: int, tw: int) -> tuple[int, int]:
+        mask = (label > 0).astype(np.uint8)
+        coords = np.argwhere(mask > 0)
+        if len(coords) == 0:
+            return super()._choose_crop_coords(image, label, h, w, th, tw)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        dilated = cv2.dilate(mask, kernel, iterations=1)
+        eroded = cv2.erode(mask, kernel, iterations=1)
+        boundary = np.logical_and(dilated > 0, eroded == 0)
+        ambiguous_bg = np.logical_and(dilated > 0, mask == 0)
+
+        mode = random.random()
+        if mode < 0.45:
+            selected = coords
+            offset_scale = 0.20
+        elif mode < 0.75 and int(boundary.sum()) > 0:
+            selected = np.argwhere(boundary)
+            offset_scale = 0.15
+        elif int(ambiguous_bg.sum()) > 0:
+            selected = np.argwhere(ambiguous_bg)
+            offset_scale = 0.25
+        else:
+            selected = coords
+            offset_scale = 0.20
+
+        point = selected[np.random.randint(len(selected))]
+        cy, cx = int(point[0]), int(point[1])
+        cy += random.randint(-int(th * offset_scale), int(th * offset_scale))
+        cx += random.randint(-int(tw * offset_scale), int(tw * offset_scale))
+        y1 = max(0, min(h - th, cy - th // 2))
+        x1 = max(0, min(w - tw, cx - tw // 2))
+        return int(y1), int(x1)
 
 class ValGenerator(object):
     def __init__(self, output_size, low_res):

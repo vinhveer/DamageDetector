@@ -58,7 +58,7 @@ parser.add_argument('--patches_per_image', type=int, default=1, help='number of 
 parser.add_argument('--train_use_boxes', type=int, default=1, help='Use box prompts during training')
 parser.add_argument('--train_full_image_box', action='store_true', help='Use a full-image box prompt for every training sample')
 parser.add_argument('--train_use_points_prob', type=float, default=0.1, help='Legacy mode only: probability of adding GT points during training')
-parser.add_argument('--prompt_policy', type=str, default='hybrid_v1', choices=['hybrid', 'hybrid_v1', 'hybrid_val_aligned', 'hybrid_tight_heavy', 'points_heavy', 'legacy'], help='Training prompt policy preset')
+parser.add_argument('--prompt_policy', type=str, default='hybrid_v1', choices=['hybrid', 'hybrid_v1', 'hybrid_val_aligned', 'hybrid_val_balanced', 'hybrid_tight_heavy', 'points_heavy', 'legacy'], help='Training prompt policy preset')
 parser.add_argument('--background_crop_prob', type=float, default=0.2, help='Probability of sampling a random background crop even when crack exists')
 parser.add_argument('--near_background_crop_prob', type=float, default=0.15, help='Probability of sampling a crop near but not centered on the crack')
 parser.add_argument('--hard_negative_crop_prob', type=float, default=0.10, help='Probability of sampling a hard-negative background crop')
@@ -79,6 +79,16 @@ parser.add_argument('--val_thresholds', type=float, nargs='+', default=[0.35, 0.
 parser.add_argument('--full_image_eval', action='store_true', help='Validate with a full-image box prompt instead of dataset-provided boxes')
 parser.add_argument('--tile_overlap', type=int, default=-1, help='Tile overlap for tiled validation/inference (-1 = img_size // 2)')
 parser.add_argument('--legacy_box_eval', action='store_true', help='Also run legacy crop+GT-box validation diagnostics')
+parser.add_argument('--pipeline_stage', type=str, default='coarse', choices=['coarse', 'refine'], help='Training stage for the pipeline')
+parser.add_argument('--roi_size', type=int, default=768, help='High-resolution ROI size for refine-stage training')
+parser.add_argument('--roi_positive_band_low', type=float, default=0.20, help='Low end of coarse-score ROI mining band')
+parser.add_argument('--roi_positive_band_high', type=float, default=0.90, help='High end of coarse-score ROI mining band')
+parser.add_argument('--refine_enabled', action='store_true', help='Persist coarse_refine metadata in the inference sidecar for downstream runtime/test usage')
+parser.add_argument('--refine_tile_size', type=int, default=768, help='Default fixed ROI size for coarse_refine inference')
+parser.add_argument('--refine_max_rois', type=int, default=16, help='Default max number of refine ROIs per image')
+parser.add_argument('--refine_roi_padding', type=int, default=64, help='Default padding around mined refine ROIs')
+parser.add_argument('--refine_merge_mode', type=str, default='weighted_replace', help='Default coarse/refine merge mode')
+parser.add_argument('--refine_score_threshold', type=float, default=0.15, help='Default ROI mining heat threshold')
 
 args = parser.parse_args()
 
@@ -104,11 +114,14 @@ def _apply_hq_balancing_defaults(args) -> None:
 
     prompt_policy = str(getattr(args, "prompt_policy", "hybrid_v1")).strip().lower()
     if prompt_policy in {"hybrid", "hybrid_v1"}:
-        args.prompt_policy = "hybrid_val_aligned"
+        args.prompt_policy = "hybrid_val_balanced"
 
     if abs(float(args.tversky_alpha) - 0.3) < 1e-8 and abs(float(args.tversky_beta) - 0.7) < 1e-8:
         args.tversky_alpha = 0.4
         args.tversky_beta = 0.6
+
+    if str(getattr(args, "pipeline_stage", "coarse")).strip().lower() == "refine" and prompt_policy in {"hybrid", "hybrid_v1"}:
+        args.prompt_policy = "hybrid_val_balanced"
 
 if __name__ == "__main__":
     if args.tf32:
@@ -128,6 +141,9 @@ if __name__ == "__main__":
     if args.dice_param is not None:
         args.dice_weight = float(args.dice_param)
     _apply_hq_balancing_defaults(args)
+    if str(getattr(args, "pipeline_stage", "coarse")).strip().lower() == "refine":
+        args.img_size = int(getattr(args, "roi_size", args.img_size))
+        args.refine_enabled = True
     args.is_pretrain = True
     args.exp = 'generic_' + str(args.img_size)
     snapshot_path = os.path.join(args.output, "{}".format(args.exp))
@@ -140,6 +156,7 @@ if __name__ == "__main__":
     snapshot_path = snapshot_path + '_lr' + str(args.base_lr) 
     snapshot_path = snapshot_path + '_s' + str(args.seed) 
     snapshot_path = snapshot_path + '_type_' + str(args.delta_type) 
+    snapshot_path = snapshot_path + '_stage_' + str(getattr(args, 'pipeline_stage', 'coarse'))
     if args.delta_type =='adapter':
         snapshot_path = snapshot_path + '_dim' + str(args.middle_dim)         
         snapshot_path = snapshot_path + '_sf' + str(args.scaling_factor)   
