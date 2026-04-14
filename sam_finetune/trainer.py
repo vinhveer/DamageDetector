@@ -32,6 +32,7 @@ except ImportError:
 
 PROMPT_SCHEDULES = {
     "hybrid_v1": (0.50, 0.30, 0.20),
+    "hybrid_val_aligned": (0.20, 0.55, 0.25),
     "hybrid_tight_heavy": (0.35, 0.25, 0.40),
     "points_heavy": (0.60, 0.10, 0.30),
 }
@@ -462,6 +463,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             low_res=[low_res, low_res],
             background_crop_prob=args.background_crop_prob,
             near_background_crop_prob=args.near_background_crop_prob,
+            hard_negative_crop_prob=getattr(args, "hard_negative_crop_prob", 0.10),
+            augment_profile=getattr(args, "augment_profile", "balanced"),
         ),
         patches_per_image=args.patches_per_image,
         use_full_image_box=bool(getattr(args, "train_full_image_box", False)),
@@ -525,6 +528,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     focal_loss = BinaryFocalWithLogitsLoss(alpha=args.focal_alpha, gamma=args.focal_gamma)
     val_thresholds = _safe_thresholds(args)
     b_lr = base_lr / args.warmup_period if args.warmup else base_lr
+    decoder_lr_mult = float(getattr(args, "decoder_lr_mult", 0.1))
 
     lora_params = []
     decoder_params = []
@@ -540,7 +544,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         optimizer = optim.AdamW(
             [
                 {"params": lora_params, "lr": b_lr},
-                {"params": decoder_params, "lr": b_lr * 0.1},
+                {"params": decoder_params, "lr": b_lr * decoder_lr_mult},
             ],
             betas=(0.9, 0.999),
             weight_decay=0.01,
@@ -549,14 +553,14 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         optimizer = optim.SGD(
             [
                 {"params": lora_params, "lr": b_lr},
-                {"params": decoder_params, "lr": b_lr * 0.1},
+                {"params": decoder_params, "lr": b_lr * decoder_lr_mult},
             ],
             momentum=0.9,
             weight_decay=0.0001,
         )
 
     print(f"Detected {len(lora_params)} param tensors for LoRA (LR: {b_lr})")
-    print(f"Detected {len(decoder_params)} param tensors for Decoder (LR: {b_lr * 0.1})")
+    print(f"Detected {len(decoder_params)} param tensors for Decoder (LR: {b_lr * decoder_lr_mult})")
 
     from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -625,6 +629,20 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     _init_csv(
         val_legacy_case_csv_path,
         ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
+    )
+    logging.info(
+        "Effective training profile: prompt_policy=%s augment_profile=%s background_crop_prob=%.3f near_background_crop_prob=%.3f hard_negative_crop_prob=%.3f decoder_lr_mult=%.3f hq_trainable_mode=%s tversky_alpha=%.3f tversky_beta=%.3f"
+        % (
+            prompt_policy,
+            str(getattr(args, "augment_profile", "balanced")),
+            float(getattr(args, "background_crop_prob", 0.2)),
+            float(getattr(args, "near_background_crop_prob", 0.15)),
+            float(getattr(args, "hard_negative_crop_prob", 0.10)),
+            float(decoder_lr_mult),
+            str(getattr(args, "hq_trainable_mode", "balanced")),
+            float(getattr(args, "tversky_alpha", 0.3)),
+            float(getattr(args, "tversky_beta", 0.7)),
+        )
     )
 
     iterator = tqdm(range(max_epoch), ncols=70)
@@ -712,7 +730,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 warmup_factor = (iter_num + 1) / args.warmup_period
                 optimizer.param_groups[0]["lr"] = base_lr * warmup_factor
                 if len(optimizer.param_groups) > 1:
-                    optimizer.param_groups[1]["lr"] = (base_lr * 0.1) * warmup_factor
+                    optimizer.param_groups[1]["lr"] = (base_lr * decoder_lr_mult) * warmup_factor
                 lr_ = optimizer.param_groups[0]["lr"]
             else:
                 lr_ = optimizer.param_groups[0]["lr"]

@@ -42,6 +42,8 @@ parser.add_argument('--middle_dim', type=int, default=32, help='Middle dim of ad
 parser.add_argument('--scaling_factor', type=float, default=0.1, help='Scaling_factor of adapter')
 parser.add_argument('--rank', type=int, default=4, help='Rank for LoRA adaptation')
 parser.add_argument('--decoder_type', type=str, default='baseline', choices=['baseline', 'hq'], help='Mask decoder type')
+parser.add_argument('--decoder_lr_mult', type=float, default=None, help='Learning-rate multiplier applied to trainable decoder params (default: 0.25 for HQ, 0.1 otherwise)')
+parser.add_argument('--hq_trainable_mode', type=str, default='balanced', choices=['hq_only', 'balanced'], help='Trainable policy for HQ decoder params')
 parser.add_argument('--warmup', action='store_true', help='If activated, warp up the learning from a lower lr to the base_lr')
 parser.add_argument('--warmup_period', type=int, default=300,
                     help='Warp up iterations, only valid whrn warmup is activated')
@@ -56,9 +58,11 @@ parser.add_argument('--patches_per_image', type=int, default=1, help='number of 
 parser.add_argument('--train_use_boxes', type=int, default=1, help='Use box prompts during training')
 parser.add_argument('--train_full_image_box', action='store_true', help='Use a full-image box prompt for every training sample')
 parser.add_argument('--train_use_points_prob', type=float, default=0.1, help='Legacy mode only: probability of adding GT points during training')
-parser.add_argument('--prompt_policy', type=str, default='hybrid_v1', choices=['hybrid', 'hybrid_v1', 'hybrid_tight_heavy', 'points_heavy', 'legacy'], help='Training prompt policy preset')
+parser.add_argument('--prompt_policy', type=str, default='hybrid_v1', choices=['hybrid', 'hybrid_v1', 'hybrid_val_aligned', 'hybrid_tight_heavy', 'points_heavy', 'legacy'], help='Training prompt policy preset')
 parser.add_argument('--background_crop_prob', type=float, default=0.2, help='Probability of sampling a random background crop even when crack exists')
 parser.add_argument('--near_background_crop_prob', type=float, default=0.15, help='Probability of sampling a crop near but not centered on the crack')
+parser.add_argument('--hard_negative_crop_prob', type=float, default=0.10, help='Probability of sampling a hard-negative background crop')
+parser.add_argument('--augment_profile', type=str, default='balanced', choices=['balanced', 'aggressive'], help='Augmentation profile for crack segmentation')
 parser.add_argument('--tversky_alpha', type=float, default=0.3, help='False-positive weight in Tversky loss')
 parser.add_argument('--tversky_beta', type=float, default=0.7, help='False-negative weight in Tversky loss')
 parser.add_argument('--bce_weight', type=float, default=1.0, help='Weight for BCEWithLogits loss')
@@ -79,12 +83,32 @@ parser.add_argument('--legacy_box_eval', action='store_true', help='Also run leg
 args = parser.parse_args()
 
 
-def _configure_hq_lora_training(net) -> None:
+def _configure_hq_lora_training(net, mode: str) -> None:
     sam_model = getattr(net, "sam", net)
     mask_decoder = getattr(sam_model, "mask_decoder", None)
-    if mask_decoder is None or not hasattr(mask_decoder, "set_hq_only_trainable"):
+    if mask_decoder is None:
         return
-    mask_decoder.set_hq_only_trainable()
+    if hasattr(mask_decoder, "set_trainable_mode"):
+        mask_decoder.set_trainable_mode(mode)
+    elif hasattr(mask_decoder, "set_hq_only_trainable"):
+        mask_decoder.set_hq_only_trainable()
+
+
+def _apply_hq_balancing_defaults(args) -> None:
+    decoder_type = str(getattr(args, "decoder_type", "baseline")).strip().lower()
+    if args.decoder_lr_mult is None:
+        args.decoder_lr_mult = 0.25 if decoder_type == "hq" else 0.1
+
+    if decoder_type != "hq":
+        return
+
+    prompt_policy = str(getattr(args, "prompt_policy", "hybrid_v1")).strip().lower()
+    if prompt_policy in {"hybrid", "hybrid_v1"}:
+        args.prompt_policy = "hybrid_val_aligned"
+
+    if abs(float(args.tversky_alpha) - 0.3) < 1e-8 and abs(float(args.tversky_beta) - 0.7) < 1e-8:
+        args.tversky_alpha = 0.4
+        args.tversky_beta = 0.6
 
 if __name__ == "__main__":
     if args.tf32:
@@ -103,6 +127,7 @@ if __name__ == "__main__":
     torch.cuda.manual_seed(args.seed)
     if args.dice_param is not None:
         args.dice_weight = float(args.dice_param)
+    _apply_hq_balancing_defaults(args)
     args.is_pretrain = True
     args.exp = 'generic_' + str(args.img_size)
     snapshot_path = os.path.join(args.output, "{}".format(args.exp))
@@ -149,7 +174,7 @@ if __name__ == "__main__":
         net.load_delta_parameters(args.delta_ckpt)
 
     if str(args.decoder_type).strip().lower() == "hq":
-        _configure_hq_lora_training(net)
+        _configure_hq_lora_training(net, args.hq_trainable_mode)
 
     multimask_output = False
 

@@ -85,61 +85,99 @@ def _sample_negative_point(mask_np: np.ndarray, *, split: str) -> np.ndarray:
     return np.array([float(w_img // 2), float(h_img // 2)], dtype=np.float32)
 
 class RandomGenerator(object):
-    def __init__(self, output_size, low_res, background_crop_prob: float = 0.2, near_background_crop_prob: float = 0.15):
+    def __init__(
+        self,
+        output_size,
+        low_res,
+        background_crop_prob: float = 0.2,
+        near_background_crop_prob: float = 0.15,
+        hard_negative_crop_prob: float = 0.10,
+        augment_profile: str = "balanced",
+    ):
         self.output_size = output_size
         self.low_res = low_res
         self.background_crop_prob = float(background_crop_prob)
         self.near_background_crop_prob = float(near_background_crop_prob)
-        self.hard_negative_crop_prob = 0.15
-        
-        # Stronger but still crack-safe augmentations for field images.
-        self.transform = A.Compose([
+        self.hard_negative_crop_prob = float(hard_negative_crop_prob)
+        self.augment_profile = str(augment_profile or "balanced").strip().lower()
+        self.transform = self._build_transform(self.augment_profile)
+
+    def _build_transform(self, augment_profile: str):
+        if augment_profile == "aggressive":
+            return A.Compose([
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+                A.RandomRotate90(p=0.5),
+                A.OneOf([
+                    A.Affine(
+                        scale=(0.85, 1.15),
+                        translate_percent=(-0.06, 0.06),
+                        rotate=(-35, 35),
+                        shear=(-6, 6),
+                        interpolation=cv2.INTER_LINEAR,
+                        mask_interpolation=cv2.INTER_NEAREST,
+                        p=1.0,
+                    ),
+                    A.Perspective(scale=(0.02, 0.05), keep_size=True, fit_output=False, p=1.0),
+                ], p=0.55),
+                A.OneOf([
+                    A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1.0),
+                    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
+                    A.RandomGamma(gamma_limit=(80, 120), p=1.0),
+                ], p=0.5),
+                A.OneOf([
+                    A.RandomShadow(shadow_roi=(0.0, 0.0, 1.0, 1.0), p=1.0),
+                    A.RandomToneCurve(scale=0.15, p=1.0),
+                ], p=0.25),
+                A.OneOf([
+                    A.ImageCompression(p=1.0),
+                    A.Downscale(p=1.0),
+                ], p=0.3),
+                A.OneOf([
+                    A.GaussNoise(p=1.0),
+                    A.Blur(blur_limit=3, p=1.0),
+                    A.MotionBlur(blur_limit=3, p=1.0),
+                ], p=0.35),
+                A.CoarseDropout(p=0.2),
+            ], is_check_shapes=False)
+
+        # Balanced profile: keep crack geometry sharper and reduce augmentations that
+        # inflate robustness at the expense of boundary quality / IoU.
+        return A.Compose([
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
-            
-            # Mild projective / affine changes to simulate handheld capture angle.
             A.OneOf([
                 A.Affine(
-                    scale=(0.85, 1.15),
-                    translate_percent=(-0.06, 0.06),
-                    rotate=(-35, 35),
-                    shear=(-6, 6),
+                    scale=(0.9, 1.1),
+                    translate_percent=(-0.04, 0.04),
+                    rotate=(-20, 20),
+                    shear=(-4, 4),
                     interpolation=cv2.INTER_LINEAR,
                     mask_interpolation=cv2.INTER_NEAREST,
                     p=1.0,
                 ),
-                A.Perspective(scale=(0.02, 0.05), keep_size=True, fit_output=False, p=1.0),
-            ], p=0.55),
-            
-            # Global tone variation from different surfaces and cameras.
+                A.Perspective(scale=(0.01, 0.03), keep_size=True, fit_output=False, p=1.0),
+            ], p=0.3),
             A.OneOf([
                 A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1.0),
-                A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
-                A.RandomGamma(gamma_limit=(80, 120), p=1.0),
-            ], p=0.5),
-
-            # Local illumination drift and shadows on concrete/steel surfaces.
+                A.RandomBrightnessContrast(brightness_limit=0.16, contrast_limit=0.16, p=1.0),
+                A.RandomGamma(gamma_limit=(85, 115), p=1.0),
+            ], p=0.35),
             A.OneOf([
                 A.RandomShadow(shadow_roi=(0.0, 0.0, 1.0, 1.0), p=1.0),
-                A.RandomToneCurve(scale=0.15, p=1.0),
-            ], p=0.25),
-            
-            # Camera / compression degradation.
+                A.RandomToneCurve(scale=0.12, p=1.0),
+            ], p=0.12),
             A.OneOf([
                 A.ImageCompression(p=1.0),
                 A.Downscale(p=1.0),
-            ], p=0.3),
-
-            # Blur & noise from focus, motion, and sensor grain.
+            ], p=0.12),
             A.OneOf([
                 A.GaussNoise(p=1.0),
                 A.Blur(blur_limit=3, p=1.0),
                 A.MotionBlur(blur_limit=3, p=1.0),
-            ], p=0.35),
-            
-            # Small occlusions help against dirt/stains but should not erase the whole crack.
-            A.CoarseDropout(p=0.2),
+            ], p=0.18),
+            A.CoarseDropout(p=0.08),
         ], is_check_shapes=False)
 
     def _random_crop_coords(self, h: int, w: int, th: int, tw: int) -> tuple[int, int]:

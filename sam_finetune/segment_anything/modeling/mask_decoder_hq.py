@@ -13,6 +13,12 @@ class MaskDecoderHQ(nn.Module):
         "embedding_encoder",
         "embedding_maskfeature",
     )
+    balanced_trainable_prefixes = hq_trainable_prefixes + (
+        "iou_token",
+        "mask_tokens",
+        "iou_prediction_head",
+        "output_hypernetworks_mlps.0",
+    )
 
     def __init__(
         self,
@@ -93,10 +99,19 @@ class MaskDecoderHQ(nn.Module):
         self.reset_hq_parameters()
 
     def set_hq_only_trainable(self) -> None:
+        self.set_trainable_mode("hq_only")
+
+    def set_trainable_mode(self, mode: str = "balanced") -> None:
+        mode = str(mode or "balanced").strip().lower()
         for _, parameter in self.named_parameters():
             parameter.requires_grad = False
-        for prefix in self.hq_trainable_prefixes:
-            module = getattr(self, prefix, None)
+        if mode == "hq_only":
+            trainable_prefixes = self.hq_trainable_prefixes
+        else:
+            trainable_prefixes = self.balanced_trainable_prefixes
+
+        for prefix in trainable_prefixes:
+            module = self._resolve_module(prefix)
             if module is None:
                 continue
             for _, parameter in module.named_parameters():
@@ -273,6 +288,20 @@ class MaskDecoderHQ(nn.Module):
                 module.weight.zero_()
             if hasattr(module, "bias") and isinstance(module.bias, torch.Tensor) and module.bias is not None:
                 module.bias.zero_()
+
+    def _resolve_module(self, module_path: str) -> nn.Module | None:
+        module: nn.Module | None = self
+        for token in str(module_path).split("."):
+            if module is None:
+                return None
+            if token.isdigit():
+                try:
+                    module = module[int(token)]
+                except Exception:
+                    return None
+            else:
+                module = getattr(module, token, None)
+        return module
 
 
 class MLP(nn.Module):
