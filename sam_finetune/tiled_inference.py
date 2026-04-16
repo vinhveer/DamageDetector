@@ -423,6 +423,7 @@ def coarse_refine_model_score_map(
     refine_model,
     refine_image_size: int,
     refine_tile_size: int = 768,
+    refine_tile_sizes: list[int] | tuple[int, ...] | None = None,
     refine_max_rois: int = 16,
     refine_roi_padding: int = 64,
     refine_merge_mode: str = "weighted_replace",
@@ -432,48 +433,64 @@ def coarse_refine_model_score_map(
     threshold: float = 0.5,
     multimask_output: bool = False,
     use_amp: bool = False,
+    coarse_score_map: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[dict[str, object]]]:
-    coarse_score_map = tiled_model_score_map(
-        image_hwc,
-        coarse_tile_size,
-        coarse_tile_overlap,
-        model=coarse_model,
-        image_size=coarse_image_size,
-        multimask_output=multimask_output,
-        use_amp=use_amp,
-    )
-    roi_candidates = mine_refine_rois(
-        coarse_score_map,
-        threshold=float(threshold),
-        roi_size=int(refine_tile_size),
-        max_rois=int(refine_max_rois),
-        roi_padding=int(refine_roi_padding),
-        positive_band_low=float(positive_band_low),
-        positive_band_high=float(positive_band_high),
-        score_threshold=float(refine_score_threshold),
-    )
-    if not roi_candidates:
-        return coarse_score_map, coarse_score_map.copy(), []
-
-    refine_outputs: list[dict[str, object]] = []
-    for item in roi_candidates:
-        box = item["box"]
-        crop = crop_box_from_image(image_hwc, box)
-        prob_map = model_tile_prob_map(
-            refine_model,
-            crop,
-            image_size=int(refine_image_size),
+    if coarse_score_map is None:
+        coarse_score_map = tiled_model_score_map(
+            image_hwc,
+            coarse_tile_size,
+            coarse_tile_overlap,
+            model=coarse_model,
+            image_size=coarse_image_size,
             multimask_output=multimask_output,
             use_amp=use_amp,
         )
-        refine_outputs.append({"box": box, "score": float(item["score"]), "prob_map": prob_map})
+    else:
+        coarse_score_map = np.asarray(coarse_score_map, dtype=np.float32)
 
-    merged_score_map = merge_refined_score_map(
-        coarse_score_map,
-        refine_outputs,
-        merge_mode=refine_merge_mode,
-    )
-    return merged_score_map, coarse_score_map, refine_outputs
+    scale_sequence = [int(refine_tile_size)]
+    if refine_tile_sizes:
+        scale_sequence = [int(size) for size in refine_tile_sizes if int(size) > 0]
+        if not scale_sequence:
+            scale_sequence = [int(refine_tile_size)]
+
+    merged_score_map = coarse_score_map.copy()
+    all_refine_outputs: list[dict[str, object]] = []
+    for scale in scale_sequence:
+        roi_candidates = mine_refine_rois(
+            merged_score_map,
+            threshold=float(threshold),
+            roi_size=int(scale),
+            max_rois=int(refine_max_rois),
+            roi_padding=int(refine_roi_padding),
+            positive_band_low=float(positive_band_low),
+            positive_band_high=float(positive_band_high),
+            score_threshold=float(refine_score_threshold),
+        )
+        if not roi_candidates:
+            continue
+
+        refine_outputs: list[dict[str, object]] = []
+        for item in roi_candidates:
+            box = item["box"]
+            crop = crop_box_from_image(image_hwc, box)
+            prob_map = model_tile_prob_map(
+                refine_model,
+                crop,
+                image_size=int(refine_image_size),
+                multimask_output=multimask_output,
+                use_amp=use_amp,
+            )
+            refine_outputs.append({"box": box, "score": float(item["score"]), "prob_map": prob_map, "scale": int(scale)})
+
+        merged_score_map = merge_refined_score_map(
+            merged_score_map,
+            refine_outputs,
+            merge_mode=refine_merge_mode,
+        )
+        all_refine_outputs.extend(refine_outputs)
+
+    return merged_score_map, coarse_score_map.copy(), all_refine_outputs
 
 
 def binary_mask_from_score_map(score_map: np.ndarray, threshold: float) -> np.ndarray:

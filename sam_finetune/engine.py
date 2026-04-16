@@ -17,6 +17,7 @@ class SamFinetuneParams:
     delta_type: str
     delta_checkpoint: str = "auto"
     sam_model_type: str = "auto"
+    centerline_head: bool = False
     middle_dim: int = 32
     scaling_factor: float = 0.2
     rank: int = 4
@@ -35,7 +36,9 @@ class SamFinetuneParams:
     refine_delta_type: str = ""
     refine_rank: int = -1
     refine_decoder_type: str = "auto"
+    refine_centerline_head: bool = False
     refine_tile_size: int = -1
+    refine_tile_sizes: tuple[int, ...] = ()
     refine_max_rois: int = 16
     refine_roi_padding: int = 64
     refine_merge_mode: str = "weighted_replace"
@@ -81,6 +84,7 @@ class SamFinetuneRunner:
         scaling_factor: float,
         rank: int,
         decoder_type_hint: str | None = None,
+        centerline_head: bool | None = None,
         device_request: str = "auto",
         log_fn=None,
         log_prefix: str = "coarse",
@@ -94,6 +98,7 @@ class SamFinetuneRunner:
             load_inference_config,
             load_sam_model,
             resolve_best_delta_checkpoint,
+            resolve_centerline_head,
             resolve_decoder_type,
         )
 
@@ -106,6 +111,7 @@ class SamFinetuneRunner:
         inference_config = load_inference_config(delta_path)
         model_image_size = int(inference_config.get("img_size", 1024))
         decoder_type = resolve_decoder_type(delta_path, decoder_type_hint or inference_config.get("decoder_type"))
+        use_centerline_head = resolve_centerline_head(delta_path, centerline_head)
         inferred = infer_delta_type_from_path(delta_path)
         if inferred is not None and inferred != normalized_delta_type:
             raise ValueError(f"Delta checkpoint mismatch: checkpoint looks like {inferred}, expected {normalized_delta_type}.")
@@ -115,6 +121,7 @@ class SamFinetuneRunner:
             normalized_delta_type,
             str(delta_path),
             str(decoder_type),
+            bool(use_centerline_head),
             model_image_size,
             int(middle_dim),
             float(scaling_factor),
@@ -135,6 +142,7 @@ class SamFinetuneRunner:
             pixel_mean=[0.485, 0.456, 0.406],
             pixel_std=[0.229, 0.224, 0.225],
             decoder_type=decoder_type,
+            centerline_head=bool(use_centerline_head),
         )
         if log_fn is not None:
             log_fn(f"Applying {log_prefix} delta to SAM... type={normalized_delta_type} ckpt={delta_path}")
@@ -169,6 +177,7 @@ class SamFinetuneRunner:
             scaling_factor=params.scaling_factor,
             rank=params.rank,
             decoder_type_hint=None,
+            centerline_head=params.centerline_head,
             device_request=params.device,
             log_fn=log_fn,
             log_prefix="coarse",
@@ -210,6 +219,7 @@ class SamFinetuneRunner:
                 delta_type=params.delta_type,
                 delta_checkpoint=params.delta_checkpoint,
                 sam_model_type=params.sam_model_type,
+                centerline_head=params.centerline_head,
                 middle_dim=params.middle_dim,
                 scaling_factor=params.scaling_factor,
                 rank=params.rank,
@@ -228,7 +238,9 @@ class SamFinetuneRunner:
                 refine_delta_type=params.refine_delta_type,
                 refine_rank=params.refine_rank,
                 refine_decoder_type=params.refine_decoder_type,
+                refine_centerline_head=params.refine_centerline_head,
                 refine_tile_size=params.refine_tile_size,
+                refine_tile_sizes=params.refine_tile_sizes,
                 refine_max_rois=params.refine_max_rois,
                 refine_roi_padding=params.refine_roi_padding,
                 refine_merge_mode=params.refine_merge_mode,
@@ -352,6 +364,7 @@ class SamFinetuneRunner:
                 scaling_factor=params.scaling_factor,
                 rank=refine_rank,
                 decoder_type_hint=params.refine_decoder_type,
+                centerline_head=params.refine_centerline_head,
                 device_request=params.device,
                 log_fn=log_fn,
                 log_prefix="refine",
@@ -359,6 +372,7 @@ class SamFinetuneRunner:
             refine_settings = resolve_refine_settings(
                 refine_delta_path,
                 refine_tile_size=params.refine_tile_size,
+                refine_tile_sizes=params.refine_tile_sizes,
                 refine_max_rois=params.refine_max_rois,
                 refine_roi_padding=params.refine_roi_padding,
                 refine_merge_mode=params.refine_merge_mode,
@@ -375,6 +389,7 @@ class SamFinetuneRunner:
                 refine_model=refine_predictor.model,
                 refine_image_size=resolve_image_size(refine_delta_path),
                 refine_tile_size=int(refine_settings["refine_tile_size"]),
+                refine_tile_sizes=refine_settings["refine_tile_sizes"],
                 refine_max_rois=int(refine_settings["refine_max_rois"]),
                 refine_roi_padding=int(refine_settings["refine_roi_padding"]),
                 refine_merge_mode=str(refine_settings["refine_merge_mode"]),

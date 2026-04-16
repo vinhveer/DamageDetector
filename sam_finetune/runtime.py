@@ -110,6 +110,13 @@ def resolve_decoder_type(delta_checkpoint: str | None, decoder_type: str | None 
     return inferred or "baseline"
 
 
+def resolve_centerline_head(delta_checkpoint: str | None, centerline_head: bool | None = None) -> bool:
+    if centerline_head is not None:
+        return bool(centerline_head)
+    config = load_inference_config(delta_checkpoint)
+    return bool(config.get("centerline_head", False))
+
+
 def resolve_predict_threshold(delta_checkpoint: str | None, threshold: str | float | None) -> float:
     if threshold is not None and str(threshold).strip().lower() != "auto":
         return float(threshold)
@@ -178,6 +185,7 @@ def resolve_refine_settings(
     delta_checkpoint: str | None,
     *,
     refine_tile_size: int | None = None,
+    refine_tile_sizes: list[int] | tuple[int, ...] | None = None,
     refine_max_rois: int | None = None,
     refine_roi_padding: int | None = None,
     refine_merge_mode: str | None = None,
@@ -192,6 +200,17 @@ def resolve_refine_settings(
             tile_size = int(config.get("refine_tile_size", 768))
         except Exception:
             tile_size = 768
+    tile_sizes = refine_tile_sizes
+    if tile_sizes is None:
+        raw_sizes = config.get("refine_tile_sizes")
+        if isinstance(raw_sizes, (list, tuple)):
+            tile_sizes = [int(v) for v in raw_sizes if int(v) > 0]
+        else:
+            tile_sizes = []
+    else:
+        tile_sizes = [int(v) for v in tile_sizes if int(v) > 0]
+    if not tile_sizes:
+        tile_sizes = [max(1, int(tile_size))]
 
     max_rois = int(refine_max_rois) if refine_max_rois is not None else -1
     if max_rois <= 0:
@@ -237,6 +256,7 @@ def resolve_refine_settings(
 
     return {
         "refine_tile_size": max(1, int(tile_size)),
+        "refine_tile_sizes": tile_sizes,
         "refine_max_rois": max(1, int(max_rois)),
         "refine_roi_padding": max(0, int(roi_padding)),
         "refine_merge_mode": merge_mode,
@@ -254,6 +274,7 @@ def load_sam_model(
     pixel_mean=None,
     pixel_std=None,
     decoder_type: str = "baseline",
+    centerline_head: bool = False,
 ):
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"SAM checkpoint not found: {checkpoint_path}")
@@ -277,6 +298,7 @@ def load_sam_model(
         "num_classes": 1,
         "checkpoint": None,
         "decoder_type": resolve_decoder_type(None, decoder_type),
+        "centerline_head": bool(centerline_head),
     }
     if pixel_mean is not None:
         kwargs["pixel_mean"] = pixel_mean

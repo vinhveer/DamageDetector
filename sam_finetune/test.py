@@ -78,6 +78,7 @@ def _load_finetuned_sam(
     scaling_factor: float,
     rank: int,
     decoder_type: str = "auto",
+    centerline_head: bool = False,
 ):
     decoder = resolve_decoder_type(delta_ckpt, decoder_type)
     image_size = resolve_image_size(delta_ckpt, img_size if int(img_size) > 0 else None)
@@ -88,6 +89,7 @@ def _load_finetuned_sam(
         pixel_mean=[0.485, 0.456, 0.406],
         pixel_std=[0.229, 0.224, 0.225],
         decoder_type=decoder,
+        centerline_head=bool(centerline_head),
     )
     apply_delta_to_sam(
         sam=sam,
@@ -254,7 +256,16 @@ def _run_tiled_eval(args, model, multimask_output, test_save_path=None, *, ensem
     }
 
 
-def _run_coarse_refine_eval(args, coarse_model, refine_model, multimask_output, test_save_path=None):
+def _run_coarse_refine_eval(
+    args,
+    coarse_model,
+    refine_model,
+    multimask_output,
+    test_save_path=None,
+    *,
+    ensemble_models=None,
+    ensemble_image_sizes=None,
+):
     case_names = list_image_files(os.path.join(args.volume_path, "images"))
     logging.info("%d coarse_refine full-image test iterations", len(case_names))
 
@@ -265,6 +276,7 @@ def _run_coarse_refine_eval(args, coarse_model, refine_model, multimask_output, 
     refine_settings = resolve_refine_settings(
         args.refine_delta_ckpt,
         refine_tile_size=args.refine_tile_size,
+        refine_tile_sizes=args.refine_tile_sizes,
         refine_max_rois=args.refine_max_rois,
         refine_roi_padding=args.refine_roi_padding,
         refine_merge_mode=args.refine_merge_mode,
@@ -277,6 +289,17 @@ def _run_coarse_refine_eval(args, coarse_model, refine_model, multimask_output, 
 
     for i_batch, case_name in enumerate(case_names):
         image_hwc, label = load_image_mask_arrays(args.volume_path, case_name)
+        if ensemble_models:
+            coarse_score_map = _tiled_score_map_ensemble(
+                image_hwc,
+                ensemble_models,
+                ensemble_image_sizes,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                multimask_output=multimask_output,
+            )
+        else:
+            coarse_score_map = None
         score_map, coarse_map, refine_outputs = coarse_refine_model_score_map(
             image_hwc,
             coarse_model=coarse_model,
@@ -286,6 +309,7 @@ def _run_coarse_refine_eval(args, coarse_model, refine_model, multimask_output, 
             refine_model=refine_model,
             refine_image_size=int(refine_image_size),
             refine_tile_size=int(refine_settings["refine_tile_size"]),
+            refine_tile_sizes=refine_settings["refine_tile_sizes"],
             refine_max_rois=int(refine_settings["refine_max_rois"]),
             refine_roi_padding=int(refine_settings["refine_roi_padding"]),
             refine_merge_mode=str(refine_settings["refine_merge_mode"]),
@@ -295,6 +319,7 @@ def _run_coarse_refine_eval(args, coarse_model, refine_model, multimask_output, 
             threshold=float(resolve_predict_threshold(args.delta_ckpt, args.pred_threshold)),
             multimask_output=multimask_output,
             use_amp=False,
+            coarse_score_map=coarse_score_map,
         )
         sweep = threshold_sweep(score_map, label, args.val_thresholds)
         total_cases += 1
@@ -329,6 +354,17 @@ def _run_coarse_refine_eval(args, coarse_model, refine_model, multimask_output, 
     }
     for case_name in case_names if test_save_path is None else []:
         image_hwc, label = load_image_mask_arrays(args.volume_path, case_name)
+        if ensemble_models:
+            coarse_score_map = _tiled_score_map_ensemble(
+                image_hwc,
+                ensemble_models,
+                ensemble_image_sizes,
+                tile_size=tile_size,
+                tile_overlap=tile_overlap,
+                multimask_output=multimask_output,
+            )
+        else:
+            coarse_score_map = None
         score_map, _coarse_map, _refine_outputs = coarse_refine_model_score_map(
             image_hwc,
             coarse_model=coarse_model,
@@ -338,6 +374,7 @@ def _run_coarse_refine_eval(args, coarse_model, refine_model, multimask_output, 
             refine_model=refine_model,
             refine_image_size=int(refine_image_size),
             refine_tile_size=int(refine_settings["refine_tile_size"]),
+            refine_tile_sizes=refine_settings["refine_tile_sizes"],
             refine_max_rois=int(refine_settings["refine_max_rois"]),
             refine_roi_padding=int(refine_settings["refine_roi_padding"]),
             refine_merge_mode=str(refine_settings["refine_merge_mode"]),
@@ -347,6 +384,7 @@ def _run_coarse_refine_eval(args, coarse_model, refine_model, multimask_output, 
             threshold=float(best_thr),
             multimask_output=multimask_output,
             use_amp=False,
+            coarse_score_map=coarse_score_map,
         )
         metrics = continuity_metrics((score_map >= float(best_thr)).astype(np.uint8), label)
         for key in continuity_totals:
@@ -461,6 +499,7 @@ if __name__ == "__main__":
     parser.add_argument("--scaling_factor", type=float, default=0.1, help="Scaling_factor of adapter")
     parser.add_argument("--rank", type=int, default=4, help="Rank for LoRA adaptation")
     parser.add_argument("--decoder_type", type=str, default="baseline", choices=["baseline", "hq"], help="Mask decoder type")
+    parser.add_argument("--centerline_head", action="store_true", help="Enable dedicated centerline head when building the SAM decoder")
     parser.add_argument("--pred_threshold", default="auto", help="Probability threshold as float or 'auto'")
     parser.add_argument("--val_thresholds", type=float, nargs="+", default=[0.35, 0.4, 0.45, 0.5, 0.55, 0.6], help="Candidate probability thresholds")
     parser.add_argument("--eval_mode", default="auto", choices=["auto", "tile_full_box", "legacy_full_box", "coarse_refine"], help="Primary evaluation mode")
@@ -470,7 +509,9 @@ if __name__ == "__main__":
     parser.add_argument("--refine_delta_type", type=str, default="", help='Refine delta type: "adapter", "lora", or "both"')
     parser.add_argument("--refine_rank", type=int, default=-1, help="Rank for the refine LoRA adaptation")
     parser.add_argument("--refine_decoder_type", type=str, default="auto", choices=["auto", "baseline", "hq"], help="Mask decoder type for refine stage")
+    parser.add_argument("--refine_centerline_head", action="store_true", help="Enable dedicated centerline head for refine decoder")
     parser.add_argument("--refine_tile_size", type=int, default=-1, help="Fixed ROI size for high-resolution refine stage")
+    parser.add_argument("--refine_tile_sizes", type=int, nargs="*", default=None, help="Optional multi-scale ROI sizes for sequential refine passes")
     parser.add_argument("--refine_max_rois", type=int, default=16, help="Maximum number of refine ROIs per image")
     parser.add_argument("--refine_roi_padding", type=int, default=64, help="Padding around mined refine ROIs")
     parser.add_argument("--refine_merge_mode", type=str, default="weighted_replace", help="Merge mode for coarse/refine score maps")
@@ -533,6 +574,7 @@ if __name__ == "__main__":
         scaling_factor=args.scaling_factor,
         rank=args.rank,
         decoder_type=args.decoder_type,
+        centerline_head=bool(getattr(args, "centerline_head", False) or load_inference_config(args.delta_ckpt).get("centerline_head", False)),
     )
     args.img_size = int(coarse_img_size)
     args.decoder_type = coarse_decoder
@@ -556,6 +598,7 @@ if __name__ == "__main__":
             scaling_factor=args.scaling_factor,
             rank=extra_rank,
             decoder_type=extra_decoder,
+            centerline_head=bool(getattr(args, "centerline_head", False) or load_inference_config(extra_ckpt).get("centerline_head", False)),
         )
         ensemble_models.append(extra_model)
         ensemble_image_sizes.append(int(extra_image_size))
@@ -575,6 +618,7 @@ if __name__ == "__main__":
             scaling_factor=args.scaling_factor,
             rank=refine_rank,
             decoder_type=args.refine_decoder_type,
+            centerline_head=bool(getattr(args, "refine_centerline_head", False) or load_inference_config(args.refine_delta_ckpt).get("centerline_head", False)),
         )
     multimask_output = False
 
@@ -606,7 +650,15 @@ if __name__ == "__main__":
     if resolved_mode == "legacy_full_box":
         primary = _run_legacy_eval(args, sam, multimask_output, test_save_path)
     elif resolved_mode == "coarse_refine":
-        primary = _run_coarse_refine_eval(args, sam, refine_sam, multimask_output, test_save_path)
+        primary = _run_coarse_refine_eval(
+            args,
+            sam,
+            refine_sam,
+            multimask_output,
+            test_save_path,
+            ensemble_models=ensemble_models if len(ensemble_models) > 1 else None,
+            ensemble_image_sizes=ensemble_image_sizes if len(ensemble_models) > 1 else None,
+        )
     else:
         primary = _run_tiled_eval(
             args,

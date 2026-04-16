@@ -11,7 +11,7 @@ from .modeling import ImageEncoderViT, MaskDecoder, MaskDecoderHQ, PromptEncoder
 
 
 def build_sam_vit_h(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],
-                    checkpoint=None, decoder_type: str = "baseline"):
+                    checkpoint=None, decoder_type: str = "baseline", centerline_head: bool = False):
     return _build_sam(
         encoder_embed_dim=1280,
         encoder_depth=32,
@@ -23,6 +23,7 @@ def build_sam_vit_h(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53
         pixel_mean=pixel_mean,
         pixel_std=pixel_std,
         decoder_type=decoder_type,
+        centerline_head=centerline_head,
     )
 
 
@@ -30,7 +31,7 @@ build_sam = build_sam_vit_h
 
 
 def build_sam_vit_l(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],
-                    checkpoint=None, decoder_type: str = "baseline"):
+                    checkpoint=None, decoder_type: str = "baseline", centerline_head: bool = False):
     return _build_sam(
         encoder_embed_dim=1024,
         encoder_depth=24,
@@ -42,11 +43,12 @@ def build_sam_vit_l(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53
         pixel_mean=pixel_mean,
         pixel_std=pixel_std,
         decoder_type=decoder_type,
+        centerline_head=centerline_head,
     )
 
 
 def build_sam_vit_b(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53], pixel_std=[58.395, 57.12, 57.375],
-                    checkpoint=None, decoder_type: str = "baseline"):
+                    checkpoint=None, decoder_type: str = "baseline", centerline_head: bool = False):
     return _build_sam(
         encoder_embed_dim=768,
         encoder_depth=12,
@@ -59,6 +61,7 @@ def build_sam_vit_b(image_size, num_classes, pixel_mean=[123.675, 116.28, 103.53
         pixel_mean=pixel_mean,
         pixel_std=pixel_std,
         decoder_type=decoder_type,
+        centerline_head=centerline_head,
     )
 
 
@@ -80,6 +83,7 @@ def _build_sam(
         pixel_mean,
         pixel_std,
         decoder_type="baseline",
+        centerline_head: bool = False,
         checkpoint=None,
 ):
     prompt_embed_dim = 256
@@ -102,6 +106,7 @@ def _build_sam(
             iou_head_hidden_dim=256,
             vit_dim=encoder_embed_dim,
             output_scale_factor=4,
+            centerline_head=centerline_head,
         )
     else:
         mask_decoder = MaskDecoder(
@@ -115,6 +120,7 @@ def _build_sam(
             transformer_dim=prompt_embed_dim,
             iou_head_depth=3,
             iou_head_hidden_dim=256,
+            centerline_head=centerline_head,
         )
     sam = Sam(
         image_encoder=ImageEncoderViT(

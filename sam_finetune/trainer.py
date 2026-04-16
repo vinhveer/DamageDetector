@@ -109,11 +109,12 @@ def calc_loss(
     loss_tversky = tversky_loss(logits, high_res_label_batch)
     loss_focal = focal_loss(logits, high_res_label_batch)
     loss_cldice = cldice_loss(logits, high_res_label_batch) if float(cldice_weight) > 0.0 else logits.new_tensor(0.0)
+    centerline_logits = outputs.get("centerline_logits", logits)
     if float(centerline_aux_weight) > 0.0:
         centerline_target = centerline_target_batch(high_res_label_batch)
-        loss_centerline = centerline_loss(logits, centerline_target)
+        loss_centerline = centerline_loss(centerline_logits, centerline_target)
     else:
-        loss_centerline = logits.new_tensor(0.0)
+        loss_centerline = centerline_logits.new_tensor(0.0)
     loss = (
         float(bce_weight) * loss_bce
         + float(dice_weight) * loss_dice
@@ -251,12 +252,14 @@ def _write_inference_config(snapshot_path: str, args, best_threshold: float | No
         "pipeline_stage": str(getattr(args, "pipeline_stage", "coarse")).strip().lower(),
         "refine_enabled": bool(getattr(args, "refine_enabled", False)),
         "refine_tile_size": int(getattr(args, "refine_tile_size", getattr(args, "roi_size", 768))),
+        "refine_tile_sizes": [int(v) for v in (getattr(args, "refine_tile_sizes", None) or []) if int(v) > 0],
         "refine_max_rois": int(getattr(args, "refine_max_rois", 16)),
         "refine_roi_padding": int(getattr(args, "refine_roi_padding", 64)),
         "refine_merge_mode": str(getattr(args, "refine_merge_mode", "weighted_replace")).strip().lower(),
         "refine_score_threshold": float(getattr(args, "refine_score_threshold", 0.15)),
         "refine_positive_band_low": float(getattr(args, "roi_positive_band_low", 0.20)),
         "refine_positive_band_high": float(getattr(args, "roi_positive_band_high", 0.90)),
+        "centerline_head": bool(getattr(args, "centerline_head", False)),
     }
     with open(os.path.join(snapshot_path, "inference_config.json"), "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)

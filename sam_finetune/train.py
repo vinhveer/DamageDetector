@@ -42,6 +42,7 @@ parser.add_argument('--middle_dim', type=int, default=32, help='Middle dim of ad
 parser.add_argument('--scaling_factor', type=float, default=0.1, help='Scaling_factor of adapter')
 parser.add_argument('--rank', type=int, default=4, help='Rank for LoRA adaptation')
 parser.add_argument('--decoder_type', type=str, default='baseline', choices=['baseline', 'hq'], help='Mask decoder type')
+parser.add_argument('--centerline_head', action='store_true', help='Enable a dedicated centerline prediction head in the decoder')
 parser.add_argument('--decoder_lr_mult', type=float, default=None, help='Learning-rate multiplier applied to trainable decoder params (default: 0.25 for HQ, 0.1 otherwise)')
 parser.add_argument('--hq_trainable_mode', type=str, default='balanced', choices=['hq_only', 'balanced'], help='Trainable policy for HQ decoder params')
 parser.add_argument('--warmup', action='store_true', help='If activated, warp up the learning from a lower lr to the base_lr')
@@ -90,6 +91,7 @@ parser.add_argument('--extra_train_roots', type=str, nargs='*', default=None, he
 parser.add_argument('--pseudo_label_roots', type=str, nargs='*', default=None, help='Additional pseudo-labeled dataset roots to mix into training')
 parser.add_argument('--refine_enabled', action='store_true', help='Persist coarse_refine metadata in the inference sidecar for downstream runtime/test usage')
 parser.add_argument('--refine_tile_size', type=int, default=768, help='Default fixed ROI size for coarse_refine inference')
+parser.add_argument('--refine_tile_sizes', type=int, nargs='*', default=None, help='Optional multi-scale ROI sizes for coarse_refine inference')
 parser.add_argument('--refine_max_rois', type=int, default=16, help='Default max number of refine ROIs per image')
 parser.add_argument('--refine_roi_padding', type=int, default=64, help='Default padding around mined refine ROIs')
 parser.add_argument('--refine_merge_mode', type=str, default='weighted_replace', help='Default coarse/refine merge mode')
@@ -149,6 +151,8 @@ if __name__ == "__main__":
     if str(getattr(args, "pipeline_stage", "coarse")).strip().lower() == "refine":
         args.img_size = int(getattr(args, "roi_size", args.img_size))
         args.refine_enabled = True
+    if float(getattr(args, "centerline_aux_weight", 0.0)) > 0.0:
+        args.centerline_head = True
     args.is_pretrain = True
     args.exp = 'generic_' + str(args.img_size)
     snapshot_path = os.path.join(args.output, "{}".format(args.exp))
@@ -180,7 +184,8 @@ if __name__ == "__main__":
                                                                 checkpoint=args.ckpt, 
                                                                 pixel_mean=[0.485, 0.456, 0.406],
                                                                 pixel_std=[0.229, 0.224, 0.225],
-                                                                decoder_type=args.decoder_type)
+                                                                decoder_type=args.decoder_type,
+                                                                centerline_head=bool(getattr(args, "centerline_head", False)))
 
     if args.delta_type == 'adapter':
         pkg = import_module('delta.sam_adapter_image_encoder')

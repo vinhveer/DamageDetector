@@ -108,7 +108,11 @@ class SamPredictor:
         if bool(getattr(self.model.mask_decoder, "requires_image_features", False)):
             decoder_kwargs["hq_token_only"] = False
             decoder_kwargs["interm_embeddings"] = self.interm_features
-        low_res_masks, iou_predictions = self.model.mask_decoder(**decoder_kwargs)
+        decoder_outputs = self.model.mask_decoder(**decoder_kwargs)
+        if isinstance(decoder_outputs, tuple) and len(decoder_outputs) == 3:
+            low_res_masks, iou_predictions, _centerline_logits = decoder_outputs
+        else:
+            low_res_masks, iou_predictions = decoder_outputs
         masks = self.model.postprocess_masks(low_res_masks, self.input_size, self.original_size)
         if not return_logits:
             masks = masks > self.model.mask_threshold

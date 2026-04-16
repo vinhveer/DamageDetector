@@ -18,6 +18,7 @@ class MaskDecoderHQ(nn.Module):
         "mask_tokens",
         "iou_prediction_head",
         "output_hypernetworks_mlps.0",
+        "centerline_head",
     )
 
     def __init__(
@@ -31,12 +32,14 @@ class MaskDecoderHQ(nn.Module):
         iou_head_hidden_dim: int = 256,
         vit_dim: int = 1024,
         output_scale_factor: int = 4,
+        centerline_head: bool = False,
     ) -> None:
         super().__init__()
         self.transformer_dim = transformer_dim
         self.transformer = transformer
         self.num_multimask_outputs = num_multimask_outputs
         self.output_scale_factor = max(1, int(output_scale_factor))
+        self.centerline_head_enabled = bool(centerline_head)
 
         self.iou_token = nn.Embedding(1, transformer_dim)
         self.num_mask_tokens = num_multimask_outputs + 1
@@ -78,6 +81,13 @@ class MaskDecoderHQ(nn.Module):
             nn.GELU(),
             nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1),
         )
+        if self.centerline_head_enabled:
+            self.centerline_head = nn.Sequential(
+                nn.Conv2d(transformer_dim // 8, transformer_dim // 8, kernel_size=3, stride=1, padding=1),
+                LayerNorm2d(transformer_dim // 8),
+                activation(),
+                nn.Conv2d(transformer_dim // 8, 1, kernel_size=1, stride=1),
+            )
         self.reset_hq_parameters()
 
     def reset_hq_parameters(self) -> None:
@@ -126,13 +136,13 @@ class MaskDecoderHQ(nn.Module):
         multimask_output: bool,
         hq_token_only: bool = False,
         interm_embeddings: torch.Tensor | None = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if interm_embeddings is None:
             raise ValueError("MaskDecoderHQ requires intermediate image encoder embeddings.")
         vit_features = interm_embeddings[0].permute(0, 3, 1, 2)
         hq_features = self.embedding_encoder(image_embeddings) + self.compress_vit_feat(vit_features)
 
-        masks, iou_pred = self.predict_masks(
+        masks, iou_pred, centerline_logits = self.predict_masks(
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
@@ -154,6 +164,8 @@ class MaskDecoderHQ(nn.Module):
 
         masks_hq = masks[:, slice(self.num_mask_tokens - 1, self.num_mask_tokens)]
         masks = masks_hq if hq_token_only else masks_sam + masks_hq
+        if centerline_logits is not None:
+            return masks, iou_pred, centerline_logits
         return masks, iou_pred
 
     def predict_masks(
@@ -163,7 +175,7 @@ class MaskDecoderHQ(nn.Module):
         sparse_prompt_embeddings: torch.Tensor,
         dense_prompt_embeddings: torch.Tensor,
         hq_features: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, self.hf_token.weight], dim=0)
         output_tokens = output_tokens.unsqueeze(0).expand(sparse_prompt_embeddings.size(0), -1, -1)
         tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
@@ -214,7 +226,8 @@ class MaskDecoderHQ(nn.Module):
         masks_hq = (hyper_in[:, self.num_mask_tokens - 1 :] @ upscaled_embedding_hq.view(b, c, h * w)).view(b, -1, h, w)
         masks = torch.cat([masks_sam, masks_hq], dim=1)
         iou_pred = self.iou_prediction_head(iou_token_out)
-        return masks, iou_pred
+        centerline_logits = self.centerline_head(upscaled_embedding_hq) if self.centerline_head_enabled else None
+        return masks, iou_pred, centerline_logits
 
     def _copy_named_parameter(self, name: str, state_dict: dict) -> None:
         source = state_dict.get(f"mask_decoder.{name}")

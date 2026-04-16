@@ -66,7 +66,7 @@ class Sam(nn.Module):
             points=points, boxes=boxes, masks=None
         )
         if requires_image_features:
-            output_masks, iou_predictions = self.mask_decoder(
+            decoder_outputs = self.mask_decoder(
                 image_embeddings=image_embeddings,
                 image_pe=self.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embeddings,
@@ -76,13 +76,18 @@ class Sam(nn.Module):
                 interm_embeddings=interm_embeddings,
             )
         else:
-            output_masks, iou_predictions = self.mask_decoder(
+            decoder_outputs = self.mask_decoder(
                 image_embeddings=image_embeddings,
                 image_pe=self.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embeddings,
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=multimask_output
             )
+        if isinstance(decoder_outputs, tuple) and len(decoder_outputs) == 3:
+            output_masks, iou_predictions, centerline_logits = decoder_outputs
+        else:
+            output_masks, iou_predictions = decoder_outputs
+            centerline_logits = None
         # masks = self.postprocess_masks(
         #     output_masks,
         #     input_size=(image_size, image_size),
@@ -92,6 +97,8 @@ class Sam(nn.Module):
             'masks':output_masks,
             'iou_predictions': iou_predictions,
         }
+        if centerline_logits is not None:
+            outputs["centerline_logits"] = centerline_logits
         return outputs
 
     @torch.no_grad()
@@ -155,7 +162,7 @@ class Sam(nn.Module):
                 masks=image_record.get("mask_inputs", None),
             )
             if requires_image_features:
-                output_masks, iou_predictions = self.mask_decoder(
+                decoder_outputs = self.mask_decoder(
                     image_embeddings=curr_embedding.unsqueeze(0),
                     image_pe=self.prompt_encoder.get_dense_pe(),
                     sparse_prompt_embeddings=sparse_embeddings,
@@ -165,7 +172,7 @@ class Sam(nn.Module):
                     interm_embeddings=interm_embeddings[index].unsqueeze(0),
                 )
             else:
-                output_masks, iou_predictions = self.mask_decoder(
+                decoder_outputs = self.mask_decoder(
                     image_embeddings=curr_embedding.unsqueeze(0),
                     image_pe=self.prompt_encoder.get_dense_pe(),
                     sparse_prompt_embeddings=sparse_embeddings,
@@ -178,13 +185,18 @@ class Sam(nn.Module):
             #     original_size=image_record["original_size"],
             # )
             # masks = masks > self.mask_threshold
-            outputs.append(
-                {
-                    # "masks": masks,
-                    "iou_predictions": iou_predictions,
-                    "masks": output_masks,
-                }
-            )
+            if isinstance(decoder_outputs, tuple) and len(decoder_outputs) == 3:
+                output_masks, iou_predictions, centerline_logits = decoder_outputs
+            else:
+                output_masks, iou_predictions = decoder_outputs
+                centerline_logits = None
+            record = {
+                "iou_predictions": iou_predictions,
+                "masks": output_masks,
+            }
+            if centerline_logits is not None:
+                record["centerline_logits"] = centerline_logits
+            outputs.append(record)
         return outputs
 
     def postprocess_masks(

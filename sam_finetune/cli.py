@@ -12,6 +12,7 @@ def _common_params(args: argparse.Namespace) -> dict:
         "sam_model_type": args.sam_model_type,
         "delta_type": args.delta_type,
         "delta_checkpoint": args.delta_checkpoint,
+        "centerline_head": bool(args.centerline_head),
         "middle_dim": int(args.middle_dim),
         "scaling_factor": float(args.scaling_factor),
         "rank": int(args.rank),
@@ -28,7 +29,9 @@ def _common_params(args: argparse.Namespace) -> dict:
         "refine_delta_type": args.refine_delta_type,
         "refine_rank": int(args.refine_rank),
         "refine_decoder_type": args.refine_decoder_type,
+        "refine_centerline_head": bool(args.refine_centerline_head),
         "refine_tile_size": int(args.refine_tile_size),
+        "refine_tile_sizes": tuple(int(v) for v in (args.refine_tile_sizes or []) if int(v) > 0),
         "refine_max_rois": int(args.refine_max_rois),
         "refine_roi_padding": int(args.refine_roi_padding),
         "refine_merge_mode": args.refine_merge_mode,
@@ -52,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--sam-model-type", default="auto", choices=["auto", "vit_b", "vit_l", "vit_h"])
         subparser.add_argument("--delta-type", required=True, choices=["adapter", "lora", "both"])
         subparser.add_argument("--delta-checkpoint", default="auto")
+        subparser.add_argument("--centerline-head", action="store_true")
         subparser.add_argument("--middle-dim", type=int, default=32)
         subparser.add_argument("--scaling-factor", type=float, default=0.2)
         subparser.add_argument("--rank", type=int, default=4)
@@ -68,7 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--refine-delta-type", default="")
         subparser.add_argument("--refine-rank", type=int, default=-1)
         subparser.add_argument("--refine-decoder-type", default="auto", choices=["auto", "baseline", "hq"])
+        subparser.add_argument("--refine-centerline-head", action="store_true")
         subparser.add_argument("--refine-tile-size", type=int, default=-1)
+        subparser.add_argument("--refine-tile-sizes", type=int, nargs="*", default=None)
         subparser.add_argument("--refine-max-rois", type=int, default=16)
         subparser.add_argument("--refine-roi-padding", type=int, default=64)
         subparser.add_argument("--refine-merge-mode", default="weighted_replace")
