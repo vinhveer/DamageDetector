@@ -63,7 +63,13 @@ parser.add_argument('--prompt_policy', type=str, default='hybrid_v1', choices=['
 parser.add_argument('--background_crop_prob', type=float, default=0.2, help='Probability of sampling a random background crop even when crack exists')
 parser.add_argument('--near_background_crop_prob', type=float, default=0.15, help='Probability of sampling a crop near but not centered on the crack')
 parser.add_argument('--hard_negative_crop_prob', type=float, default=0.10, help='Probability of sampling a hard-negative background crop')
-parser.add_argument('--augment_profile', type=str, default='balanced', choices=['balanced', 'aggressive'], help='Augmentation profile for crack segmentation')
+parser.add_argument(
+    '--augment_profile',
+    type=str,
+    default='balanced',
+    choices=['light', 'balanced', 'aggressive', 'strong'],
+    help='Augmentation profile for crack segmentation: light, balanced, or aggressive/strong',
+)
 parser.add_argument('--tversky_alpha', type=float, default=0.3, help='False-positive weight in Tversky loss')
 parser.add_argument('--tversky_beta', type=float, default=0.7, help='False-negative weight in Tversky loss')
 parser.add_argument('--bce_weight', type=float, default=1.0, help='Weight for BCEWithLogits loss')

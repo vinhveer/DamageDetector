@@ -103,7 +103,11 @@ class RandomGenerator(object):
         self.transform = self._build_transform(self.augment_profile)
 
     def _build_transform(self, augment_profile: str):
-        if augment_profile == "aggressive":
+        profile = str(augment_profile or "balanced").strip().lower()
+        if profile == "strong":
+            profile = "aggressive"
+
+        if profile == "aggressive":
             return A.Compose([
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.5),
@@ -139,6 +143,31 @@ class RandomGenerator(object):
                     A.MotionBlur(blur_limit=3, p=1.0),
                 ], p=0.35),
                 A.CoarseDropout(p=0.2),
+            ], is_check_shapes=False)
+
+        if profile == "light":
+            return A.Compose([
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.3),
+                A.RandomRotate90(p=0.35),
+                A.Affine(
+                    scale=(0.95, 1.05),
+                    translate_percent=(-0.02, 0.02),
+                    rotate=(-10, 10),
+                    shear=(-2, 2),
+                    interpolation=cv2.INTER_LINEAR,
+                    mask_interpolation=cv2.INTER_NEAREST,
+                    p=0.15,
+                ),
+                A.OneOf([
+                    A.CLAHE(clip_limit=3.0, tile_grid_size=(8, 8), p=1.0),
+                    A.RandomBrightnessContrast(brightness_limit=0.10, contrast_limit=0.10, p=1.0),
+                    A.RandomGamma(gamma_limit=(92, 108), p=1.0),
+                ], p=0.22),
+                A.OneOf([
+                    A.GaussNoise(p=1.0),
+                    A.Blur(blur_limit=3, p=1.0),
+                ], p=0.08),
             ], is_check_shapes=False)
 
         # Balanced profile: keep crack geometry sharper and reduce augmentations that
