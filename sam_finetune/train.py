@@ -191,10 +191,10 @@ def _apply_profile_defaults(args) -> None:
 
 if __name__ == "__main__":
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    rank = int(os.environ.get("RANK", "0"))
+    global_rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     args.local_rank = local_rank
-    args.rank = rank
+    args.global_rank = global_rank
     args.world_size = world_size
     args.distributed = bool(world_size > 1)
     if args.distributed and not dist.is_initialized():
@@ -211,7 +211,7 @@ if __name__ == "__main__":
         cudnn.benchmark = False
         cudnn.deterministic = True
 
-    seed = int(args.seed) + int(rank)
+    seed = int(args.seed) + int(global_rank)
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -287,16 +287,16 @@ if __name__ == "__main__":
     config_items.append(f'num_classes: {NUM_CLASSES}\n')
     config_items.append('dataset_backend: generic\n')
 
-    if rank == 0:
+    if global_rank == 0:
         with open(config_file, 'w') as f:
             f.writelines(config_items)
 
     total_params = sum(p.numel() for p in net.parameters())
-    if rank == 0:
+    if global_rank == 0:
         print(f"Total number of parameters:{total_params}")
 
     total_params_train = sum(p.numel() for p in net.parameters() if p.requires_grad)
-    if rank == 0:
+    if global_rank == 0:
         print(f"Total number of trainable parameters:{total_params_train}")
 
     try:

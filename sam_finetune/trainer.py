@@ -687,7 +687,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         train_sampler = DistributedSampler(
             db_train,
             num_replicas=int(getattr(args, "world_size", _get_world_size())),
-            rank=int(getattr(args, "rank", _get_rank())),
+            rank=int(getattr(args, "global_rank", _get_rank())),
             shuffle=True,
             drop_last=False,
         )
