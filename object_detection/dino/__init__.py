@@ -1,6 +1,4 @@
-"""New namespace wrapper for the existing DINO runtime CLI."""
+from .client import get_dino_service
+from .engine import DinoParams, DinoRunner
 
-from dino.cli import build_parser, main
-
-__all__ = ["build_parser", "main"]
-
+__all__ = ["DinoParams", "DinoRunner", "get_dino_service"]

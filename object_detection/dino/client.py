@@ -9,5 +9,5 @@ _DINO: JsonServiceProcess | None = None
 def get_dino_service() -> JsonServiceProcess:
     global _DINO
     if _DINO is None:
-        _DINO = JsonServiceProcess(module="dino.worker")
+        _DINO = JsonServiceProcess(module="object_detection.dino.worker")
     return _DINO

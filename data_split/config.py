@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dino.dinov2_prototypes import default_dinov2_embedding_checkpoint
+from object_detection.dino.dinov2_prototypes import default_dinov2_embedding_checkpoint
 
 
 @dataclass(slots=True)

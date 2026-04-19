@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import cv2
 
-from dino import get_dino_service
+from object_detection.dino import get_dino_service
 from inference_api.contracts import InferenceRequest, InferenceResult, JobEvent
 from segmentation.sam.runtime import get_sam_service
 from segmentation.sam.finetune import get_sam_finetune_service

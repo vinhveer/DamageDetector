@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from dino.engine import DinoParams, DinoRunner
+from .engine import DinoParams, DinoRunner
 from inference_api.process_worker import WorkerProtocol, run_worker
 
 

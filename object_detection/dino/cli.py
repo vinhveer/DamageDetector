@@ -71,7 +71,7 @@ def _checkpoint_help(default_path: str) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m dino", description="CLI for the DINO engine.")
+    parser = argparse.ArgumentParser(prog="python -m object_detection.dino", description="CLI for the DINO engine.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     sub = parser.add_subparsers(dest="command", required=True)
 

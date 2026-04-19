@@ -5,7 +5,7 @@ Tài liệu này hướng dẫn cách sử dụng Command Line Interface (CLI) c
 ## Lệnh cơ bản
 Mô hình DINO có thể được gọi thông qua module Python:
 ```bash
-python -m dino [COMMAND] [OPTIONS]
+python -m object_detection.dino [COMMAND] [OPTIONS]
 ```
 
 ## Các lệnh hỗ trợ (Commands)
@@ -48,5 +48,5 @@ Yêu cầu và tham số bổ sung:
 
 ## Ví dụ sử dụng
 ```bash
-python -m dino predict --checkpoint weights/groundingdino.pth --image data/test.jpg --queries "crack, damage" --box-threshold 0.3
+python -m object_detection.dino predict --checkpoint weights/groundingdino.pth --image data/test.jpg --queries "crack, damage" --box-threshold 0.3
 ```

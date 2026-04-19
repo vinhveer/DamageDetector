@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from create_data_tools.cropper_app.domain import Roi
+from ui.create_data_tools.cropper_app.domain import Roi
 
 
 class RoiDatabase:
@@ -86,4 +86,3 @@ class RoiDatabase:
     def delete_roi(self, roi_id: int) -> None:
         self._conn.execute("DELETE FROM rois WHERE id = ?", (int(roi_id),))
         self._conn.commit()
-

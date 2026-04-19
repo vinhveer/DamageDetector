@@ -57,8 +57,6 @@ setup(
     description="DamageDetector model runtimes, training pipelines, and tooling.",
     packages=find_packages(
         include=[
-            "dino",
-            "dino.*",
             "inference_api",
             "inference_api.*",
             "object_detection",
@@ -89,6 +87,7 @@ setup(
             "damage-sam-finetune-test=segmentation.sam.finetune.test:main",
             "damage-sam-finetune-pseudo-label=segmentation.sam.finetune.pseudo_label:main",
             "damage-editor=ui.editor_app:main",
+            "damage-cropper=ui.create_data_tools.cropper_app.main:main",
             "damage-models=tools.download_models:main",
         ]
     },

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from create_data_tools.cropper_app.domain import Roi
+from ui.create_data_tools.cropper_app.domain import Roi
 
 
 @dataclass(frozen=True)
@@ -56,4 +56,3 @@ def export_rois(*, base_dir: Path, out_dir: Path, items: list[tuple[Path, list[R
                 skipped += 1
 
     return ExportResult(exported=exported, skipped=skipped)
-

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from dino.download import download_hf_model
+from object_detection.dino.download import download_hf_model
 
 
 @dataclass(frozen=True)
@@ -161,4 +161,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

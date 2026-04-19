@@ -4,7 +4,7 @@ import threading
 import uuid
 from collections import defaultdict
 
-from dino import get_dino_service
+from object_detection.dino import get_dino_service
 from inference_api.contracts import InferenceRequest, JobEvent, JobSnapshot
 from inference_api.workflows import WorkflowContext, run_workflow
 from segmentation.sam.runtime import get_sam_service

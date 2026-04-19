@@ -259,8 +259,8 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["TRANSFORMERS_OFFLINE"] = "0"
         os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "0")
 
-    from dino.client import get_dino_service
-    from dino.engine import default_gdino_checkpoint
+    from object_detection.dino.client import get_dino_service
+    from object_detection.dino.engine import default_gdino_checkpoint
 
     service = get_dino_service()
     try:

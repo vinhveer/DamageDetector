@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def main() -> int:
-    print("Available UI apps:\n  - python -m ui.editor_app\n  - python -m ui.create_data_tools.cropper_app")
+    print("Available data tools:\n  - python -m ui.create_data_tools.cropper_app")
     return 0
 
 

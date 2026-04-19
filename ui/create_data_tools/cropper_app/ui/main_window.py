@@ -4,10 +4,10 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from create_data_tools.cropper_app.domain import Roi
-from create_data_tools.cropper_app.roi_db import RoiDatabase
-from create_data_tools.cropper_app.services.export_service import export_rois
-from create_data_tools.cropper_app.ui.image_view import ImageRoiView, SquareRoiItem
+from ui.create_data_tools.cropper_app.domain import Roi
+from ui.create_data_tools.cropper_app.roi_db import RoiDatabase
+from ui.create_data_tools.cropper_app.services.export_service import export_rois
+from ui.create_data_tools.cropper_app.ui.image_view import ImageRoiView, SquareRoiItem
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
