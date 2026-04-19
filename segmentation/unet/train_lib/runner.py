@@ -1,4 +1,3 @@
-import csv
 import logging
 import os
 import sys
@@ -17,6 +16,7 @@ from .collate import collate_skip_none
 from .losses import dice_loss, focal_loss_with_logits
 from .training import train_model
 from ..model_io import build_model_config, save_training_config
+from ...shared import SQLiteLogHandler, SQLiteRunStore
 
 
 def _dataset_api():
@@ -494,22 +494,20 @@ def run_training(args):
 
     # Logging Setup
     if rank == 0:
-        logging.basicConfig(
-            filename=os.path.join(output_dir, "log.txt"),
-            level=logging.INFO,
-            format="[%(asctime)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-            force=True,
-        )
         logger = logging.getLogger()
-        has_stdout_handler = any(
-            isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
-            for h in logger.handlers
-        )
-        if not has_stdout_handler:
-            logger.addHandler(logging.StreamHandler(sys.stdout))
+        logger.handlers.clear()
+        logger.setLevel(logging.INFO)
+        formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        sqlite_store = SQLiteRunStore(os.path.join(output_dir, "training.sqlite3"))
+        sqlite_handler = SQLiteLogHandler(sqlite_store, table_name="logs", flush_every=20)
+        sqlite_handler.setFormatter(formatter)
+        logger.addHandler(sqlite_handler)
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setFormatter(formatter)
+        logger.addHandler(stdout_handler)
     else:
         logging.disable(logging.CRITICAL)
+        sqlite_store = None
     
     logging.info(f"Training started. Output dir: {output_dir}")
     logging.info(f"Config: {vars(args)}")
@@ -524,10 +522,11 @@ def run_training(args):
         logging.info(f"Saved training config to: {config_path}")
 
     csv_paths = {
-        "train_steps": os.path.join(output_dir, "train_steps.csv"),
-        "train_epochs": os.path.join(output_dir, "train_epochs.csv"),
-        "val": os.path.join(output_dir, "val.csv"),
-        "val_thresholds": os.path.join(output_dir, "val_thresholds.csv"),
+        "sqlite_store": sqlite_store,
+        "train_steps": "train_steps",
+        "train_epochs": "train_epochs",
+        "val": "val_summary",
+        "val_thresholds": "val_thresholds",
     }
 
     try:
@@ -547,5 +546,13 @@ def run_training(args):
             grad_accum_steps=getattr(args, "grad_accum_steps", 1),
         )
     finally:
+        if rank == 0 and sqlite_store is not None:
+            logger = logging.getLogger()
+            for handler in list(logger.handlers):
+                try:
+                    handler.flush()
+                except Exception:
+                    pass
+            sqlite_store.close()
         if is_distributed and dist.is_initialized():
             dist.destroy_process_group()

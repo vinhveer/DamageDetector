@@ -173,24 +173,46 @@ def _iter_prefetch(loader, device):
         yield batch
 
 
-import csv
 import logging
 
 from ..model_io import save_checkpoint
+from ...shared import SQLiteRunStore
 
 
-def _init_csv(path, header):
+def _init_csv(path, header, sqlite_store: SQLiteRunStore | None = None):
     if not path:
         return
+    if sqlite_store is not None:
+        sqlite_store.ensure_table(path, header)
+        return
+    import csv
+
     with open(path, "w", newline="") as f:
         csv.writer(f).writerow(header)
 
 
-def _append_csv_row(path, row):
+def _append_csv_row(path, row, sqlite_store: SQLiteRunStore | None = None):
     if not path:
         return
+    if sqlite_store is not None:
+        sqlite_store.insert_row(path, row)
+        return
+    import csv
+
     with open(path, "a", newline="") as f:
         csv.writer(f).writerow(row)
+
+
+def _append_csv_rows(path, rows, sqlite_store: SQLiteRunStore | None = None):
+    if not path or not rows:
+        return
+    if sqlite_store is not None:
+        sqlite_store.insert_rows(path, rows)
+        return
+    import csv
+
+    with open(path, "a", newline="") as f:
+        csv.writer(f).writerows(rows)
 
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, model_config=None, csv_paths=None, grad_accum_steps=1, use_amp=False):
@@ -217,6 +239,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     counter = 0
     iter_num = 0
     csv_paths = csv_paths or {}
+    sqlite_store = csv_paths.get("sqlite_store")
     train_steps_csv = csv_paths.get("train_steps")
     train_epochs_csv = csv_paths.get("train_epochs")
     val_csv = csv_paths.get("val")
@@ -226,10 +249,12 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         _init_csv(
             train_steps_csv,
             ["epoch", "step_in_epoch", "global_step", "loss", "loss_bce", "loss_dice", "loss_focal", "lr"],
+            sqlite_store=sqlite_store,
         )
         _init_csv(
             train_epochs_csv,
             ["epoch", "train_loss", "lr"],
+            sqlite_store=sqlite_store,
         )
         _init_csv(
             val_csv,
@@ -246,11 +271,16 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 "reconstructed_image_count",
                 "lr",
             ],
+            sqlite_store=sqlite_store,
         )
         _init_csv(
             val_thresholds_csv,
             ["epoch", "threshold", "dice", "iou"],
+            sqlite_store=sqlite_store,
         )
+
+    train_step_buffer = []
+    train_step_flush_every = 32
 
     for epoch in range(num_epochs):
         if hasattr(getattr(train_loader, "sampler", None), "set_epoch"):
@@ -298,8 +328,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 loss_bce = float(loss_components.get("loss_bce", torch.tensor(0.0)).item())
                 loss_dice = float(loss_components.get("loss_dice", torch.tensor(0.0)).item())
                 loss_focal = float(loss_components.get("loss_focal", torch.tensor(0.0)).item())
-                _append_csv_row(
-                    train_steps_csv,
+                train_step_buffer.append(
                     [
                         epoch + 1,
                         train_steps,
@@ -309,8 +338,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                         loss_dice,
                         loss_focal,
                         float(current_lr),
-                    ],
+                    ]
                 )
+                if len(train_step_buffer) >= train_step_flush_every:
+                    _append_csv_rows(train_steps_csv, train_step_buffer, sqlite_store=sqlite_store)
+                    train_step_buffer.clear()
 
         train_loss_sum = _all_reduce_sum(train_loss, device=device)
         train_steps_sum = _all_reduce_sum(train_steps, device=device)
@@ -319,6 +351,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         else:
             avg_train_loss = train_loss_sum / max(1.0, train_steps_sum)
         train_losses.append(avg_train_loss)
+        if is_main and train_step_buffer:
+            _append_csv_rows(train_steps_csv, train_step_buffer, sqlite_store=sqlite_store)
+            train_step_buffer.clear()
 
         # Validation phase
         model.eval()
@@ -483,7 +518,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             logging.info(f"Current learning rate: {current_lr:.7f}")
 
         if is_main:
-            _append_csv_row(train_epochs_csv, [epoch + 1, avg_train_loss, float(current_lr)])
+            _append_csv_row(train_epochs_csv, [epoch + 1, avg_train_loss, float(current_lr)], sqlite_store=sqlite_store)
             _append_csv_row(
                 val_csv,
                 [
@@ -499,13 +534,15 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                     int(reconstructed_metrics["image_count"]) if reconstructed_metrics is not None else 0,
                     float(current_lr),
                 ],
+                sqlite_store=sqlite_store,
             )
             if val_thr_report:
+                threshold_rows = []
                 for t in sorted(val_thr_report.keys(), key=float):
-                    _append_csv_row(
-                        val_thresholds_csv,
-                        [epoch + 1, float(t), float(val_thr_report[t]["dice_avg"]), float(val_thr_report[t]["iou_avg"])],
+                    threshold_rows.append(
+                        [epoch + 1, float(t), float(val_thr_report[t]["dice_avg"]), float(val_thr_report[t]["iou_avg"])]
                     )
+                _append_csv_rows(val_thresholds_csv, threshold_rows, sqlite_store=sqlite_store)
 
         metrics = {
             "train_loss": avg_train_loss,

@@ -1,4 +1,3 @@
-import csv
 import json
 import logging
 import os
@@ -12,6 +11,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
+from ...shared import SQLiteLogHandler, SQLiteRunStore
 
 try:
     from .tiled_inference import (
@@ -58,6 +58,7 @@ PROMPT_SCHEDULES = {
 }
 
 _MASK_INDEX_CACHE: dict[str, dict[str, str]] = {}
+_RUN_STORE: SQLiteRunStore | None = None
 
 
 def _dataset_api():
@@ -105,6 +106,13 @@ def _reduce_sum_scalar(value: float, *, device: torch.device) -> float:
 
 
 def _init_csv(path: str, headers: list[str]) -> None:
+    if not path:
+        return
+    if _RUN_STORE is not None:
+        _RUN_STORE.ensure_table(path, headers)
+        return
+    import csv
+
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(headers)
@@ -113,12 +121,22 @@ def _init_csv(path: str, headers: list[str]) -> None:
 def _append_csv_rows(path: str, rows: list[list]) -> None:
     if not rows:
         return
+    if _RUN_STORE is not None:
+        _RUN_STORE.insert_rows(path, rows)
+        return
+    import csv
+
     with open(path, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerows(rows)
 
 
 def _append_csv_row(path: str, row: list) -> None:
+    if _RUN_STORE is not None:
+        _RUN_STORE.insert_row(path, row)
+        return
+    import csv
+
     with open(path, "a", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(row)
@@ -616,6 +634,7 @@ def _build_train_dataset(args, *, split: str, transform, patches_per_image: int,
 
 
 def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
+    global _RUN_STORE
     datasets_api = _dataset_api()
     GenericDataset = datasets_api.GenericDataset
     RandomGenerator = datasets_api.RandomGenerator
@@ -629,9 +648,10 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("[%(asctime)s.%(msecs)03d] %(message)s", datefmt="%H:%M:%S")
     if is_main_process:
-        file_handler = logging.FileHandler(snapshot_path + "/log.txt")
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        _RUN_STORE = SQLiteRunStore(os.path.join(snapshot_path, "training.sqlite3"))
+        sqlite_handler = SQLiteLogHandler(_RUN_STORE, table_name="logs", flush_every=20)
+        sqlite_handler.setFormatter(formatter)
+        logger.addHandler(sqlite_handler)
         stream_handler = logging.StreamHandler(sys.stdout)
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
@@ -798,12 +818,12 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     stop_epoch = args.stop_epoch
     max_iterations = args.max_epochs * len(trainloader)
     logging.info("%d iterations per epoch. %d max iterations " % (len(trainloader), max_iterations))
-    csv_path = os.path.join(snapshot_path, "val.csv")
-    train_step_csv_path = os.path.join(snapshot_path, "train_steps.csv")
-    train_epoch_csv_path = os.path.join(snapshot_path, "train_epochs.csv")
-    val_threshold_csv_path = os.path.join(snapshot_path, "val_thresholds.csv")
-    val_tile_case_csv_path = os.path.join(snapshot_path, "val_tile_cases.csv")
-    val_legacy_case_csv_path = os.path.join(snapshot_path, "val_legacy_cases.csv")
+    csv_path = "val_summary"
+    train_step_csv_path = "train_steps"
+    train_epoch_csv_path = "train_epochs"
+    val_threshold_csv_path = "val_thresholds"
+    val_tile_case_csv_path = "val_tile_cases"
+    val_legacy_case_csv_path = "val_legacy_cases"
     if is_main_process:
         _init_csv(
             csv_path,
@@ -1178,27 +1198,26 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     % (epoch_num + 1, legacy_selected_thr, legacy_metric[0], legacy_metric[1], legacy_metric[2], legacy_metric[3])
                 )
 
-            with open(csv_path, "a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(
-                    [
-                        epoch_num,
-                        tile_selected_thr,
-                        tile_metric[0],
-                        tile_metric[1],
-                        tile_metric[2],
-                        tile_metric[3],
-                        tile_continuity["skeleton_dice"],
-                        tile_continuity["centerline_precision"],
-                        tile_continuity["centerline_recall"],
-                        tile_continuity["component_fragmentation"],
-                        legacy_selected_thr,
-                        legacy_metric[0],
-                        legacy_metric[1],
-                        legacy_metric[2],
-                        legacy_metric[3],
-                    ]
-                )
+            _append_csv_row(
+                csv_path,
+                [
+                    epoch_num,
+                    tile_selected_thr,
+                    tile_metric[0],
+                    tile_metric[1],
+                    tile_metric[2],
+                    tile_metric[3],
+                    tile_continuity["skeleton_dice"],
+                    tile_continuity["centerline_precision"],
+                    tile_continuity["centerline_recall"],
+                    tile_continuity["component_fragmentation"],
+                    legacy_selected_thr,
+                    legacy_metric[0],
+                    legacy_metric[1],
+                    legacy_metric[2],
+                    legacy_metric[3],
+                ],
+            )
 
             performance = float(tile_metric[3])
             if performance > best_performance:
@@ -1244,5 +1263,14 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 logging.info("save model to %s" % save_mode_path)
             iterator.close()
             break
+
+    if is_main_process and _RUN_STORE is not None:
+        for handler in list(logger.handlers):
+            try:
+                handler.flush()
+            except Exception:
+                pass
+        _RUN_STORE.close()
+        _RUN_STORE = None
 
     return "Training Finished!"
