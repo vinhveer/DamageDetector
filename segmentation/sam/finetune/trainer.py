@@ -60,6 +60,12 @@ PROMPT_SCHEDULES = {
 _MASK_INDEX_CACHE: dict[str, dict[str, str]] = {}
 
 
+def _dataset_api():
+    from ...datasets import sam_finetune as sam_datasets
+
+    return sam_datasets
+
+
 def _dist_is_ready() -> bool:
     return dist.is_available() and dist.is_initialized()
 
@@ -187,11 +193,7 @@ def _find_mask_path(mask_dir: str, base_name: str) -> str | None:
     mask_dir = os.path.abspath(mask_dir)
     mask_index = _MASK_INDEX_CACHE.get(mask_dir)
     if mask_index is None:
-        try:
-            from .datasets.dataset_generic import get_mask_index
-        except ImportError:
-            from .datasets.dataset_generic import get_mask_index
-        mask_index = get_mask_index(mask_dir)
+        mask_index = _dataset_api().get_mask_index(mask_dir)
         _MASK_INDEX_CACHE[mask_dir] = mask_index
     return mask_index.get(str(base_name))
 
@@ -232,11 +234,7 @@ def _estimate_pos_weight(mask_dir, sample_list, sample_size=200, min_weight=1.0,
 
 
 def _estimate_pos_weight_across_roots(roots, sample_size=200, min_weight=1.0, max_weight=20.0):
-    try:
-        from .datasets.dataset_generic import list_image_files
-    except ImportError:
-        from .datasets.dataset_generic import list_image_files
-
+    list_image_files = _dataset_api().list_image_files
     weighted_ratio = 0.0
     used_total = 0
     counted_roots = 0
@@ -404,11 +402,7 @@ def _run_tiled_full_image_eval(
     case_metrics_csv_path: str | None = None,
     epoch_num: int | None = None,
 ):
-    try:
-        from .datasets.dataset_generic import load_image_mask_arrays
-    except ImportError:
-        from .datasets.dataset_generic import load_image_mask_arrays
-
+    load_image_mask_arrays = _dataset_api().load_image_mask_arrays
     metric_by_thr = {float(thr): np.zeros(4, dtype=np.float64) for thr in thresholds}
     continuity_by_thr = (
         {
@@ -490,11 +484,7 @@ def _run_tiled_continuity_eval(
     multimask_output: bool,
     use_amp: bool,
 ):
-    try:
-        from .datasets.dataset_generic import load_image_mask_arrays
-    except ImportError:
-        from .datasets.dataset_generic import load_image_mask_arrays
-
+    load_image_mask_arrays = _dataset_api().load_image_mask_arrays
     totals = {
         "skeleton_dice": 0.0,
         "centerline_precision": 0.0,
@@ -589,11 +579,7 @@ def _run_legacy_box_eval(
 
 
 def _build_train_dataset(args, *, split: str, transform, patches_per_image: int, use_full_image_box: bool):
-    try:
-        from .datasets.dataset_generic import GenericDataset
-    except ImportError:
-        from .datasets.dataset_generic import GenericDataset
-
+    GenericDataset = _dataset_api().GenericDataset
     utils_data = get_torch_utils_data()
     roots = [args.root_path]
     for collection in (
@@ -620,10 +606,12 @@ def _build_train_dataset(args, *, split: str, transform, patches_per_image: int,
 
 
 def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
-    try:
-        from .datasets.dataset_generic import GenericDataset, RandomGenerator, RefineRandomGenerator, ValGenerator, list_image_files
-    except ImportError:
-        from .datasets.dataset_generic import GenericDataset, RandomGenerator, RefineRandomGenerator, ValGenerator, list_image_files
+    datasets_api = _dataset_api()
+    GenericDataset = datasets_api.GenericDataset
+    RandomGenerator = datasets_api.RandomGenerator
+    RefineRandomGenerator = datasets_api.RefineRandomGenerator
+    ValGenerator = datasets_api.ValGenerator
+    list_image_files = datasets_api.list_image_files
     device = torch.device("cuda", int(getattr(args, "local_rank", 0)) if bool(getattr(args, "distributed", False)) else 0)
     is_main_process = _is_main_process()
     logger = logging.getLogger()

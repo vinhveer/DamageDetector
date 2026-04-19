@@ -9,7 +9,6 @@ from torch_runtime import cudnn, torch
 from .segment_anything import sam_model_registry
 
 try:
-    from .datasets.dataset_generic import list_image_files
     from .runtime import (
         apply_delta_to_sam,
         load_inference_config,
@@ -21,7 +20,6 @@ try:
     )
     from .tiled_inference import coarse_refine_model_score_map, tiled_model_score_map
 except ImportError:
-    from .datasets.dataset_generic import list_image_files
     from .runtime import (
         apply_delta_to_sam,
         load_inference_config,
@@ -32,6 +30,12 @@ except ImportError:
         resolve_tile_settings,
     )
     from .tiled_inference import coarse_refine_model_score_map, tiled_model_score_map
+
+
+def _dataset_api():
+    from ...datasets import sam_finetune as sam_datasets
+
+    return sam_datasets
 
 
 def _load_finetuned_sam(*, ckpt, vit_name, img_size, delta_type, delta_ckpt, middle_dim, scaling_factor, rank, decoder_type="auto", centerline_head=False):
@@ -196,7 +200,7 @@ if __name__ == "__main__":
         )
 
     image_dir = _resolve_image_dir(args.volume_path)
-    image_names = list_image_files(image_dir)
+    image_names = _dataset_api().list_image_files(image_dir)
     tile_size, tile_overlap = resolve_tile_settings(args.delta_ckpt, args.tile_size, args.tile_overlap)
     threshold = resolve_predict_threshold(args.delta_ckpt, args.pred_threshold)
     meta_path = os.path.join(args.output_root, "pseudo_label_metadata.csv")

@@ -13,7 +13,7 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from PIL import Image
 
-from ..dataset_lib import (
+from ...datasets.unet import (
     CrackDataset,
     LetterboxResize,
     RandomPatchDataset,

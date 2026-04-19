@@ -56,6 +56,4 @@ dino/models/**/model*.safetensors
 # Prevent accidentally committing embedded repos
 **/.git/
 
-datasets/
-
 third_party/

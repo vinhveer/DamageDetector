@@ -11,7 +11,6 @@ from torch_runtime import cudnn, torch
 from .segment_anything import sam_model_registry
 
 try:
-    from .datasets.dataset_generic import GenericDataset, ValGenerator, list_image_files, load_image_mask_arrays
     from .runtime import (
         apply_delta_to_sam,
         load_inference_config,
@@ -31,7 +30,6 @@ try:
     )
     from .utils import test_single_volume
 except ImportError:
-    from .datasets.dataset_generic import GenericDataset, ValGenerator, list_image_files, load_image_mask_arrays
     from .runtime import (
         apply_delta_to_sam,
         load_inference_config,
@@ -53,6 +51,12 @@ except ImportError:
 
 
 NUM_CLASSES = 1
+
+
+def _dataset_api():
+    from ...datasets import sam_finetune as sam_datasets
+
+    return sam_datasets
 
 
 def config_to_dict(config):
@@ -144,6 +148,9 @@ def _save_case_outputs(test_save_path, case_name: str, image_hwc: np.ndarray, pr
 
 
 def _run_tiled_eval(args, model, multimask_output, test_save_path=None, *, ensemble_models=None, ensemble_image_sizes=None):
+    datasets_api = _dataset_api()
+    list_image_files = datasets_api.list_image_files
+    load_image_mask_arrays = datasets_api.load_image_mask_arrays
     case_names = list_image_files(os.path.join(args.volume_path, "images"))
     logging.info("%d tiled full-image test iterations", len(case_names))
 
@@ -249,6 +256,9 @@ def _run_coarse_refine_eval(
     ensemble_models=None,
     ensemble_image_sizes=None,
 ):
+    datasets_api = _dataset_api()
+    list_image_files = datasets_api.list_image_files
+    load_image_mask_arrays = datasets_api.load_image_mask_arrays
     case_names = list_image_files(os.path.join(args.volume_path, "images"))
     logging.info("%d coarse_refine full-image test iterations", len(case_names))
 
@@ -377,10 +387,11 @@ def _run_coarse_refine_eval(
 
 
 def _run_legacy_eval(args, model, multimask_output, test_save_path=None):
-    db_test = GenericDataset(
+    datasets_api = _dataset_api()
+    db_test = datasets_api.GenericDataset(
         base_dir=args.volume_path,
         split="test_vol",
-        transform=ValGenerator(output_size=[args.img_size, args.img_size], low_res=[args.img_size, args.img_size]),
+        transform=datasets_api.ValGenerator(output_size=[args.img_size, args.img_size], low_res=[args.img_size, args.img_size]),
     )
     testloader = DataLoader(db_test, batch_size=1, shuffle=False, num_workers=0)
     logging.info("%d legacy full-box test iterations", len(testloader))
