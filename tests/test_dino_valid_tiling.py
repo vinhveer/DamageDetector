@@ -14,11 +14,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from dino import engine
 from dino.prototype_dataset import build_prototypes_from_yolo_dataset
-from editor_app.controllers.history_controller import HistoryController
-from editor_app.config.prediction_settings import DEFAULT_EDITOR_SETTINGS, migrate_editor_settings
-from editor_app.services.run_storage import RunStorageService
-from editor_app.stores.history_store import HistoryStore
-from editor_app.stores.workspace_store import WorkspaceStore
+from ui.editor_app.controllers.history_controller import HistoryController
+from ui.editor_app.config.prediction_settings import DEFAULT_EDITOR_SETTINGS, migrate_editor_settings
+from ui.editor_app.services.run_storage import RunStorageService
+from ui.editor_app.stores.history_store import HistoryStore
+from ui.editor_app.stores.workspace_store import WorkspaceStore
 from inference_api.prediction_models import DETECTION_DINO, SEGMENTATION_SAM, TASK_GROUP_MORE_DAMAGE, PredictionConfig
 from inference_api.request_builder import build_prediction_request
 

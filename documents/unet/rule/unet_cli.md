@@ -4,7 +4,7 @@ Tài liệu này hướng dẫn cách sử dụng Command Line Interface (CLI) c
 
 ## Lệnh cơ bản
 ```bash
-python -m unet [COMMAND] [OPTIONS]
+python -m segmentation.unet [COMMAND] [OPTIONS]
 ```
 
 ## Các lệnh hỗ trợ (Commands)
@@ -41,7 +41,7 @@ Chạy suy luận riêng biệt cho từng vùng ROI trên ảnh và kết hợp
 
 ## Ví dụ sử dụng
 ```bash
-python -m unet predict \
+python -m segmentation.unet predict \
     --model weights/unet_resnet34.pth \
     --image data/test.jpg \
     --mode tile \

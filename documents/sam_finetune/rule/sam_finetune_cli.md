@@ -4,7 +4,7 @@ Tài liệu này hướng dẫn cách sử dụng Command Line Interface (CLI) c
 
 ## Lệnh cơ bản
 ```bash
-python -m sam_finetune [COMMAND] [OPTIONS]
+python -m segmentation.sam.finetune [COMMAND] [OPTIONS]
 ```
 
 ## Các lệnh hỗ trợ (Commands)
@@ -35,7 +35,7 @@ python -m sam_finetune [COMMAND] [OPTIONS]
 
 ## Ví dụ sử dụng
 ```bash
-python -m sam_finetune predict \
+python -m segmentation.sam.finetune predict \
     --checkpoint weights/sam_vit_b.pth \
     --delta-type lora \
     --delta-checkpoint weights/sam_lora.pt \
