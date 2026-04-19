@@ -31,6 +31,7 @@ class SamFinetuneParams:
     predict_mode: str = "auto"
     tile_size: int = -1
     tile_overlap: int = -1
+    tile_batch_size: int = 4
     threshold: str = "auto"
     refine_delta_checkpoint: str = ""
     refine_delta_type: str = ""
@@ -39,6 +40,7 @@ class SamFinetuneParams:
     refine_centerline_head: bool = False
     refine_tile_size: int = -1
     refine_tile_sizes: tuple[int, ...] = ()
+    refine_batch_size: int = 2
     refine_max_rois: int = 16
     refine_roi_padding: int = 64
     refine_merge_mode: str = "weighted_replace"
@@ -185,7 +187,7 @@ class SamFinetuneRunner:
         self._resolved_delta_checkpoint = delta_path
         return predictor, device
 
-    def _predict_score_map_tiled(self, predictor, rgb_image, *, tile_size: int, tile_overlap: int):
+    def _predict_score_map_tiled(self, predictor, rgb_image, *, tile_size: int, tile_overlap: int, tile_batch_size: int):
         from sam_finetune.tiled_inference import predictor_tile_mask_score, tiled_score_map
 
         return tiled_score_map(
@@ -233,6 +235,7 @@ class SamFinetuneRunner:
                 predict_mode=params.predict_mode,
                 tile_size=params.tile_size,
                 tile_overlap=params.tile_overlap,
+                tile_batch_size=params.tile_batch_size,
                 threshold=params.threshold,
                 refine_delta_checkpoint=params.refine_delta_checkpoint,
                 refine_delta_type=params.refine_delta_type,
@@ -241,6 +244,7 @@ class SamFinetuneRunner:
                 refine_centerline_head=params.refine_centerline_head,
                 refine_tile_size=params.refine_tile_size,
                 refine_tile_sizes=params.refine_tile_sizes,
+                refine_batch_size=params.refine_batch_size,
                 refine_max_rois=params.refine_max_rois,
                 refine_roi_padding=params.refine_roi_padding,
                 refine_merge_mode=params.refine_merge_mode,
@@ -373,6 +377,7 @@ class SamFinetuneRunner:
                 refine_delta_path,
                 refine_tile_size=params.refine_tile_size,
                 refine_tile_sizes=params.refine_tile_sizes,
+                refine_batch_size=params.refine_batch_size,
                 refine_max_rois=params.refine_max_rois,
                 refine_roi_padding=params.refine_roi_padding,
                 refine_merge_mode=params.refine_merge_mode,
@@ -399,6 +404,8 @@ class SamFinetuneRunner:
                 threshold=float(threshold),
                 multimask_output=False,
                 use_amp=False,
+                tile_batch_size=int(params.tile_batch_size),
+                refine_batch_size=int(params.refine_batch_size),
             )
             chosen = (merged_score_map >= float(threshold)).astype(np.uint8)
             score = float(merged_score_map[chosen > 0].mean()) if int(np.count_nonzero(chosen)) > 0 else float(merged_score_map.max())
@@ -408,6 +415,7 @@ class SamFinetuneRunner:
                 rgb,
                 tile_size=int(tile_size),
                 tile_overlap=int(tile_overlap),
+                tile_batch_size=int(params.tile_batch_size),
             )
             chosen = (score_map >= float(threshold)).astype(np.uint8)
             score = float(score_map[chosen > 0].mean()) if int(np.count_nonzero(chosen)) > 0 else float(score_map.max())

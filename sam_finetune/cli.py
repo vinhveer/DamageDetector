@@ -24,6 +24,7 @@ def _common_params(args: argparse.Namespace) -> dict:
         "predict_mode": args.predict_mode,
         "tile_size": int(args.tile_size),
         "tile_overlap": int(args.tile_overlap),
+        "tile_batch_size": int(args.tile_batch_size),
         "threshold": args.threshold,
         "refine_delta_checkpoint": args.refine_delta_checkpoint,
         "refine_delta_type": args.refine_delta_type,
@@ -32,6 +33,7 @@ def _common_params(args: argparse.Namespace) -> dict:
         "refine_centerline_head": bool(args.refine_centerline_head),
         "refine_tile_size": int(args.refine_tile_size),
         "refine_tile_sizes": tuple(int(v) for v in (args.refine_tile_sizes or []) if int(v) > 0),
+        "refine_batch_size": int(args.refine_batch_size),
         "refine_max_rois": int(args.refine_max_rois),
         "refine_roi_padding": int(args.refine_roi_padding),
         "refine_merge_mode": args.refine_merge_mode,
@@ -67,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--predict-mode", default="auto", choices=["auto", "tile_full_box", "legacy_full_box", "coarse_refine"])
         subparser.add_argument("--tile-size", type=int, default=-1, help="Tile size for tile_full_box mode (-1 = use checkpoint metadata or 512).")
         subparser.add_argument("--tile-overlap", type=int, default=-1, help="Tile overlap for tile_full_box mode (-1 = use checkpoint metadata or tile_size // 2).")
+        subparser.add_argument("--tile-batch-size", type=int, default=4, help="Batch size for tiled full-image inference.")
         subparser.add_argument("--threshold", default="auto", help="Mask threshold as float or 'auto' to use best_threshold.txt.")
         subparser.add_argument("--refine-delta-checkpoint", default="")
         subparser.add_argument("--refine-delta-type", default="")
@@ -75,6 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--refine-centerline-head", action="store_true")
         subparser.add_argument("--refine-tile-size", type=int, default=-1)
         subparser.add_argument("--refine-tile-sizes", type=int, nargs="*", default=None)
+        subparser.add_argument("--refine-batch-size", type=int, default=2, help="Batch size for refine ROI inference.")
         subparser.add_argument("--refine-max-rois", type=int, default=16)
         subparser.add_argument("--refine-roi-padding", type=int, default=64)
         subparser.add_argument("--refine-merge-mode", default="weighted_replace")

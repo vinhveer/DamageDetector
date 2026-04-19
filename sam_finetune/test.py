@@ -110,6 +110,7 @@ def _tiled_score_map_ensemble(
     tile_size: int,
     tile_overlap: int,
     multimask_output: bool,
+    tile_batch_size: int = 1,
 ) -> np.ndarray:
     score_maps = []
     for model, image_size in zip(models, image_sizes):
@@ -122,6 +123,7 @@ def _tiled_score_map_ensemble(
                 image_size=int(image_size),
                 multimask_output=multimask_output,
                 use_amp=False,
+                tile_batch_size=tile_batch_size,
             )
         )
     return np.mean(np.stack(score_maps, axis=0), axis=0).astype(np.float32)
@@ -146,6 +148,15 @@ def _run_tiled_eval(args, model, multimask_output, test_save_path=None, *, ensem
     logging.info("%d tiled full-image test iterations", len(case_names))
 
     metric_by_thr = {float(thr): np.zeros(4, dtype=np.float64) for thr in args.val_thresholds}
+    continuity_by_thr = {
+        float(thr): {
+            "skeleton_dice": 0.0,
+            "centerline_precision": 0.0,
+            "centerline_recall": 0.0,
+            "component_fragmentation": 0.0,
+        }
+        for thr in args.val_thresholds
+    }
     total_cases = 0
     saved_cases = []
     tile_size, tile_overlap = resolve_tile_settings(args.delta_ckpt, args.tile_size, args.tile_overlap)
@@ -160,6 +171,7 @@ def _run_tiled_eval(args, model, multimask_output, test_save_path=None, *, ensem
                 tile_size=tile_size,
                 tile_overlap=tile_overlap,
                 multimask_output=multimask_output,
+                tile_batch_size=int(getattr(args, "tile_batch_size", 1)),
             )
         else:
             score_map = tiled_model_score_map(
@@ -170,12 +182,16 @@ def _run_tiled_eval(args, model, multimask_output, test_save_path=None, *, ensem
                 image_size=int(args.img_size),
                 multimask_output=multimask_output,
                 use_amp=False,
+                tile_batch_size=int(getattr(args, "tile_batch_size", 1)),
             )
         sweep = threshold_sweep(score_map, label, args.val_thresholds)
         total_cases += 1
         case_logs = []
         for thr in args.val_thresholds:
             metric_by_thr[float(thr)] += np.array(sweep[float(thr)], dtype=np.float64)
+            continuity = continuity_metrics((score_map >= float(thr)).astype(np.uint8), label)
+            for key in continuity_by_thr[float(thr)]:
+                continuity_by_thr[float(thr)][key] += float(continuity[key])
             case_logs.append(f"thr={float(thr):.2f} tile_iou={sweep[float(thr)][3]:.4f}")
         logging.info("idx %d case %s %s", i_batch, case_name, " | ".join(case_logs))
         if test_save_path is not None:
@@ -191,45 +207,12 @@ def _run_tiled_eval(args, model, multimask_output, test_save_path=None, *, ensem
         save_threshold = float(best_thr)
 
     continuity_totals = {
-        "skeleton_dice": 0.0,
-        "centerline_precision": 0.0,
-        "centerline_recall": 0.0,
-        "component_fragmentation": 0.0,
+        key: float(value) / max(1, total_cases)
+        for key, value in continuity_by_thr[float(best_thr)].items()
     }
-
     if test_save_path is not None:
         for case_name, image_hwc, prob_map, label in saved_cases:
             _save_case_outputs(test_save_path, case_name, image_hwc, prob_map, label, save_threshold)
-            metrics = continuity_metrics((prob_map >= float(best_thr)).astype(np.uint8), label)
-            for key in continuity_totals:
-                continuity_totals[key] += float(metrics[key])
-    else:
-        for case_name in case_names:
-            image_hwc, label = load_image_mask_arrays(args.volume_path, case_name)
-            if ensemble_models:
-                score_map = _tiled_score_map_ensemble(
-                    image_hwc,
-                    ensemble_models,
-                    ensemble_image_sizes,
-                    tile_size=tile_size,
-                    tile_overlap=tile_overlap,
-                    multimask_output=multimask_output,
-                )
-            else:
-                score_map = tiled_model_score_map(
-                    image_hwc,
-                    tile_size=tile_size,
-                    tile_overlap=tile_overlap,
-                    model=model,
-                    image_size=int(args.img_size),
-                    multimask_output=multimask_output,
-                    use_amp=False,
-                )
-            metrics = continuity_metrics((score_map >= float(best_thr)).astype(np.uint8), label)
-            for key in continuity_totals:
-                continuity_totals[key] += float(metrics[key])
-
-    continuity_totals = {key: value / max(1, total_cases) for key, value in continuity_totals.items()}
 
     logging.info(
         "Testing tile_full_box: mean_pr %f mean_re %f mean_f1 %f mean_iou : %f",
@@ -270,6 +253,15 @@ def _run_coarse_refine_eval(
     logging.info("%d coarse_refine full-image test iterations", len(case_names))
 
     metric_by_thr = {float(thr): np.zeros(4, dtype=np.float64) for thr in args.val_thresholds}
+    continuity_by_thr = {
+        float(thr): {
+            "skeleton_dice": 0.0,
+            "centerline_precision": 0.0,
+            "centerline_recall": 0.0,
+            "component_fragmentation": 0.0,
+        }
+        for thr in args.val_thresholds
+    }
     total_cases = 0
     saved_cases = []
     tile_size, tile_overlap = resolve_tile_settings(args.delta_ckpt, args.tile_size, args.tile_overlap)
@@ -297,6 +289,7 @@ def _run_coarse_refine_eval(
                 tile_size=tile_size,
                 tile_overlap=tile_overlap,
                 multimask_output=multimask_output,
+                tile_batch_size=int(getattr(args, "tile_batch_size", 1)),
             )
         else:
             coarse_score_map = None
@@ -320,12 +313,17 @@ def _run_coarse_refine_eval(
             multimask_output=multimask_output,
             use_amp=False,
             coarse_score_map=coarse_score_map,
+            tile_batch_size=int(getattr(args, "tile_batch_size", 1)),
+            refine_batch_size=int(getattr(args, "refine_batch_size", getattr(args, "tile_batch_size", 1))),
         )
         sweep = threshold_sweep(score_map, label, args.val_thresholds)
         total_cases += 1
         case_logs = []
         for thr in args.val_thresholds:
             metric_by_thr[float(thr)] += np.array(sweep[float(thr)], dtype=np.float64)
+            continuity = continuity_metrics((score_map >= float(thr)).astype(np.uint8), label)
+            for key in continuity_by_thr[float(thr)]:
+                continuity_by_thr[float(thr)][key] += float(continuity[key])
             case_logs.append(f"thr={float(thr):.2f} coarse_refine_iou={sweep[float(thr)][3]:.4f}")
         logging.info(
             "idx %d case %s rois=%d %s",
@@ -347,56 +345,12 @@ def _run_coarse_refine_eval(
         save_threshold = float(best_thr)
 
     continuity_totals = {
-        "skeleton_dice": 0.0,
-        "centerline_precision": 0.0,
-        "centerline_recall": 0.0,
-        "component_fragmentation": 0.0,
+        key: float(value) / max(1, total_cases)
+        for key, value in continuity_by_thr[float(best_thr)].items()
     }
-    for case_name in case_names if test_save_path is None else []:
-        image_hwc, label = load_image_mask_arrays(args.volume_path, case_name)
-        if ensemble_models:
-            coarse_score_map = _tiled_score_map_ensemble(
-                image_hwc,
-                ensemble_models,
-                ensemble_image_sizes,
-                tile_size=tile_size,
-                tile_overlap=tile_overlap,
-                multimask_output=multimask_output,
-            )
-        else:
-            coarse_score_map = None
-        score_map, _coarse_map, _refine_outputs = coarse_refine_model_score_map(
-            image_hwc,
-            coarse_model=coarse_model,
-            coarse_image_size=int(coarse_image_size),
-            coarse_tile_size=int(tile_size),
-            coarse_tile_overlap=int(tile_overlap),
-            refine_model=refine_model,
-            refine_image_size=int(refine_image_size),
-            refine_tile_size=int(refine_settings["refine_tile_size"]),
-            refine_tile_sizes=refine_settings["refine_tile_sizes"],
-            refine_max_rois=int(refine_settings["refine_max_rois"]),
-            refine_roi_padding=int(refine_settings["refine_roi_padding"]),
-            refine_merge_mode=str(refine_settings["refine_merge_mode"]),
-            refine_score_threshold=float(refine_settings["refine_score_threshold"]),
-            positive_band_low=float(refine_settings["positive_band_low"]),
-            positive_band_high=float(refine_settings["positive_band_high"]),
-            threshold=float(best_thr),
-            multimask_output=multimask_output,
-            use_amp=False,
-            coarse_score_map=coarse_score_map,
-        )
-        metrics = continuity_metrics((score_map >= float(best_thr)).astype(np.uint8), label)
-        for key in continuity_totals:
-            continuity_totals[key] += float(metrics[key])
     if test_save_path is not None:
         for case_name, image_hwc, prob_map, label in saved_cases:
             _save_case_outputs(test_save_path, case_name, image_hwc, prob_map, label, save_threshold)
-            metrics = continuity_metrics((prob_map >= float(best_thr)).astype(np.uint8), label)
-            for key in continuity_totals:
-                continuity_totals[key] += float(metrics[key])
-
-    continuity_totals = {key: value / max(1, total_cases) for key, value in continuity_totals.items()}
     logging.info(
         "Testing coarse_refine: mean_pr %f mean_re %f mean_f1 %f mean_iou : %f",
         best_metric[0],
@@ -505,6 +459,7 @@ if __name__ == "__main__":
     parser.add_argument("--eval_mode", default="auto", choices=["auto", "tile_full_box", "legacy_full_box", "coarse_refine"], help="Primary evaluation mode")
     parser.add_argument("--tile_size", type=int, default=-1, help="Tile size for tiled evaluation (-1 = use checkpoint metadata or 512)")
     parser.add_argument("--tile_overlap", type=int, default=-1, help="Tile overlap for tiled evaluation (-1 = use checkpoint metadata or tile_size // 2)")
+    parser.add_argument("--tile_batch_size", type=int, default=4, help="Batch size for tiled full-image inference")
     parser.add_argument("--refine_delta_ckpt", type=str, default="", help="Checkpoint for the refine SAM finetune stage")
     parser.add_argument("--refine_delta_type", type=str, default="", help='Refine delta type: "adapter", "lora", or "both"')
     parser.add_argument("--refine_rank", type=int, default=-1, help="Rank for the refine LoRA adaptation")
@@ -512,6 +467,7 @@ if __name__ == "__main__":
     parser.add_argument("--refine_centerline_head", action="store_true", help="Enable dedicated centerline head for refine decoder")
     parser.add_argument("--refine_tile_size", type=int, default=-1, help="Fixed ROI size for high-resolution refine stage")
     parser.add_argument("--refine_tile_sizes", type=int, nargs="*", default=None, help="Optional multi-scale ROI sizes for sequential refine passes")
+    parser.add_argument("--refine_batch_size", type=int, default=2, help="Batch size for refine ROI inference")
     parser.add_argument("--refine_max_rois", type=int, default=16, help="Maximum number of refine ROIs per image")
     parser.add_argument("--refine_roi_padding", type=int, default=64, help="Padding around mined refine ROIs")
     parser.add_argument("--refine_merge_mode", type=str, default="weighted_replace", help="Merge mode for coarse/refine score maps")

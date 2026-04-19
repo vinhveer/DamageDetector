@@ -13,6 +13,9 @@ import albumentations as A
 cv2.setNumThreads(0)
 cv2.ocl.setUseOpenCL(False)
 
+DEFAULT_MASK_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+_MASK_INDEX_CACHE: dict[tuple[str, tuple[str, ...]], dict[str, str]] = {}
+
 def random_rot_flip(image, label):
     # Deprecated: Handled by Albumentations
     pass
@@ -22,15 +25,49 @@ def random_rotate(image, label):
     pass
 
 
-def find_mask_path(mask_dir: str, base_name: str) -> str | None:
-    for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
-        candidate = os.path.join(mask_dir, base_name + ext)
-        if os.path.exists(candidate):
-            return candidate
-        candidate_mask = os.path.join(mask_dir, base_name + "_mask" + ext)
-        if os.path.exists(candidate_mask):
-            return candidate_mask
-    return None
+def build_mask_index(mask_dir: str, mask_exts=None) -> dict[str, str]:
+    ext_values = tuple(str(ext).lower() for ext in (mask_exts or DEFAULT_MASK_EXTS))
+    index: dict[str, str] = {}
+    if not os.path.isdir(mask_dir):
+        return index
+
+    def _sort_key(name: str) -> tuple[int, str]:
+        ext = os.path.splitext(name)[1].lower()
+        try:
+            ext_rank = ext_values.index(ext)
+        except ValueError:
+            ext_rank = len(ext_values)
+        return ext_rank, name
+
+    for file_name in sorted(os.listdir(mask_dir), key=_sort_key):
+        stem, ext = os.path.splitext(file_name)
+        if ext.lower() not in ext_values:
+            continue
+        full_path = os.path.join(mask_dir, file_name)
+        if not os.path.isfile(full_path):
+            continue
+        candidates = [stem]
+        if stem.endswith("_mask"):
+            candidates.append(stem[:-5])
+        for key in candidates:
+            if key and key not in index:
+                index[key] = full_path
+    return index
+
+
+def get_mask_index(mask_dir: str, mask_exts=None) -> dict[str, str]:
+    ext_values = tuple(str(ext).lower() for ext in (mask_exts or DEFAULT_MASK_EXTS))
+    cache_key = (os.path.abspath(mask_dir), ext_values)
+    mask_index = _MASK_INDEX_CACHE.get(cache_key)
+    if mask_index is None:
+        mask_index = build_mask_index(mask_dir, mask_exts=ext_values)
+        _MASK_INDEX_CACHE[cache_key] = mask_index
+    return mask_index
+
+
+def find_mask_path(mask_dir: str, base_name: str, mask_index: dict[str, str] | None = None, mask_exts=None) -> str | None:
+    index = mask_index if mask_index is not None else get_mask_index(mask_dir, mask_exts=mask_exts)
+    return index.get(str(base_name))
 
 
 def list_image_files(image_dir: str, img_exts=None) -> list[str]:
@@ -49,7 +86,7 @@ def load_image_mask_arrays(base_dir: str, image_name: str) -> tuple[np.ndarray, 
     mask_dir = os.path.join(base_dir, "masks")
     image_path = os.path.join(img_dir, image_name)
     base_name = os.path.splitext(image_name)[0]
-    mask_path = find_mask_path(mask_dir, base_name)
+    mask_path = find_mask_path(mask_dir, base_name, mask_index=get_mask_index(mask_dir))
     if mask_path is None:
         raise FileNotFoundError(f"No corresponding mask found for image {image_name} in {mask_dir}")
     image = np.array(Image.open(image_path).convert("RGB"), dtype=np.uint8)
@@ -93,6 +130,7 @@ class RandomGenerator(object):
         near_background_crop_prob: float = 0.15,
         hard_negative_crop_prob: float = 0.10,
         augment_profile: str = "balanced",
+        crop_policy: str = "smart",
     ):
         self.output_size = output_size
         self.low_res = low_res
@@ -100,6 +138,7 @@ class RandomGenerator(object):
         self.near_background_crop_prob = float(near_background_crop_prob)
         self.hard_negative_crop_prob = float(hard_negative_crop_prob)
         self.augment_profile = str(augment_profile or "balanced").strip().lower()
+        self.crop_policy = str(crop_policy or "smart").strip().lower()
         self.transform = self._build_transform(self.augment_profile)
 
     def _build_transform(self, augment_profile: str):
@@ -236,6 +275,21 @@ class RandomGenerator(object):
 
     def _choose_crop_coords(self, image: np.ndarray, label: np.ndarray, h: int, w: int, th: int, tw: int) -> tuple[int, int]:
         y_inds, x_inds = np.where(label > 0)
+
+        if self.crop_policy == "fast":
+            if len(y_inds) > 0:
+                crop_mode = random.random()
+                if crop_mode < self.background_crop_prob:
+                    return self._random_crop_coords(h, w, th, tw)
+                idx = random.randint(0, len(y_inds) - 1)
+                cy, cx = y_inds[idx], x_inds[idx]
+                offset_scale = 0.75 if crop_mode < self.background_crop_prob + self.near_background_crop_prob else 0.35
+                cy += random.randint(-int(th * offset_scale), int(th * offset_scale))
+                cx += random.randint(-int(tw * offset_scale), int(tw * offset_scale))
+                y1 = max(0, min(h - th, cy - th // 2))
+                x1 = max(0, min(w - tw, cx - tw // 2))
+                return int(y1), int(x1)
+            return self._random_crop_coords(h, w, th, tw)
 
         if len(y_inds) > 0:
             crop_mode = random.random()
@@ -397,6 +451,7 @@ class RefineRandomGenerator(RandomGenerator):
         near_background_crop_prob: float = 0.2,
         hard_negative_crop_prob: float = 0.1,
         augment_profile: str = "balanced",
+        crop_policy: str = "smart",
         roi_positive_band_low: float = 0.20,
         roi_positive_band_high: float = 0.90,
     ):
@@ -407,6 +462,7 @@ class RefineRandomGenerator(RandomGenerator):
             near_background_crop_prob=near_background_crop_prob,
             hard_negative_crop_prob=hard_negative_crop_prob,
             augment_profile=augment_profile,
+            crop_policy=crop_policy,
         )
         self.roi_positive_band_low = float(roi_positive_band_low)
         self.roi_positive_band_high = float(roi_positive_band_high)
@@ -416,6 +472,15 @@ class RefineRandomGenerator(RandomGenerator):
         coords = np.argwhere(mask > 0)
         if len(coords) == 0:
             return super()._choose_crop_coords(image, label, h, w, th, tw)
+
+        if self.crop_policy == "fast":
+            point = coords[np.random.randint(len(coords))]
+            cy, cx = int(point[0]), int(point[1])
+            cy += random.randint(-int(th * 0.25), int(th * 0.25))
+            cx += random.randint(-int(tw * 0.25), int(tw * 0.25))
+            y1 = max(0, min(h - th, cy - th // 2))
+            x1 = max(0, min(w - tw, cx - tw // 2))
+            return int(y1), int(x1)
 
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         dilated = cv2.dilate(mask, kernel, iterations=1)
@@ -545,8 +610,12 @@ class GenericDataset(Dataset):
 
         if img_exts is None:
             img_exts = [".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"]
+        if mask_exts is None:
+            mask_exts = list(DEFAULT_MASK_EXTS)
+        self.mask_exts = tuple(str(ext).lower() for ext in mask_exts)
 
         self.sample_list = list_image_files(self.img_dir, img_exts=img_exts)
+        self.mask_index = get_mask_index(self.mask_dir, mask_exts=self.mask_exts)
         print(f"GenericDataset ({split}): Found {len(self.sample_list)} images in {self.img_dir}")
 
         self.cached_images = {}
@@ -562,7 +631,7 @@ class GenericDataset(Dataset):
                 filepath_image = os.path.join(self.img_dir, img_name)
                 base_name = os.path.splitext(img_name)[0]
                 
-                mask_path = find_mask_path(self.mask_dir, base_name)
+                mask_path = find_mask_path(self.mask_dir, base_name, mask_index=self.mask_index)
                 
                 if mask_path:
                     # Load and convert immediately to save space/time later
@@ -603,7 +672,7 @@ class GenericDataset(Dataset):
         else:
             # Fallback to disk load (or if cache disabled)
             filepath_image = os.path.join(self.img_dir, img_name)
-            filepath_label = find_mask_path(self.mask_dir, base_name)
+            filepath_label = find_mask_path(self.mask_dir, base_name, mask_index=self.mask_index)
             if filepath_label is None:
                  raise FileNotFoundError(f"No corresponding mask found for image {img_name} in {self.mask_dir}")
     

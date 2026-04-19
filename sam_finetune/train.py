@@ -3,6 +3,7 @@ import os
 import random
 import numpy as np
 from torch_runtime import cudnn, torch
+import torch.distributed as dist
 from importlib import import_module
 from segment_anything import sam_model_registry
 from trainer import trainer_generic
@@ -56,6 +57,7 @@ parser.add_argument('--use_amp', action='store_true', help='If activated, adopt 
 parser.add_argument('--save_interval', type=int, default=1, help='Save and validation intervals')
 parser.add_argument('--num_workers', type=int, default=8, help='number of dataloader workers')
 parser.add_argument('--patches_per_image', type=int, default=1, help='number of random patches to crop per image per epoch')
+parser.add_argument('--profile', type=str, default='custom', choices=['custom', 'speed', 'balanced', 'research'], help='High-level training preset that fills in default knobs unless you override them')
 parser.add_argument('--train_use_boxes', type=int, default=1, help='Use box prompts during training')
 parser.add_argument('--train_full_image_box', action='store_true', help='Use a full-image box prompt for every training sample')
 parser.add_argument('--train_use_points_prob', type=float, default=0.1, help='Legacy mode only: probability of adding GT points during training')
@@ -63,6 +65,7 @@ parser.add_argument('--prompt_policy', type=str, default='hybrid_v1', choices=['
 parser.add_argument('--background_crop_prob', type=float, default=0.2, help='Probability of sampling a random background crop even when crack exists')
 parser.add_argument('--near_background_crop_prob', type=float, default=0.15, help='Probability of sampling a crop near but not centered on the crack')
 parser.add_argument('--hard_negative_crop_prob', type=float, default=0.10, help='Probability of sampling a hard-negative background crop')
+parser.add_argument('--crop_policy', type=str, default='smart', choices=['smart', 'fast'], help='Sampling policy for training crops')
 parser.add_argument(
     '--augment_profile',
     type=str,
@@ -88,6 +91,9 @@ parser.add_argument('--pos_weight_sample', type=int, default=200, help='Number o
 parser.add_argument('--val_thresholds', type=float, nargs='+', default=[0.35, 0.4, 0.45, 0.5, 0.55, 0.6], help='Candidate probability thresholds for validation model selection')
 parser.add_argument('--full_image_eval', action='store_true', help='Validate with a full-image box prompt instead of dataset-provided boxes')
 parser.add_argument('--tile_overlap', type=int, default=-1, help='Tile overlap for tiled validation/inference (-1 = img_size // 2)')
+parser.add_argument('--tile_batch_size', type=int, default=4, help='Batch size for tiled full-image inference during validation')
+parser.add_argument('--refine_batch_size', type=int, default=2, help='Batch size for refine ROI inference during coarse_refine evaluation/inference')
+parser.add_argument('--continuity_eval_interval', type=int, default=1, help='Run continuity metrics every N validation cycles (1 = every validation, 0 = disable)')
 parser.add_argument('--legacy_box_eval', action='store_true', help='Also run legacy crop+GT-box validation diagnostics')
 parser.add_argument('--pipeline_stage', type=str, default='coarse', choices=['coarse', 'refine'], help='Training stage for the pipeline')
 parser.add_argument('--roi_size', type=int, default=768, help='High-resolution ROI size for refine-stage training')
@@ -136,7 +142,65 @@ def _apply_hq_balancing_defaults(args) -> None:
     if str(getattr(args, "pipeline_stage", "coarse")).strip().lower() == "refine" and prompt_policy in {"hybrid", "hybrid_v1"}:
         args.prompt_policy = "hybrid_val_balanced"
 
+
+def _apply_profile_defaults(args) -> None:
+    profile = str(getattr(args, "profile", "custom")).strip().lower()
+    if profile in {"", "custom"}:
+        return
+
+    defaults = {
+        "augment_profile": parser.get_default("augment_profile"),
+        "crop_policy": parser.get_default("crop_policy"),
+        "tile_batch_size": parser.get_default("tile_batch_size"),
+        "refine_batch_size": parser.get_default("refine_batch_size"),
+        "save_interval": parser.get_default("save_interval"),
+        "continuity_eval_interval": parser.get_default("continuity_eval_interval"),
+        "num_workers": parser.get_default("num_workers"),
+    }
+    presets = {
+        "speed": {
+            "augment_profile": "light",
+            "crop_policy": "fast",
+            "tile_batch_size": 8,
+            "refine_batch_size": 4,
+            "save_interval": 3,
+            "continuity_eval_interval": 3,
+            "num_workers": 4,
+        },
+        "balanced": {
+            "augment_profile": "balanced",
+            "crop_policy": "smart",
+            "tile_batch_size": 4,
+            "refine_batch_size": 2,
+            "save_interval": 2,
+            "continuity_eval_interval": 1,
+        },
+        "research": {
+            "augment_profile": "light",
+            "crop_policy": "smart",
+            "tile_batch_size": 4,
+            "refine_batch_size": 2,
+            "save_interval": 2,
+            "continuity_eval_interval": 1,
+        },
+    }
+    preset = presets.get(profile, {})
+    for key, value in preset.items():
+        if getattr(args, key) == defaults[key]:
+            setattr(args, key, value)
+
 if __name__ == "__main__":
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    args.local_rank = local_rank
+    args.rank = rank
+    args.world_size = world_size
+    args.distributed = bool(world_size > 1)
+    if args.distributed and not dist.is_initialized():
+        dist.init_process_group(backend="nccl", init_method="env://")
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank if args.distributed else 0)
     if args.tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -147,12 +211,14 @@ if __name__ == "__main__":
         cudnn.benchmark = False
         cudnn.deterministic = True
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
+    seed = int(args.seed) + int(rank)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
     if args.dice_param is not None:
         args.dice_weight = float(args.dice_param)
+    _apply_profile_defaults(args)
     _apply_hq_balancing_defaults(args)
     if str(getattr(args, "pipeline_stage", "coarse")).strip().lower() == "refine":
         args.img_size = int(getattr(args, "roi_size", args.img_size))
@@ -181,8 +247,9 @@ if __name__ == "__main__":
         snapshot_path = snapshot_path + '_dim' + str(args.middle_dim)                          
         snapshot_path = snapshot_path + '_r' + str(args.rank)
 
-    if not os.path.exists(snapshot_path):
-        os.makedirs(snapshot_path)
+    os.makedirs(snapshot_path, exist_ok=True)
+    if args.distributed:
+        dist.barrier()
 
     # register model
     sam, img_embedding_size = sam_model_registry[args.vit_name](image_size=args.img_size,
@@ -220,13 +287,21 @@ if __name__ == "__main__":
     config_items.append(f'num_classes: {NUM_CLASSES}\n')
     config_items.append('dataset_backend: generic\n')
 
-    with open(config_file, 'w') as f:
-        f.writelines(config_items)
+    if rank == 0:
+        with open(config_file, 'w') as f:
+            f.writelines(config_items)
 
     total_params = sum(p.numel() for p in net.parameters())
-    print(f"Total number of parameters:{total_params}")
+    if rank == 0:
+        print(f"Total number of parameters:{total_params}")
 
     total_params_train = sum(p.numel() for p in net.parameters() if p.requires_grad)
-    print(f"Total number of trainable parameters:{total_params_train}")
+    if rank == 0:
+        print(f"Total number of trainable parameters:{total_params_train}")
 
-    trainer_generic(args, net, snapshot_path, multimask_output, low_res)
+    try:
+        trainer_generic(args, net, snapshot_path, multimask_output, low_res)
+    finally:
+        if args.distributed and dist.is_initialized():
+            dist.barrier()
+            dist.destroy_process_group()

@@ -144,34 +144,72 @@ def model_tile_prob_map(
     multimask_output: bool,
     use_amp: bool = False,
 ) -> np.ndarray:
+    return model_tiles_prob_maps(
+        model,
+        [tile_hwc],
+        image_size=image_size,
+        multimask_output=multimask_output,
+        use_amp=use_amp,
+    )[0]
+
+
+def model_tiles_prob_maps(
+    model,
+    tiles_hwc: list[np.ndarray] | tuple[np.ndarray, ...],
+    *,
+    image_size: int,
+    multimask_output: bool,
+    use_amp: bool = False,
+) -> list[np.ndarray]:
     from torch_runtime import torch
 
-    tile = np.asarray(tile_hwc)
-    if tile.ndim != 3 or tile.shape[2] != 3:
-        raise ValueError(f"Expected tile shape (H, W, 3), got {tuple(tile.shape)}")
+    if not tiles_hwc:
+        return []
 
-    if tile.dtype != np.float32:
-        if tile.max() <= 1.0:
-            tile = tile.astype(np.float32)
-        else:
-            tile = tile.astype(np.float32) / 255.0
-    tile = np.clip(tile, 0.0, 1.0)
+    tiles: list[np.ndarray] = []
+    spatial_shapes: list[tuple[int, int]] = []
+    max_h = 0
+    max_w = 0
+    for tile_hwc in tiles_hwc:
+        tile = np.asarray(tile_hwc)
+        if tile.ndim != 3 or tile.shape[2] != 3:
+            raise ValueError(f"Expected tile shape (H, W, 3), got {tuple(tile.shape)}")
+        if tile.dtype != np.float32:
+            if tile.max() <= 1.0:
+                tile = tile.astype(np.float32)
+            else:
+                tile = tile.astype(np.float32) / 255.0
+        tile = np.clip(tile, 0.0, 1.0)
+        h_img, w_img = tile.shape[:2]
+        max_h = max(max_h, int(h_img))
+        max_w = max(max_w, int(w_img))
+        tiles.append(tile)
+        spatial_shapes.append((int(h_img), int(w_img)))
 
-    h_img, w_img = tile.shape[:2]
-    inputs = torch.from_numpy(np.transpose(tile, (2, 0, 1))).unsqueeze(0).float()
+    batch = np.zeros((len(tiles), 3, max_h, max_w), dtype=np.float32)
+    boxes_np = np.zeros((len(tiles), 4), dtype=np.float32)
+    for idx, (tile, (h_img, w_img)) in enumerate(zip(tiles, spatial_shapes)):
+        batch[idx, :, :h_img, :w_img] = np.transpose(tile, (2, 0, 1))
+        boxes_np[idx] = np.array([0.0, 0.0, float(w_img), float(h_img)], dtype=np.float32)
+
+    inputs = torch.from_numpy(batch).float()
     try:
         device = next(model.parameters()).device
     except StopIteration as exc:
         raise ValueError("Model has no parameters to infer device from.") from exc
     inputs = inputs.to(device=device)
-    boxes = torch.tensor([[0.0, 0.0, float(w_img), float(h_img)]], dtype=torch.float32, device=device)
+    boxes = torch.from_numpy(boxes_np).to(device=device, dtype=torch.float32)
 
     with torch.no_grad():
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=bool(use_amp) and device.type == "cuda"):
             outputs = model(inputs, multimask_output, image_size, boxes=boxes, points=None)
             logits = _select_binary_logits(outputs)
-            prob_map = torch.sigmoid(logits)[0, 0, :h_img, :w_img]
-    return prob_map.detach().float().cpu().numpy()
+            prob_maps = torch.sigmoid(logits[:, 0])
+    prob_maps_np = prob_maps.detach().float().cpu().numpy()
+    return [
+        np.asarray(prob_maps_np[idx, :h_img, :w_img], dtype=np.float32)
+        for idx, (h_img, w_img) in enumerate(spatial_shapes)
+    ]
 
 
 def tiled_model_score_map(
@@ -183,6 +221,7 @@ def tiled_model_score_map(
     image_size: int,
     multimask_output: bool,
     use_amp: bool = False,
+    tile_batch_size: int = 4,
 ) -> np.ndarray:
     image = np.asarray(image_hwc)
     if image.ndim != 3 or image.shape[2] != 3:
@@ -198,27 +237,35 @@ def tiled_model_score_map(
     y_positions = _tile_positions(h_img, tile_size, stride)
     x_positions = _tile_positions(w_img, tile_size, stride)
 
+    tile_requests: list[tuple[int, int, int, int, np.ndarray]] = []
     for y in y_positions:
         for x in x_positions:
             y2 = min(h_img, y + tile_size)
             x2 = min(w_img, x + tile_size)
-            tile = image[y:y2, x:x2]
-            prob_tile = np.asarray(
-                model_tile_prob_map(
-                    model,
-                    tile,
-                    image_size=image_size,
-                    multimask_output=multimask_output,
-                    use_amp=use_amp,
-                ),
-                dtype=np.float32,
-            )
+            tile_requests.append((y, y2, x, x2, image[y:y2, x:x2]))
+
+    weight_cache: dict[tuple[int, int], np.ndarray] = {}
+    batch_size = max(1, int(tile_batch_size))
+    for start in range(0, len(tile_requests), batch_size):
+        batch_requests = tile_requests[start:start + batch_size]
+        prob_tiles = model_tiles_prob_maps(
+            model,
+            [item[4] for item in batch_requests],
+            image_size=image_size,
+            multimask_output=multimask_output,
+            use_amp=use_amp,
+        )
+        for (y, y2, x, x2, _tile), prob_tile in zip(batch_requests, prob_tiles):
+            prob_tile = np.asarray(prob_tile, dtype=np.float32)
             expected_shape = (y2 - y, x2 - x)
             if prob_tile.shape != expected_shape:
                 raise ValueError(
                     f"Model tile predictor must return shape {expected_shape}, got {tuple(prob_tile.shape)}"
                 )
-            local_weight = make_center_weight_2d(expected_shape[0], expected_shape[1])
+            local_weight = weight_cache.get(expected_shape)
+            if local_weight is None:
+                local_weight = make_center_weight_2d(expected_shape[0], expected_shape[1])
+                weight_cache[expected_shape] = local_weight
             value_sum[y:y2, x:x2] += prob_tile * local_weight
             weight_sum[y:y2, x:x2] += local_weight
 
@@ -434,6 +481,8 @@ def coarse_refine_model_score_map(
     multimask_output: bool = False,
     use_amp: bool = False,
     coarse_score_map: np.ndarray | None = None,
+    tile_batch_size: int = 4,
+    refine_batch_size: int | None = 2,
 ) -> tuple[np.ndarray, np.ndarray, list[dict[str, object]]]:
     if coarse_score_map is None:
         coarse_score_map = tiled_model_score_map(
@@ -444,6 +493,7 @@ def coarse_refine_model_score_map(
             image_size=coarse_image_size,
             multimask_output=multimask_output,
             use_amp=use_amp,
+            tile_batch_size=tile_batch_size,
         )
     else:
         coarse_score_map = np.asarray(coarse_score_map, dtype=np.float32)
@@ -471,17 +521,22 @@ def coarse_refine_model_score_map(
             continue
 
         refine_outputs: list[dict[str, object]] = []
-        for item in roi_candidates:
-            box = item["box"]
-            crop = crop_box_from_image(image_hwc, box)
-            prob_map = model_tile_prob_map(
+        refine_batch = max(1, int(refine_batch_size or tile_batch_size))
+        crops = [crop_box_from_image(image_hwc, item["box"]) for item in roi_candidates]
+        for start in range(0, len(roi_candidates), refine_batch):
+            batch_candidates = roi_candidates[start:start + refine_batch]
+            batch_crops = crops[start:start + refine_batch]
+            prob_maps = model_tiles_prob_maps(
                 refine_model,
-                crop,
+                batch_crops,
                 image_size=int(refine_image_size),
                 multimask_output=multimask_output,
                 use_amp=use_amp,
             )
-            refine_outputs.append({"box": box, "score": float(item["score"]), "prob_map": prob_map, "scale": int(scale)})
+            for item, prob_map in zip(batch_candidates, prob_maps):
+                refine_outputs.append(
+                    {"box": item["box"], "score": float(item["score"]), "prob_map": prob_map, "scale": int(scale)}
+                )
 
         merged_score_map = merge_refined_score_map(
             merged_score_map,

@@ -58,7 +58,7 @@ def _load_finetuned_sam(*, ckpt, vit_name, img_size, delta_type, delta_ckpt, mid
     return sam.cuda(), int(image_size)
 
 
-def _score_map_ensemble(image_hwc, models, image_sizes, *, tile_size, tile_overlap):
+def _score_map_ensemble(image_hwc, models, image_sizes, *, tile_size, tile_overlap, tile_batch_size: int = 1):
     maps = []
     for model, image_size in zip(models, image_sizes):
         maps.append(
@@ -70,6 +70,7 @@ def _score_map_ensemble(image_hwc, models, image_sizes, *, tile_size, tile_overl
                 image_size=int(image_size),
                 multimask_output=False,
                 use_amp=False,
+                tile_batch_size=tile_batch_size,
             )
         )
     return np.mean(np.stack(maps, axis=0), axis=0).astype(np.float32)
@@ -97,6 +98,7 @@ if __name__ == "__main__":
     parser.add_argument("--pred_threshold", default="auto")
     parser.add_argument("--tile_size", type=int, default=-1)
     parser.add_argument("--tile_overlap", type=int, default=-1)
+    parser.add_argument("--tile_batch_size", type=int, default=4)
     parser.add_argument("--ensemble_delta_ckpts", nargs="*", default=None)
     parser.add_argument("--ensemble_delta_types", nargs="*", default=None)
     parser.add_argument("--ensemble_ranks", type=int, nargs="*", default=None)
@@ -108,6 +110,7 @@ if __name__ == "__main__":
     parser.add_argument("--refine_centerline_head", action="store_true")
     parser.add_argument("--refine_tile_size", type=int, default=-1)
     parser.add_argument("--refine_tile_sizes", type=int, nargs="*", default=None)
+    parser.add_argument("--refine_batch_size", type=int, default=2)
     parser.add_argument("--refine_max_rois", type=int, default=16)
     parser.add_argument("--refine_roi_padding", type=int, default=64)
     parser.add_argument("--refine_merge_mode", default="weighted_replace")
@@ -209,6 +212,7 @@ if __name__ == "__main__":
                 ensemble_image_sizes,
                 tile_size=tile_size,
                 tile_overlap=tile_overlap,
+                tile_batch_size=int(args.tile_batch_size),
             )
             if args.predict_mode == "coarse_refine":
                 score_map, _coarse_map, _refine_outputs = coarse_refine_model_score_map(
@@ -231,6 +235,8 @@ if __name__ == "__main__":
                     multimask_output=False,
                     use_amp=False,
                     coarse_score_map=coarse_score_map,
+                    tile_batch_size=int(args.tile_batch_size),
+                    refine_batch_size=int(args.refine_batch_size),
                 )
             else:
                 score_map = coarse_score_map

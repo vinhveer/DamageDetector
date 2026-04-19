@@ -8,6 +8,9 @@ import sys
 import numpy as np
 from torch_runtime import DataLoader, get_torch_utils_data
 from torch_runtime import nn, optim, torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 try:
@@ -53,6 +56,46 @@ PROMPT_SCHEDULES = {
     "hybrid_tight_heavy": (0.35, 0.25, 0.40),
     "points_heavy": (0.60, 0.10, 0.30),
 }
+
+_MASK_INDEX_CACHE: dict[str, dict[str, str]] = {}
+
+
+def _dist_is_ready() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def _get_rank() -> int:
+    return dist.get_rank() if _dist_is_ready() else 0
+
+
+def _get_world_size() -> int:
+    return dist.get_world_size() if _dist_is_ready() else 1
+
+
+def _is_main_process() -> bool:
+    return _get_rank() == 0
+
+
+def _barrier() -> None:
+    if _dist_is_ready():
+        dist.barrier()
+
+
+def _reduce_mean_scalar(value: float, *, device: torch.device) -> float:
+    if not _dist_is_ready():
+        return float(value)
+    tensor = torch.tensor(float(value), device=device, dtype=torch.float32)
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    tensor /= float(_get_world_size())
+    return float(tensor.item())
+
+
+def _reduce_sum_scalar(value: float, *, device: torch.device) -> float:
+    if not _dist_is_ready():
+        return float(value)
+    tensor = torch.tensor(float(value), device=device, dtype=torch.float64)
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return float(tensor.item())
 
 
 def _init_csv(path: str, headers: list[str]) -> None:
@@ -141,14 +184,16 @@ def worker_init_fn(worker_id):
 
 
 def _find_mask_path(mask_dir: str, base_name: str) -> str | None:
-    for ext in [".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"]:
-        candidate = os.path.join(mask_dir, base_name + ext)
-        if os.path.exists(candidate):
-            return candidate
-        candidate_mask = os.path.join(mask_dir, base_name + "_mask" + ext)
-        if os.path.exists(candidate_mask):
-            return candidate_mask
-    return None
+    mask_dir = os.path.abspath(mask_dir)
+    mask_index = _MASK_INDEX_CACHE.get(mask_dir)
+    if mask_index is None:
+        try:
+            from datasets.dataset_generic import get_mask_index
+        except ImportError:
+            from .datasets.dataset_generic import get_mask_index
+        mask_index = get_mask_index(mask_dir)
+        _MASK_INDEX_CACHE[mask_dir] = mask_index
+    return mask_index.get(str(base_name))
 
 
 def _estimate_pos_weight(mask_dir, sample_list, sample_size=200, min_weight=1.0, max_weight=20.0):
@@ -249,6 +294,7 @@ def _write_inference_config(snapshot_path: str, args, best_threshold: float | No
         "prompt_schedule": "legacy_v1" if prompt_policy == "legacy" else prompt_policy,
         "predict_mode": "tile_full_box",
         "merge_mode": "score_weighted_center_blend",
+        "tile_batch_size": int(getattr(args, "tile_batch_size", 1)),
         "pipeline_stage": str(getattr(args, "pipeline_stage", "coarse")).strip().lower(),
         "refine_enabled": bool(getattr(args, "refine_enabled", False)),
         "refine_tile_size": int(getattr(args, "refine_tile_size", getattr(args, "roi_size", 768))),
@@ -257,6 +303,7 @@ def _write_inference_config(snapshot_path: str, args, best_threshold: float | No
         "refine_roi_padding": int(getattr(args, "refine_roi_padding", 64)),
         "refine_merge_mode": str(getattr(args, "refine_merge_mode", "weighted_replace")).strip().lower(),
         "refine_score_threshold": float(getattr(args, "refine_score_threshold", 0.15)),
+        "refine_batch_size": int(getattr(args, "refine_batch_size", getattr(args, "tile_batch_size", 1))),
         "refine_positive_band_low": float(getattr(args, "roi_positive_band_low", 0.20)),
         "refine_positive_band_high": float(getattr(args, "roi_positive_band_high", 0.90)),
         "centerline_head": bool(getattr(args, "centerline_head", False)),
@@ -352,6 +399,8 @@ def _run_tiled_full_image_eval(
     image_size: int,
     multimask_output: bool,
     use_amp: bool,
+    tile_batch_size: int = 1,
+    compute_continuity: bool = True,
     case_metrics_csv_path: str | None = None,
     epoch_num: int | None = None,
 ):
@@ -361,6 +410,19 @@ def _run_tiled_full_image_eval(
         from .datasets.dataset_generic import load_image_mask_arrays
 
     metric_by_thr = {float(thr): np.zeros(4, dtype=np.float64) for thr in thresholds}
+    continuity_by_thr = (
+        {
+            float(thr): {
+                "skeleton_dice": 0.0,
+                "centerline_precision": 0.0,
+                "centerline_recall": 0.0,
+                "component_fragmentation": 0.0,
+            }
+            for thr in thresholds
+        }
+        if compute_continuity
+        else None
+    )
     total_cases = 0
 
     for i_batch, case_name in enumerate(tqdm(case_names)):
@@ -373,12 +435,17 @@ def _run_tiled_full_image_eval(
             image_size=image_size,
             multimask_output=multimask_output,
             use_amp=use_amp,
+            tile_batch_size=tile_batch_size,
         )
         sweep = threshold_sweep(score_map, label, thresholds)
         total_cases += 1
         case_rows = []
         for thr in thresholds:
             metric_by_thr[float(thr)] += np.array(sweep[float(thr)], dtype=np.float64)
+            if continuity_by_thr is not None:
+                continuity = continuity_metrics((score_map >= float(thr)).astype(np.uint8), label)
+                for key in continuity_by_thr[float(thr)]:
+                    continuity_by_thr[float(thr)][key] += float(continuity[key])
             if case_metrics_csv_path is not None:
                 metrics = sweep[float(thr)]
                 case_rows.append(
@@ -399,8 +466,16 @@ def _run_tiled_full_image_eval(
         float(thr): metric_by_thr[float(thr)] / max(1, total_cases)
         for thr in thresholds
     }
+    if continuity_by_thr is not None:
+        continuity_by_thr = {
+            float(thr): {
+                key: float(value) / max(1, total_cases)
+                for key, value in continuity_by_thr[float(thr)].items()
+            }
+            for thr in thresholds
+        }
     selected_thr, metric = best_threshold_result(metric_by_thr)
-    return selected_thr, metric, metric_by_thr, total_cases
+    return selected_thr, metric, metric_by_thr, continuity_by_thr, total_cases
 
 
 def _run_tiled_continuity_eval(
@@ -549,17 +624,23 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         from datasets.dataset_generic import GenericDataset, RandomGenerator, RefineRandomGenerator, ValGenerator, list_image_files
     except ImportError:
         from .datasets.dataset_generic import GenericDataset, RandomGenerator, RefineRandomGenerator, ValGenerator, list_image_files
-    logging.basicConfig(
-        filename=snapshot_path + "/log.txt",
-        level=logging.INFO,
-        format="[%(asctime)s.%(msecs)03d] %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    device = torch.device("cuda", int(getattr(args, "local_rank", 0)) if bool(getattr(args, "distributed", False)) else 0)
+    is_main_process = _is_main_process()
+    logger = logging.getLogger()
+    logger.handlers.clear()
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("[%(asctime)s.%(msecs)03d] %(message)s", datefmt="%H:%M:%S")
+    if is_main_process:
+        file_handler = logging.FileHandler(snapshot_path + "/log.txt")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        stream_handler = logging.StreamHandler(sys.stdout)
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
     logging.info(str(args))
 
     base_lr = args.base_lr
-    batch_size = args.batch_size * args.n_gpu
+    batch_size = int(args.batch_size)
     tile_overlap = resolve_tile_overlap(int(args.img_size), getattr(args, "tile_overlap", -1))
     prompt_policy = _normalize_prompt_policy(getattr(args, "prompt_policy", "hybrid_v1"))
     pipeline_stage = str(getattr(args, "pipeline_stage", "coarse")).strip().lower()
@@ -580,6 +661,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         near_background_crop_prob=args.near_background_crop_prob,
         hard_negative_crop_prob=getattr(args, "hard_negative_crop_prob", 0.10),
         augment_profile=getattr(args, "augment_profile", "balanced"),
+        crop_policy=getattr(args, "crop_policy", "smart"),
         **(
             {
                 "roi_positive_band_low": float(getattr(args, "roi_positive_band_low", 0.20)),
@@ -597,11 +679,22 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         use_full_image_box=bool(getattr(args, "train_full_image_box", False)),
     )
 
-    print("The length of train set is: {}".format(len(db_train)))
+    if is_main_process:
+        print("The length of train set is: {}".format(len(db_train)))
 
+    train_sampler = None
+    if bool(getattr(args, "distributed", False)):
+        train_sampler = DistributedSampler(
+            db_train,
+            num_replicas=int(getattr(args, "world_size", _get_world_size())),
+            rank=int(getattr(args, "rank", _get_rank())),
+            shuffle=True,
+            drop_last=False,
+        )
     loader_kwargs = {
         "batch_size": batch_size,
-        "shuffle": True,
+        "shuffle": train_sampler is None,
+        "sampler": train_sampler,
         "num_workers": args.num_workers,
         "pin_memory": True,
         "worker_init_fn": worker_init_fn,
@@ -622,7 +715,14 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     trainloader = DataLoader(db_train, **loader_kwargs)
     valloader_legacy = DataLoader(db_val_legacy, **val_kwargs)
 
-    if args.n_gpu > 1:
+    if bool(getattr(args, "distributed", False)):
+        model = DDP(
+            model,
+            device_ids=[int(getattr(args, "local_rank", 0))],
+            output_device=int(getattr(args, "local_rank", 0)),
+            find_unused_parameters=False,
+        )
+    elif args.n_gpu > 1:
         model = nn.DataParallel(model)
 
     pos_weight_value = args.pos_weight
@@ -646,7 +746,6 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     else:
         pos_weight_value = float(pos_weight_value)
 
-    device = torch.device("cuda")
     pos_weight_tensor = torch.tensor([float(pos_weight_value)], device=device)
     bce_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
     dice_loss = BinaryDiceLoss()
@@ -687,8 +786,9 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             weight_decay=0.0001,
         )
 
-    print(f"Detected {len(lora_params)} param tensors for LoRA (LR: {b_lr})")
-    print(f"Detected {len(decoder_params)} param tensors for Decoder (LR: {b_lr * decoder_lr_mult})")
+    if is_main_process:
+        print(f"Detected {len(lora_params)} param tensors for LoRA (LR: {b_lr})")
+        print(f"Detected {len(decoder_params)} param tensors for Decoder (LR: {b_lr * decoder_lr_mult})")
 
     from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -706,87 +806,95 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     val_threshold_csv_path = os.path.join(snapshot_path, "val_thresholds.csv")
     val_tile_case_csv_path = os.path.join(snapshot_path, "val_tile_cases.csv")
     val_legacy_case_csv_path = os.path.join(snapshot_path, "val_legacy_cases.csv")
-    _init_csv(
-        csv_path,
-        [
-            "epoch",
-            "tile_threshold",
-            "tile_precision",
-            "tile_recall",
-            "tile_dice",
-            "tile_iou",
-            "tile_skeleton_dice",
-            "tile_centerline_precision",
-            "tile_centerline_recall",
-            "tile_component_fragmentation",
-            "legacy_threshold",
-            "legacy_precision",
-            "legacy_recall",
-            "legacy_dice",
-            "legacy_iou",
-        ],
-    )
-    _init_csv(
-        train_step_csv_path,
-        ["epoch", "iteration", "loss", "loss_bce", "loss_dice", "loss_tversky", "loss_focal", "loss_cldice", "loss_centerline", "lr"],
-    )
-    _init_csv(
-        train_epoch_csv_path,
-        [
-            "epoch",
-            "mean_loss",
-            "mean_loss_bce",
-            "mean_loss_dice",
-            "mean_loss_tversky",
-            "mean_loss_focal",
-            "mean_loss_cldice",
-            "mean_loss_centerline",
-            "lr",
-            "full_box_points",
-            "full_box_only",
-            "tight_box_points",
-            "background_full_box_only",
-        ],
-    )
-    _init_csv(
-        val_threshold_csv_path,
-        ["epoch", "mode", "threshold", "precision", "recall", "dice", "iou"],
-    )
-    _init_csv(
-        val_tile_case_csv_path,
-        ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
-    )
-    _init_csv(
-        val_legacy_case_csv_path,
-        ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
-    )
-    logging.info(
-        "Effective training profile: pipeline_stage=%s prompt_policy=%s augment_profile=%s background_crop_prob=%.3f near_background_crop_prob=%.3f hard_negative_crop_prob=%.3f decoder_lr_mult=%.3f hq_trainable_mode=%s tversky_alpha=%.3f tversky_beta=%.3f cldice_weight=%.3f centerline_aux_weight=%.3f train_roots=%s"
-        % (
-            pipeline_stage,
-            prompt_policy,
-            str(getattr(args, "augment_profile", "balanced")),
-            float(getattr(args, "background_crop_prob", 0.2)),
-            float(getattr(args, "near_background_crop_prob", 0.15)),
-            float(getattr(args, "hard_negative_crop_prob", 0.10)),
-            float(decoder_lr_mult),
-            str(getattr(args, "hq_trainable_mode", "balanced")),
-            float(getattr(args, "tversky_alpha", 0.3)),
-            float(getattr(args, "tversky_beta", 0.7)),
-            float(getattr(args, "cldice_weight", 0.0)),
-            float(getattr(args, "centerline_aux_weight", 0.0)),
-            ",".join(train_roots),
+    if is_main_process:
+        _init_csv(
+            csv_path,
+            [
+                "epoch",
+                "tile_threshold",
+                "tile_precision",
+                "tile_recall",
+                "tile_dice",
+                "tile_iou",
+                "tile_skeleton_dice",
+                "tile_centerline_precision",
+                "tile_centerline_recall",
+                "tile_component_fragmentation",
+                "legacy_threshold",
+                "legacy_precision",
+                "legacy_recall",
+                "legacy_dice",
+                "legacy_iou",
+            ],
         )
-    )
+        _init_csv(
+            train_step_csv_path,
+            ["epoch", "iteration", "loss", "loss_bce", "loss_dice", "loss_tversky", "loss_focal", "loss_cldice", "loss_centerline", "lr"],
+        )
+        _init_csv(
+            train_epoch_csv_path,
+            [
+                "epoch",
+                "mean_loss",
+                "mean_loss_bce",
+                "mean_loss_dice",
+                "mean_loss_tversky",
+                "mean_loss_focal",
+                "mean_loss_cldice",
+                "mean_loss_centerline",
+                "lr",
+                "full_box_points",
+                "full_box_only",
+                "tight_box_points",
+                "background_full_box_only",
+            ],
+        )
+        _init_csv(
+            val_threshold_csv_path,
+            ["epoch", "mode", "threshold", "precision", "recall", "dice", "iou"],
+        )
+        _init_csv(
+            val_tile_case_csv_path,
+            ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
+        )
+        _init_csv(
+            val_legacy_case_csv_path,
+            ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
+        )
+        logging.info(
+            "Effective training profile: pipeline_stage=%s prompt_policy=%s augment_profile=%s crop_policy=%s background_crop_prob=%.3f near_background_crop_prob=%.3f hard_negative_crop_prob=%.3f decoder_lr_mult=%.3f hq_trainable_mode=%s tversky_alpha=%.3f tversky_beta=%.3f cldice_weight=%.3f centerline_aux_weight=%.3f train_roots=%s"
+            % (
+                pipeline_stage,
+                prompt_policy,
+                str(getattr(args, "augment_profile", "balanced")),
+                str(getattr(args, "crop_policy", "smart")),
+                float(getattr(args, "background_crop_prob", 0.2)),
+                float(getattr(args, "near_background_crop_prob", 0.15)),
+                float(getattr(args, "hard_negative_crop_prob", 0.10)),
+                float(decoder_lr_mult),
+                str(getattr(args, "hq_trainable_mode", "balanced")),
+                float(getattr(args, "tversky_alpha", 0.3)),
+                float(getattr(args, "tversky_beta", 0.7)),
+                float(getattr(args, "cldice_weight", 0.0)),
+                float(getattr(args, "centerline_aux_weight", 0.0)),
+                    ",".join(train_roots),
+                )
+            )
 
-    iterator = tqdm(range(max_epoch), ncols=70)
+    iterator = tqdm(range(max_epoch), ncols=70, disable=not is_main_process)
     best_performance = 0.0
     best_threshold = None
     patience = max_epoch
     patience_counter = 0
-    _write_inference_config(snapshot_path, args, best_threshold)
+    stop_training = False
+    train_step_buffer: list[list[float | int]] = []
+    train_step_flush_every = 32
+    if is_main_process:
+        _write_inference_config(snapshot_path, args, best_threshold)
 
     for epoch_num in iterator:
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch_num)
         model.train()
         epoch_prompt_counts = {
             "full_box_points": 0,
@@ -895,80 +1003,95 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             epoch_loss_cldice_sum += loss_cldice_value
             epoch_loss_centerline_sum += loss_centerline_value
             epoch_step_count += 1
-            _append_csv_row(
-                train_step_csv_path,
-                [
+            if is_main_process:
+                train_step_buffer.append(
+                    [
+                        int(epoch_num),
+                        int(iter_num),
+                        float(loss_value),
+                        float(loss_bce_value),
+                        float(loss_dice_value),
+                        float(loss_tversky_value),
+                        float(loss_focal_value),
+                        float(loss_cldice_value),
+                        float(loss_centerline_value),
+                        float(lr_),
+                    ]
+                )
+                if len(train_step_buffer) >= train_step_flush_every:
+                    _append_csv_rows(train_step_csv_path, train_step_buffer)
+                    train_step_buffer.clear()
+
+        if is_main_process and train_step_buffer:
+            _append_csv_rows(train_step_csv_path, train_step_buffer)
+            train_step_buffer.clear()
+
+        total_steps = _reduce_sum_scalar(epoch_step_count, device=device)
+        mean_loss = _reduce_sum_scalar(epoch_loss_sum, device=device) / max(1.0, total_steps)
+        mean_loss_bce = _reduce_sum_scalar(epoch_loss_bce_sum, device=device) / max(1.0, total_steps)
+        mean_loss_dice = _reduce_sum_scalar(epoch_loss_dice_sum, device=device) / max(1.0, total_steps)
+        mean_loss_tversky = _reduce_sum_scalar(epoch_loss_tversky_sum, device=device) / max(1.0, total_steps)
+        mean_loss_focal = _reduce_sum_scalar(epoch_loss_focal_sum, device=device) / max(1.0, total_steps)
+        mean_loss_cldice = _reduce_sum_scalar(epoch_loss_cldice_sum, device=device) / max(1.0, total_steps)
+        mean_loss_centerline = _reduce_sum_scalar(epoch_loss_centerline_sum, device=device) / max(1.0, total_steps)
+        prompt_counts_global = {
+            key: int(_reduce_sum_scalar(value, device=device))
+            for key, value in epoch_prompt_counts.items()
+        }
+        if is_main_process:
+            _append_csv_rows(
+                train_epoch_csv_path,
+                [[
                     int(epoch_num),
-                    int(iter_num),
-                    loss_value,
-                    loss_bce_value,
-                    loss_dice_value,
-                    loss_tversky_value,
-                    loss_focal_value,
-                    loss_cldice_value,
-                    loss_centerline_value,
+                    float(mean_loss),
+                    float(mean_loss_bce),
+                    float(mean_loss_dice),
+                    float(mean_loss_tversky),
+                    float(mean_loss_focal),
+                    float(mean_loss_cldice),
+                    float(mean_loss_centerline),
                     float(lr_),
-                ],
+                    int(prompt_counts_global["full_box_points"]),
+                    int(prompt_counts_global["full_box_only"]),
+                    int(prompt_counts_global["tight_box_points"]),
+                    int(prompt_counts_global["background_full_box_only"]),
+                ]],
+            )
+            logging.info(
+                "Epoch %d/%d train: loss=%.4f bce=%.4f dice=%.4f tversky=%.4f focal=%.4f cldice=%.4f centerline=%.4f lr=%.6f"
+                % (
+                    epoch_num + 1,
+                    max_epoch,
+                    mean_loss,
+                    mean_loss_bce,
+                    mean_loss_dice,
+                    mean_loss_tversky,
+                    mean_loss_focal,
+                    mean_loss_cldice,
+                    mean_loss_centerline,
+                    float(lr_),
+                )
             )
 
-        mean_loss = epoch_loss_sum / max(1, epoch_step_count)
-        mean_loss_bce = epoch_loss_bce_sum / max(1, epoch_step_count)
-        mean_loss_dice = epoch_loss_dice_sum / max(1, epoch_step_count)
-        mean_loss_tversky = epoch_loss_tversky_sum / max(1, epoch_step_count)
-        mean_loss_focal = epoch_loss_focal_sum / max(1, epoch_step_count)
-        mean_loss_cldice = epoch_loss_cldice_sum / max(1, epoch_step_count)
-        mean_loss_centerline = epoch_loss_centerline_sum / max(1, epoch_step_count)
-        _append_csv_rows(
-            train_epoch_csv_path,
-            [[
-                int(epoch_num),
-                float(mean_loss),
-                float(mean_loss_bce),
-                float(mean_loss_dice),
-                float(mean_loss_tversky),
-                float(mean_loss_focal),
-                float(mean_loss_cldice),
-                float(mean_loss_centerline),
-                float(lr_),
-                int(epoch_prompt_counts["full_box_points"]),
-                int(epoch_prompt_counts["full_box_only"]),
-                int(epoch_prompt_counts["tight_box_points"]),
-                int(epoch_prompt_counts["background_full_box_only"]),
-            ]],
-        )
-        logging.info(
-            "Epoch %d/%d train: loss=%.4f bce=%.4f dice=%.4f tversky=%.4f focal=%.4f cldice=%.4f centerline=%.4f lr=%.6f"
-            % (
-                epoch_num + 1,
-                max_epoch,
-                mean_loss,
-                mean_loss_bce,
-                mean_loss_dice,
-                mean_loss_tversky,
-                mean_loss_focal,
-                mean_loss_cldice,
-                mean_loss_centerline,
-                float(lr_),
-            )
-        )
-
-        if prompt_policy != "legacy":
+        if prompt_policy != "legacy" and is_main_process:
             logging.info(
                 "Epoch %d prompt mix: full_box+points=%d full_box_only=%d tight_box+points=%d background_only=%d"
                 % (
                     epoch_num + 1,
-                    epoch_prompt_counts["full_box_points"],
-                    epoch_prompt_counts["full_box_only"],
-                    epoch_prompt_counts["tight_box_points"],
-                    epoch_prompt_counts["background_full_box_only"],
+                    prompt_counts_global["full_box_points"],
+                    prompt_counts_global["full_box_only"],
+                    prompt_counts_global["tight_box_points"],
+                    prompt_counts_global["background_full_box_only"],
                 )
             )
 
         val_interval = args.save_interval
-        if epoch_num % val_interval == 0:
+        if epoch_num % val_interval == 0 and is_main_process:
             model.eval()
+            continuity_eval_interval = int(getattr(args, "continuity_eval_interval", 1))
+            run_continuity = continuity_eval_interval > 0 and (epoch_num % continuity_eval_interval == 0)
             logging.info("%d tiled full-image val iterations per epoch" % len(val_case_names))
-            tile_selected_thr, tile_metric, tile_by_thr, total_cases = _run_tiled_full_image_eval(
+            tile_selected_thr, tile_metric, tile_by_thr, tile_continuity_by_thr, total_cases = _run_tiled_full_image_eval(
                 args.val_path,
                 val_case_names,
                 model,
@@ -978,20 +1101,20 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 image_size=int(args.img_size),
                 multimask_output=multimask_output,
                 use_amp=bool(getattr(args, "use_amp", False)),
+                tile_batch_size=int(getattr(args, "tile_batch_size", 1)),
+                compute_continuity=run_continuity,
                 case_metrics_csv_path=val_tile_case_csv_path,
                 epoch_num=epoch_num,
             )
-            tile_continuity = _run_tiled_continuity_eval(
-                args.val_path,
-                val_case_names,
-                model,
-                tile_size=int(args.img_size),
-                tile_overlap=tile_overlap,
-                threshold=float(tile_selected_thr),
-                image_size=int(args.img_size),
-                multimask_output=multimask_output,
-                use_amp=bool(getattr(args, "use_amp", False)),
-            )
+            if tile_continuity_by_thr is not None:
+                tile_continuity = tile_continuity_by_thr[float(tile_selected_thr)]
+            else:
+                tile_continuity = {
+                    "skeleton_dice": float("nan"),
+                    "centerline_precision": float("nan"),
+                    "centerline_recall": float("nan"),
+                    "component_fragmentation": float("nan"),
+                }
             threshold_rows = []
             for thr in val_thresholds:
                 threshold_rows.append(
@@ -1021,6 +1144,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     tile_continuity["component_fragmentation"],
                 )
             )
+            if not run_continuity:
+                logging.info("Continuity metrics skipped this cycle (continuity_eval_interval=%d)", continuity_eval_interval)
             logging.info("Validation used reconstructed full-image metrics over %d image(s)." % total_cases)
 
             legacy_selected_thr = float("nan")
@@ -1097,20 +1222,28 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
 
             if patience_counter >= patience:
                 logging.info("Early stopping triggered")
-                break
+                stop_training = True
 
         scheduler.step()
 
         save_interval = args.save_interval
-        if epoch_num % save_interval == 0:
+        if epoch_num % save_interval == 0 and is_main_process:
             save_mode_path = os.path.join(snapshot_path, "epoch_" + str(epoch_num) + ".pth")
             _save_delta_model(model, save_mode_path)
             logging.info("save model to %s" % save_mode_path)
+        if _dist_is_ready():
+            stop_tensor = torch.tensor(1 if stop_training else 0, device=device, dtype=torch.int32)
+            dist.all_reduce(stop_tensor, op=dist.ReduceOp.MAX)
+            stop_training = bool(stop_tensor.item() > 0)
+        _barrier()
+        if stop_training:
+            break
 
         if epoch_num >= max_epoch - 1 or epoch_num >= stop_epoch - 1:
-            save_mode_path = os.path.join(snapshot_path, "epoch_" + str(epoch_num) + ".pth")
-            _save_delta_model(model, save_mode_path)
-            logging.info("save model to %s" % save_mode_path)
+            if is_main_process:
+                save_mode_path = os.path.join(snapshot_path, "epoch_" + str(epoch_num) + ".pth")
+                _save_delta_model(model, save_mode_path)
+                logging.info("save model to %s" % save_mode_path)
             iterator.close()
             break
 
