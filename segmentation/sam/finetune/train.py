@@ -1,6 +1,8 @@
 import argparse
+import json
 import os
 import random
+import sys
 import numpy as np
 from torch_runtime import cudnn, torch
 import torch.distributed as dist
@@ -57,6 +59,7 @@ parser.add_argument('--use_amp', action='store_true', help='If activated, adopt 
 parser.add_argument('--save_interval', type=int, default=1, help='Save and validation intervals')
 parser.add_argument('--num_workers', type=int, default=8, help='number of dataloader workers')
 parser.add_argument('--patches_per_image', type=int, default=1, help='number of random patches to crop per image per epoch')
+parser.add_argument('--run_name', type=str, default='', help='Optional suffix added to the snapshot directory name to avoid collisions between runs')
 parser.add_argument('--profile', type=str, default='custom', choices=['custom', 'speed', 'balanced', 'research'], help='High-level training preset that fills in default knobs unless you override them')
 parser.add_argument('--train_use_boxes', type=int, default=1, help='Use box prompts during training')
 parser.add_argument('--train_full_image_box', action='store_true', help='Use a full-image box prompt for every training sample')
@@ -110,6 +113,102 @@ parser.add_argument('--refine_merge_mode', type=str, default='weighted_replace',
 parser.add_argument('--refine_score_threshold', type=float, default=0.15, help='Default ROI mining heat threshold')
 
 args = parser.parse_args()
+
+
+def _build_snapshot_path(args) -> str:
+    snapshot_path = os.path.join(args.output, "{}".format(args.exp))
+    snapshot_path = snapshot_path + '_pretrain' if args.is_pretrain else snapshot_path
+    snapshot_path += '_' + args.vit_name
+    snapshot_path = snapshot_path + '_' + str(args.max_iterations)[:-3] + 'k'
+    snapshot_path = snapshot_path + '_epo' + str(args.max_epochs)
+    snapshot_path = snapshot_path + '_bs' + str(args.batch_size)
+    snapshot_path = snapshot_path + '_gbs' + str(getattr(args, "global_batch_size", args.batch_size))
+    snapshot_path = snapshot_path + '_lr' + str(args.base_lr)
+    snapshot_path = snapshot_path + '_s' + str(args.seed)
+    snapshot_path = snapshot_path + '_type_' + str(args.delta_type)
+    snapshot_path = snapshot_path + '_stage_' + str(getattr(args, 'pipeline_stage', 'coarse'))
+    if args.delta_type == 'adapter':
+        snapshot_path = snapshot_path + '_dim' + str(args.middle_dim)
+        snapshot_path = snapshot_path + '_sf' + str(args.scaling_factor)
+    elif args.delta_type == 'lora':
+        snapshot_path = snapshot_path + '_r' + str(args.rank)
+    else:
+        snapshot_path = snapshot_path + '_dim' + str(args.middle_dim)
+        snapshot_path = snapshot_path + '_r' + str(args.rank)
+
+    run_name = str(getattr(args, "run_name", "") or "").strip()
+    if run_name:
+        safe_run_name = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in run_name)
+        snapshot_path = snapshot_path + '_run_' + safe_run_name
+    return snapshot_path
+
+
+def _run_manifest(args, snapshot_path: str) -> dict:
+    return {
+        "entry_module": "segmentation.sam.finetune.train",
+        "cwd": os.getcwd(),
+        "argv": sys.argv,
+        "pythonpath": os.environ.get("PYTHONPATH", ""),
+        "snapshot_path": snapshot_path,
+        "per_gpu_batch_size": int(args.batch_size),
+        "global_batch_size": int(getattr(args, "global_batch_size", args.batch_size)),
+        "world_size": int(getattr(args, "world_size", 1)),
+        "local_rank": int(getattr(args, "local_rank", 0)),
+        "global_rank": int(getattr(args, "global_rank", 0)),
+        "profile": str(getattr(args, "profile", "custom")),
+        "prompt_policy": str(getattr(args, "prompt_policy", "hybrid_v1")),
+        "augment_profile": str(getattr(args, "augment_profile", "balanced")),
+        "crop_policy": str(getattr(args, "crop_policy", "smart")),
+        "pipeline_stage": str(getattr(args, "pipeline_stage", "coarse")),
+        "patches_per_image": int(getattr(args, "patches_per_image", 1)),
+        "num_workers": int(getattr(args, "num_workers", 0)),
+        "seed": int(getattr(args, "seed", 0)),
+        "vit_name": str(getattr(args, "vit_name", "")),
+        "delta_type": str(getattr(args, "delta_type", "")),
+        "decoder_type": str(getattr(args, "decoder_type", "")),
+    }
+
+
+def _warn_existing_snapshot(snapshot_path: str, args) -> None:
+    manifest_path = os.path.join(snapshot_path, "run_manifest.json")
+    if not os.path.exists(manifest_path):
+        return
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            old_manifest = json.load(f)
+    except Exception:
+        return
+
+    new_manifest = _run_manifest(args, snapshot_path)
+    mismatches = []
+    for key in (
+        "entry_module",
+        "per_gpu_batch_size",
+        "global_batch_size",
+        "world_size",
+        "profile",
+        "prompt_policy",
+        "augment_profile",
+        "crop_policy",
+        "pipeline_stage",
+        "patches_per_image",
+        "seed",
+        "vit_name",
+        "delta_type",
+        "decoder_type",
+    ):
+        if old_manifest.get(key) != new_manifest.get(key):
+            mismatches.append(f"{key}: old={old_manifest.get(key)!r} new={new_manifest.get(key)!r}")
+    if mismatches:
+        print("Warning: snapshot directory already exists with different run metadata:")
+        for line in mismatches:
+            print(f"  - {line}")
+        print("Use --run_name to keep runs separate if this is intentional.")
+
+
+def _write_run_manifest(snapshot_path: str, args) -> None:
+    with open(os.path.join(snapshot_path, "run_manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(_run_manifest(args, snapshot_path), f, indent=2, sort_keys=True)
 
 
 def _configure_hq_lora_training(net, mode: str) -> None:
@@ -196,6 +295,7 @@ if __name__ == "__main__":
     args.local_rank = local_rank
     args.global_rank = global_rank
     args.world_size = world_size
+    args.global_batch_size = int(args.batch_size) * int(world_size)
     args.distributed = bool(world_size > 1)
     if args.distributed and not dist.is_initialized():
         dist.init_process_group(backend="nccl", init_method="env://")
@@ -216,6 +316,7 @@ if __name__ == "__main__":
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     if args.dice_param is not None:
         args.dice_weight = float(args.dice_param)
     _apply_profile_defaults(args)
@@ -227,26 +328,9 @@ if __name__ == "__main__":
         args.centerline_head = True
     args.is_pretrain = True
     args.exp = 'generic_' + str(args.img_size)
-    snapshot_path = os.path.join(args.output, "{}".format(args.exp))
-    snapshot_path = snapshot_path + '_pretrain' if args.is_pretrain else snapshot_path
-    snapshot_path += '_' + args.vit_name
-    snapshot_path = snapshot_path + '_' + str(args.max_iterations)[
-                                          :-3] + 'k' 
-    snapshot_path = snapshot_path + '_epo' + str(args.max_epochs) 
-    snapshot_path = snapshot_path + '_bs' + str(args.batch_size)
-    snapshot_path = snapshot_path + '_lr' + str(args.base_lr) 
-    snapshot_path = snapshot_path + '_s' + str(args.seed) 
-    snapshot_path = snapshot_path + '_type_' + str(args.delta_type) 
-    snapshot_path = snapshot_path + '_stage_' + str(getattr(args, 'pipeline_stage', 'coarse'))
-    if args.delta_type =='adapter':
-        snapshot_path = snapshot_path + '_dim' + str(args.middle_dim)         
-        snapshot_path = snapshot_path + '_sf' + str(args.scaling_factor)   
-    elif args.delta_type =='lora':
-        snapshot_path = snapshot_path + '_r' + str(args.rank)
-    else:
-        snapshot_path = snapshot_path + '_dim' + str(args.middle_dim)                          
-        snapshot_path = snapshot_path + '_r' + str(args.rank)
-
+    snapshot_path = _build_snapshot_path(args)
+    if global_rank == 0:
+        _warn_existing_snapshot(snapshot_path, args)
     os.makedirs(snapshot_path, exist_ok=True)
     if args.distributed:
         dist.barrier()
@@ -290,10 +374,16 @@ if __name__ == "__main__":
     if global_rank == 0:
         with open(config_file, 'w') as f:
             f.writelines(config_items)
+        _write_run_manifest(snapshot_path, args)
 
     total_params = sum(p.numel() for p in net.parameters())
     if global_rank == 0:
         print(f"Total number of parameters:{total_params}")
+        print(
+            "Run provenance: module=segmentation.sam.finetune.train "
+            f"world_size={args.world_size} per_gpu_batch_size={args.batch_size} "
+            f"global_batch_size={args.global_batch_size} snapshot_path={snapshot_path}"
+        )
 
     total_params_train = sum(p.numel() for p in net.parameters() if p.requires_grad)
     if global_rank == 0:

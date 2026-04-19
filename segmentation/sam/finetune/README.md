@@ -21,13 +21,13 @@ Training now uses:
 - optional `HQ + LoRA` mode for sharper boundary/detail reconstruction
 
 ```bash
-python -m segmentation.sam.finetune.train --root_path /path/to/train --val_path /path/to/val --warmup --AdamW --img_size 512 --n_gpu 1 --batch_size 8 --base_lr 0.0004 --warmup_period 300 --tf32 --use_amp --max_epochs 140 --stop_epoch 100 --vit_name vit_b --ckpt /path/to/sam_vit_b.pth --delta_type lora --rank 4 --patches_per_image 4 --background_crop_prob 0.2 --near_background_crop_prob 0.15 --prompt_policy hybrid --pos_weight auto --bce_weight 1.0 --dice_weight 0.35 --tversky_weight 0.35 --focal_weight 0.25 --focal_alpha 0.25 --focal_gamma 2.0 --val_thresholds 0.35 0.4 0.45 0.5 0.55 0.6 --tile_overlap 256 --save_interval 1
+python -m segmentation.sam.finetune.train --root_path /path/to/train --val_path /path/to/val --warmup --AdamW --img_size 512 --n_gpu 1 --batch_size 8 --base_lr 0.0004 --warmup_period 300 --tf32 --use_amp --max_epochs 140 --stop_epoch 100 --vit_name vit_b --ckpt /path/to/sam_vit_b.pth --delta_type lora --rank 4 --patches_per_image 4 --background_crop_prob 0.2 --near_background_crop_prob 0.15 --prompt_policy hybrid_val_balanced --pos_weight auto --bce_weight 1.0 --dice_weight 0.35 --tversky_weight 0.35 --focal_weight 0.25 --focal_alpha 0.25 --focal_gamma 2.0 --val_thresholds 0.35 0.4 0.45 0.5 0.55 0.6 --tile_overlap 256 --save_interval 1 --run_name baseline_a
 ```
 
 `HQ + LoRA` benchmark run:
 
 ```bash
-python -m segmentation.sam.finetune.train --root_path /path/to/train --val_path /path/to/val --warmup --AdamW --img_size 512 --n_gpu 1 --batch_size 8 --base_lr 0.0004 --warmup_period 300 --tf32 --use_amp --max_epochs 140 --stop_epoch 100 --vit_name vit_b --ckpt /path/to/sam_vit_b.pth --delta_type lora --rank 4 --decoder_type hq --patches_per_image 4 --background_crop_prob 0.2 --near_background_crop_prob 0.15 --prompt_policy hybrid --pos_weight auto --bce_weight 1.0 --dice_weight 0.35 --tversky_weight 0.35 --focal_weight 0.25 --focal_alpha 0.25 --focal_gamma 2.0 --val_thresholds 0.35 0.4 0.45 0.5 0.55 0.6 --tile_overlap 256 --save_interval 1
+python -m segmentation.sam.finetune.train --root_path /path/to/train --val_path /path/to/val --warmup --AdamW --img_size 512 --n_gpu 1 --batch_size 8 --base_lr 0.0004 --warmup_period 300 --tf32 --use_amp --max_epochs 140 --stop_epoch 100 --vit_name vit_b --ckpt /path/to/sam_vit_b.pth --delta_type lora --rank 4 --decoder_type hq --patches_per_image 4 --background_crop_prob 0.2 --near_background_crop_prob 0.15 --prompt_policy hybrid_val_balanced --pos_weight auto --bce_weight 1.0 --dice_weight 0.35 --tversky_weight 0.35 --focal_weight 0.25 --focal_alpha 0.25 --focal_gamma 2.0 --val_thresholds 0.35 0.4 0.45 0.5 0.55 0.6 --tile_overlap 256 --save_interval 1 --run_name hq_lora_a
 ```
 
 <h3>3. Test:</h3>
