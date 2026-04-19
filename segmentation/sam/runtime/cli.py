@@ -23,7 +23,7 @@ def _common_params(args: argparse.Namespace) -> dict:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m segmentation.sam.runtime", description="CLI for the SAM engine.")
+    parser = argparse.ArgumentParser(prog="python -m segmentation.sam.no_finetune", description="CLI for the SAM engine.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
     sub = parser.add_subparsers(dest="command", required=True)
 

@@ -13,18 +13,16 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from PIL import Image
 
-from ...datasets.unet import (
-    CrackDataset,
-    LetterboxResize,
-    RandomPatchDataset,
-    TiledDataset,
-    build_mask_index,
-    find_mask_path,
-)
 from .collate import collate_skip_none
 from .losses import dice_loss, focal_loss_with_logits
 from .training import train_model
 from ..model_io import build_model_config, save_training_config
+
+
+def _dataset_api():
+    from ... import datasets as segmentation_datasets
+
+    return segmentation_datasets.unet
 
 
 def _estimate_pos_weight(
@@ -36,6 +34,7 @@ def _estimate_pos_weight(
     min_weight=1.0,
     max_weight=20.0,
 ):
+    find_mask_path = _dataset_api().find_mask_path
     if not train_names:
         return None
     names = train_names
@@ -102,6 +101,12 @@ def _make_module_layout_contiguous(module):
 
 
 def run_training(args):
+    datasets_api = _dataset_api()
+    CrackDataset = datasets_api.CrackDataset
+    LetterboxResize = datasets_api.LetterboxResize
+    RandomPatchDataset = datasets_api.RandomPatchDataset
+    TiledDataset = datasets_api.TiledDataset
+    build_mask_index = datasets_api.build_mask_index
     is_distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     rank = int(os.environ.get("RANK", "0"))
@@ -170,6 +175,23 @@ def run_training(args):
     # Resolve preprocess modes (train vs val)
     train_preprocess = _resolve_preprocess_mode(getattr(args, "preprocess_train", None) or args.preprocess)
     val_preprocess = _resolve_preprocess_mode(getattr(args, "preprocess_val", None) or args.preprocess)
+    augment_profile = str(getattr(args, "augment_profile", None) or "balanced").strip().lower()
+    crop_policy = str(getattr(args, "crop_policy", None) or "smart").strip().lower()
+    background_crop_prob = float(
+        getattr(args, "background_crop_prob", None)
+        if getattr(args, "background_crop_prob", None) is not None
+        else getattr(args, "negative_patch_prob", 0.25)
+    )
+    near_background_crop_prob = float(
+        getattr(args, "near_background_crop_prob", None)
+        if getattr(args, "near_background_crop_prob", None) is not None
+        else 0.15
+    )
+    hard_negative_crop_prob = float(
+        getattr(args, "hard_negative_crop_prob", None)
+        if getattr(args, "hard_negative_crop_prob", None) is not None
+        else 0.10
+    )
     if rank == 0:
         print(f"Preprocess: train={train_preprocess} | val={val_preprocess}")
 
@@ -227,11 +249,11 @@ def run_training(args):
                 image_transform=image_transform,
                 mask_transform=mask_transform,
                 verbose=(rank == 0),
-                aug_prob=args.aug_prob,
-                rotate_limit=args.rotate_limit,
-                brightness_limit=args.brightness_limit,
-                contrast_limit=args.contrast_limit,
-                negative_patch_prob=args.negative_patch_prob,
+                augment_profile=augment_profile,
+                crop_policy=crop_policy,
+                background_crop_prob=background_crop_prob,
+                near_background_crop_prob=near_background_crop_prob,
+                hard_negative_crop_prob=hard_negative_crop_prob,
             )
 
         if mode in ["letterbox", "resize", "random_crop"]:
@@ -248,10 +270,11 @@ def run_training(args):
                 cache_data=bool(args.cache_data),
                 preprocess_mode=mode,
                 patches_per_image=getattr(args, "patches_per_image", 1),
-                aug_prob=args.aug_prob,
-                rotate_limit=args.rotate_limit,
-                brightness_limit=args.brightness_limit,
-                contrast_limit=args.contrast_limit,
+                augment_profile=augment_profile,
+                crop_policy=crop_policy,
+                background_crop_prob=background_crop_prob,
+                near_background_crop_prob=near_background_crop_prob,
+                hard_negative_crop_prob=hard_negative_crop_prob,
             )
         raise ValueError(f"Unsupported train preprocess mode: {mode}")
 

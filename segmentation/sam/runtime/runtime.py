@@ -5,7 +5,9 @@ from typing import Any, Optional, Tuple
 
 import cv2
 import numpy as np
-from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
+from segment_anything import SamAutomaticMaskGenerator
+
+from ..backbones.segment_anything import sam_model_registry
 
 from torch_runtime import get_torch
 
@@ -303,6 +305,8 @@ def load_sam_model(checkpoint_path: str, requested_model_type: str) -> Tuple[Any
     if model_type not in sam_model_registry:
         raise ValueError(f"Unknown SAM model type: {model_type!r}")
     sam_model = sam_model_registry[model_type](checkpoint=None)
+    if isinstance(sam_model, tuple):
+        sam_model = sam_model[0]
     try:
         sam_model.load_state_dict(state_dict)
     except RuntimeError as exc:

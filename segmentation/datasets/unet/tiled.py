@@ -6,6 +6,7 @@ from PIL import Image
 from collections import OrderedDict
 from torch_runtime import Dataset
 
+from ..core import list_valid_pairs
 from .utils import _normalize_patch_size, _pad_to_min_size, build_mask_index, find_mask_path
 
 
@@ -53,23 +54,15 @@ class TiledDataset(Dataset):
             mask_index = build_mask_index(mask_dir)
         self._mask_index = mask_index
 
-        if image_filenames is None:
-            images = sorted(
-                [f for f in os.listdir(image_dir) if f.lower().endswith((".jpg", ".png", ".jpeg"))]
-            )
-            self.images = [
-                img
-                for img in images
-                if find_mask_path(
-                    mask_dir,
-                    os.path.splitext(img)[0],
-                    mask_prefix=self.mask_prefix,
-                    mask_index=self._mask_index,
-                )
-                is not None
-            ]
-        else:
-            self.images = list(image_filenames)
+        self._records = list_valid_pairs(
+            image_dir,
+            mask_dir,
+            mask_prefix=self.mask_prefix,
+            image_filenames=image_filenames,
+            mask_index=self._mask_index,
+        )
+        self._record_by_name = {record.image_name: record for record in self._records}
+        self.images = [record.image_name for record in self._records]
 
         if not self.images:
             raise RuntimeError("No valid image-mask pairs found.")
@@ -169,21 +162,14 @@ class TiledDataset(Dataset):
             return None
 
     def _load_pair(self, img_name):
-        img_path = os.path.join(self.image_dir, img_name)
-        base_name = os.path.splitext(img_name)[0]
-        mask_path = find_mask_path(
-            self.mask_dir,
-            base_name,
-            mask_prefix=self.mask_prefix,
-            mask_index=self._mask_index,
-        )
-        if mask_path is None:
+        record = self._record_by_name.get(img_name)
+        if record is None:
             raise FileNotFoundError(
-                f"Mask not found for '{img_name}'. Expected '{base_name}{self.mask_prefix}.*' in {self.mask_dir}"
+                f"Mask not found for '{img_name}'. Expected '{os.path.splitext(img_name)[0]}{self.mask_prefix}.*' in {self.mask_dir}"
             )
 
-        image = Image.open(img_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L")
+        image = Image.open(record.image_path).convert("RGB")
+        mask = Image.open(record.mask_path).convert("L")
         if self._cache_size > 0:
             self._cache[img_name] = (image, mask)
             if len(self._cache) > self._cache_size:

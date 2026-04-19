@@ -1,1 +1,1 @@
-# Utility helpers for local SAM predictor compatibility.
+"""Compatibility wrapper over the shared SAM utils package."""

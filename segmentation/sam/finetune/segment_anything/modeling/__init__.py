@@ -1,12 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+"""Compatibility wrapper over the shared SAM modeling package."""
 
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
-from .sam import Sam
-from .image_encoder import ImageEncoderViT
-from .mask_decoder import MaskDecoder
-from .mask_decoder_hq import MaskDecoderHQ
-from .prompt_encoder import PromptEncoder
-from .transformer import TwoWayTransformer
+from ....backbones.segment_anything.modeling import *  # noqa: F401,F403

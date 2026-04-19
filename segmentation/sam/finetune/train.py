@@ -5,7 +5,7 @@ import numpy as np
 from torch_runtime import cudnn, torch
 import torch.distributed as dist
 from importlib import import_module
-from .segment_anything import sam_model_registry
+from ..backbones.segment_anything import sam_model_registry
 from .trainer import trainer_generic
 
 

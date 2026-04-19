@@ -7,6 +7,17 @@ from PIL import Image, ImageEnhance
 from collections import OrderedDict
 from torch_runtime import Dataset
 
+from ..core import (
+    build_crop_metadata,
+    build_crack_profile_augment,
+    choose_smart_crack_crop_coords,
+    crop_image_label,
+    ensure_three_channel_image,
+    list_valid_pairs,
+    normalize_binary_mask,
+    pad_canvas_if_needed,
+    to_uint8_image,
+)
 from .utils import _normalize_patch_size, _pad_to_min_size, build_mask_index, find_mask_path
 import albumentations as A
 
@@ -43,6 +54,11 @@ class RandomPatchDataset(Dataset):
         negative_patch_prob=0.25,
         mask_index=None,
         cache_size=4,
+        augment_profile="balanced",
+        crop_policy="smart",
+        background_crop_prob=0.2,
+        near_background_crop_prob=0.15,
+        hard_negative_crop_prob=0.1,
     ):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
@@ -64,6 +80,11 @@ class RandomPatchDataset(Dataset):
         self.brightness_limit = float(brightness_limit)
         self.contrast_limit = float(contrast_limit)
         self.negative_patch_prob = max(0.0, min(1.0, float(negative_patch_prob)))
+        self.augment_profile = str(augment_profile or "balanced").strip().lower()
+        self.crop_policy = str(crop_policy or "smart").strip().lower()
+        self.background_crop_prob = float(background_crop_prob if background_crop_prob is not None else self.negative_patch_prob)
+        self.near_background_crop_prob = float(near_background_crop_prob)
+        self.hard_negative_crop_prob = float(hard_negative_crop_prob)
         self._cache_size = max(0, int(cache_size))
         self._cache = OrderedDict()
 
@@ -76,23 +97,15 @@ class RandomPatchDataset(Dataset):
             mask_index = build_mask_index(mask_dir)
         self._mask_index = mask_index
 
-        if image_filenames is None:
-            images = sorted(
-                [f for f in os.listdir(image_dir) if f.lower().endswith((".jpg", ".png", ".jpeg"))]
-            )
-            self.images = [
-                img
-                for img in images
-                if find_mask_path(
-                    mask_dir,
-                    os.path.splitext(img)[0],
-                    mask_prefix=self.mask_prefix,
-                    mask_index=self._mask_index,
-                )
-                is not None
-            ]
-        else:
-            self.images = list(image_filenames)
+        self._records = list_valid_pairs(
+            image_dir,
+            mask_dir,
+            mask_prefix=self.mask_prefix,
+            image_filenames=image_filenames,
+            mask_index=self._mask_index,
+        )
+        self._record_by_name = {record.image_name: record for record in self._records}
+        self.images = [record.image_name for record in self._records]
 
         if not self.images:
             raise RuntimeError("No valid image-mask pairs found.")
@@ -100,78 +113,10 @@ class RandomPatchDataset(Dataset):
         if self.verbose:
             print(f"RandomPatchDataset: {len(self.images)} image(s), patches_per_image={self.patches_per_image}")
 
-        # --- Albumentations Setup ---
         patch_h, patch_w = self.patch_size
-        
-        # 1. Base crop (Random Crop)
-        self.crop_transform = A.Compose([
-            A.PadIfNeeded(min_height=patch_h, min_width=patch_w, border_mode=0, fill=0, fill_mask=0),
-            A.RandomCrop(height=patch_h, width=patch_w)
-        ])
 
-        # 2. Augmentations (Only if augment=True)
-        # 2. Augmentations (Only if augment=True)
         if self.augment:
-            # Matches SAM GenericDataset
-            self.aug_transform = A.Compose([
-                # Safe Logic: Pad -> RandomCrop
-                A.PadIfNeeded(min_height=patch_h, min_width=patch_w, border_mode=0, fill=0, fill_mask=0),
-                A.RandomCrop(height=patch_h, width=patch_w, p=1.0),
-                
-                A.HorizontalFlip(p=self.aug_prob),
-                A.VerticalFlip(p=min(1.0, self.aug_prob * 0.6)),
-                A.RandomRotate90(p=min(1.0, self.aug_prob * 0.5)),
-                A.Affine(
-                    scale=(0.9, 1.1),
-                    translate_percent=0.0625,
-                    rotate=(-self.rotate_limit, self.rotate_limit),
-                    p=self.aug_prob,
-                ),
-                A.OneOf([
-                    A.ElasticTransform(p=0.5, alpha=120, sigma=120 * 0.05), # Removed alpha_affine
-                    A.GridDistortion(p=0.5),
-                    A.OpticalDistortion(
-                        distort_limit=(-0.10, 0.10),
-                        border_mode=0,
-                        fill=0,
-                        fill_mask=0,
-                        p=0.5,
-                    ),
-                ], p=min(1.0, self.aug_prob * 0.6)),
-                
-                # Color/Noise Augmentations
-                A.OneOf([
-                    A.CLAHE(clip_limit=2),
-                    A.RandomBrightnessContrast(
-                        brightness_limit=self.brightness_limit,
-                        contrast_limit=self.contrast_limit,
-                    ),
-                    A.RandomGamma(),            
-                ], p=self.aug_prob),
-                
-                A.OneOf([
-                    A.GaussNoise(),
-                    A.MotionBlur(blur_limit=3),
-                ], p=min(1.0, self.aug_prob * 0.5)),
-                
-                A.HueSaturationValue(p=min(1.0, self.aug_prob * 0.3)),
-                
-                # Environmental / Occlusion
-                A.RandomShadow(
-                    num_shadows_limit=(1, 3),
-                    shadow_dimension=5,
-                    shadow_roi=(0, 0.5, 1, 1),
-                    p=min(1.0, self.aug_prob * 0.3),
-                ),
-                A.CoarseDropout(
-                    num_holes_range=(1, 8),
-                    hole_height_range=(8, 32),
-                    hole_width_range=(8, 32),
-                    fill=0,
-                    fill_mask=0,
-                    p=min(1.0, self.aug_prob * 0.3),
-                ),
-            ], is_check_shapes=False)
+            self.aug_transform = build_crack_profile_augment(self.augment_profile)
         else:
             self.aug_transform = None
 
@@ -186,26 +131,20 @@ class RandomPatchDataset(Dataset):
                 self._cache.move_to_end(img_name)
                 return cached
 
-        img_path = os.path.join(self.image_dir, img_name)
-        base_name = os.path.splitext(img_name)[0]
-        mask_path = find_mask_path(
-            self.mask_dir,
-            base_name,
-            mask_prefix=self.mask_prefix,
-            mask_index=self._mask_index,
-        )
-        if mask_path is None:
+        record = self._record_by_name.get(img_name)
+        if record is None:
+            base_name = os.path.splitext(img_name)[0]
             raise FileNotFoundError(
                 f"Mask not found for '{img_name}'. Expected '{base_name}{self.mask_prefix}.*' in {self.mask_dir}"
             )
-
-        image = Image.open(img_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L")
+        image = np.array(Image.open(record.image_path).convert("RGB"))
+        mask = np.array(Image.open(record.mask_path).convert("L"))
+        crop_metadata = build_crop_metadata(image, mask, crop_policy=self.crop_policy)
         if self._cache_size > 0:
-            self._cache[img_name] = (image, mask)
+            self._cache[img_name] = (image, mask, crop_metadata)
             if len(self._cache) > self._cache_size:
                 self._cache.popitem(last=False)
-        return image, mask
+        return image, mask, crop_metadata
 
     # _random_patch removed in favor of Albumentations RandomCrop
 
@@ -216,46 +155,38 @@ class RandomPatchDataset(Dataset):
         img_name = self.images[img_idx]
 
         try:
-            image_pil, mask_pil = self._load_pair(img_name)
-            
-            # Convert PIL to Numpy for Albumentations
-            image_np = np.array(image_pil)
-            mask_np = np.array(mask_pil)
+            image_raw, mask_raw, crop_metadata = self._load_pair(img_name)
+            image_np = ensure_three_channel_image(np.array(image_raw, copy=True))
+            mask_np = normalize_binary_mask(np.array(mask_raw, copy=True))
+            patch_h, patch_w = self.patch_size
+            image_np, mask_np = pad_canvas_if_needed(
+                image_np,
+                mask_np,
+                min_h=patch_h,
+                min_w=patch_w,
+                image_border_mode=0,
+                image_fill=(0, 0, 0),
+                label_border_mode=0,
+                label_fill=0,
+            )
+            h, w = mask_np.shape[:2]
+            y1, x1 = choose_smart_crack_crop_coords(
+                image_np,
+                mask_np,
+                h,
+                w,
+                patch_h,
+                patch_w,
+                background_crop_prob=self.background_crop_prob,
+                near_background_crop_prob=self.near_background_crop_prob,
+                hard_negative_crop_prob=self.hard_negative_crop_prob,
+                crop_policy=self.crop_policy,
+                metadata=crop_metadata,
+            )
+            image_np, mask_np = crop_image_label(image_np, mask_np, y1=y1, x1=x1, th=patch_h, tw=patch_w)
 
-            # 1. Random Crop with controllable positive/negative balance.
-            best_sample = None
-            best_positive = None
-            best_negative = None
-            keep_negative = random.random() < self.negative_patch_prob
-
-            for _ in range(max(1, self.max_patch_tries)):
-                cropped = self.crop_transform(image=image_np, mask=mask_np)
-                has_crack = np.count_nonzero(cropped["mask"]) > 0
-                if has_crack:
-                    best_positive = cropped
-                    if not keep_negative:
-                        best_sample = cropped
-                        break
-                else:
-                    best_negative = cropped
-
-            if best_sample is None:
-                if keep_negative and best_negative is not None:
-                    best_sample = best_negative
-                elif best_positive is not None:
-                    best_sample = best_positive
-                else:
-                    best_sample = best_negative
-            
-            if best_sample is None:
-                return None
-
-            image_np = best_sample['image']
-            mask_np = best_sample['mask']
-
-            # 2. Augment
             if self.aug_transform is not None:
-                augmented = self.aug_transform(image=image_np, mask=mask_np)
+                augmented = self.aug_transform(image=to_uint8_image(image_np), mask=(mask_np > 0).astype(np.uint8))
                 image_np = augmented['image']
                 mask_np = augmented['mask']
 

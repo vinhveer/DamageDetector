@@ -9,5 +9,5 @@ _SAM: JsonServiceProcess | None = None
 def get_sam_service() -> JsonServiceProcess:
     global _SAM
     if _SAM is None:
-        _SAM = JsonServiceProcess(module="segmentation.sam.runtime.worker")
+        _SAM = JsonServiceProcess(module="segmentation.sam.no_finetune.worker")
     return _SAM

@@ -7,7 +7,7 @@ from collections import defaultdict
 from object_detection.dino import get_dino_service
 from inference_api.contracts import InferenceRequest, JobEvent, JobSnapshot
 from inference_api.workflows import WorkflowContext, run_workflow
-from segmentation.sam.runtime import get_sam_service
+from segmentation.sam.no_finetune import get_sam_service
 from segmentation.sam.finetune import get_sam_finetune_service
 from segmentation.unet import get_unet_service
 

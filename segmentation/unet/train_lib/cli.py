@@ -35,13 +35,18 @@ def build_arg_parser():
     parser.add_argument("--max-patch-tries", type=int, default=5, help="Max tries to find a patch with crack")
     parser.add_argument("--negative-patch-prob", type=float, default=0.25, help="Probability of keeping a background-only patch in patch mode")
     parser.add_argument("--val-stride", type=int, default=0, help="Stride for validation patching (0 = input_size)")
+    parser.add_argument("--augment-profile", type=str, default=None, choices=["light", "balanced", "aggressive", "strong"], help="SAM-style augmentation profile. When set, this becomes the primary augmentation knob.")
+    parser.add_argument("--crop-policy", type=str, default=None, choices=["smart", "fast"], help="SAM-style crop policy for crack sampling.")
+    parser.add_argument("--background-crop-prob", type=float, default=None, help="SAM-style probability of sampling a random background crop.")
+    parser.add_argument("--near-background-crop-prob", type=float, default=None, help="SAM-style probability of sampling a near-background crop.")
+    parser.add_argument("--hard-negative-crop-prob", type=float, default=None, help="SAM-style probability of sampling a hard-negative crop.")
     
     # Augmentation
     parser.add_argument("--no-augment", action="store_true", help="Disable augmentation")
-    parser.add_argument("--aug-prob", type=float, default=0.5, help="Augmentation probability")
-    parser.add_argument("--rotate-limit", type=int, default=10, help="Rotation limit in degrees")
-    parser.add_argument("--brightness-limit", type=float, default=0.2, help="Brightness limit")
-    parser.add_argument("--contrast-limit", type=float, default=0.2, help="Contrast limit")
+    parser.add_argument("--aug-prob", type=float, default=0.5, help="Legacy augmentation probability (kept for compatibility)")
+    parser.add_argument("--rotate-limit", type=int, default=10, help="Legacy rotation limit in degrees (kept for compatibility)")
+    parser.add_argument("--brightness-limit", type=float, default=0.2, help="Legacy brightness limit (kept for compatibility)")
+    parser.add_argument("--contrast-limit", type=float, default=0.2, help="Legacy contrast limit (kept for compatibility)")
 
     # Caching
     parser.add_argument("--cache-data", action="store_true", help="Cache data in memory")

@@ -3,8 +3,11 @@
 Tài liệu này đi sâu vào cách dự án `DamageDetector` sử dụng mô hình Segment Anything Model (SAM) từ Meta, cũng như các thuật toán tùy chỉnh được bổ sung để đánh giá và trích xuất đặc trưng của vết nứt.
 
 ## 1. Tổng quan Hệ thống
-Module `sam` nhận hình ảnh (hoặc tọa độ từ DINO) và xuất ra các lớp mặt nạ nhị phân (Binary Masks) mô tả hình dáng chính xác của đối tượng. 
-Dự án sử dụng thư viện `segment_anything` tiêu chuẩn, hỗ trợ ba phiên bản ViT (Vision Transformer):
+Module `segmentation.sam` hiện có hai mode:
+- `no_finetune`: SAM thuần cho runtime/inference.
+- `finetune`: SAM + delta tuning (LoRA/Adapter/HQ decoder).
+
+Cả hai mode đều dùng chung SAM base ở `segmentation/sam/backbones/segment_anything`, hỗ trợ ba phiên bản ViT (Vision Transformer):
 - `vit_b` (Base): Nhanh nhất, yêu cầu ít VRAM.
 - `vit_l` (Large): Cân bằng.
 - `vit_h` (Huge): Chính xác nhất, yêu cầu nhiều VRAM nhất.

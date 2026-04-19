@@ -6,7 +6,8 @@ def main() -> int:
         "Available segmentation tools:\n"
         "  - python -m segmentation.unet\n"
         "  - python -m segmentation.unet.train\n"
-        "  - python -m segmentation.sam.runtime\n"
+        "  - python -m segmentation.sam.no_finetune\n"
+        "  - python -m segmentation.sam finetune [...]\n"
         "  - python -m segmentation.sam.finetune\n"
         "  - python -m segmentation.sam.finetune.train\n"
         "  - python -m segmentation.sam.finetune.test\n"
@@ -17,4 +18,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

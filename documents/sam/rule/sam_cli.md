@@ -5,7 +5,7 @@ Tài liệu này hướng dẫn cách sử dụng Command Line Interface (CLI) c
 ## Lệnh cơ bản
 Mô hình SAM có thể được gọi thông qua module Python:
 ```bash
-python -m segmentation.sam.runtime [COMMAND] [OPTIONS]
+python -m segmentation.sam.no_finetune [COMMAND] [OPTIONS]
 ```
 
 ## Các lệnh hỗ trợ (Commands)
@@ -46,5 +46,5 @@ Yêu cầu tham số:
 
 ## Ví dụ sử dụng
 ```bash
-python -m segmentation.sam.runtime segment-boxes --checkpoint weights/sam_vit_b.pth --image data/test.jpg --boxes-json results/boxes.json
+python -m segmentation.sam.no_finetune segment-boxes --checkpoint weights/sam_vit_b.pth --image data/test.jpg --boxes-json results/boxes.json
 ```

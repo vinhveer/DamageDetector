@@ -15,7 +15,7 @@ object_detection/
 segmentation/
   unet/
   sam/
-    runtime/
+    no_finetune/
     finetune/
     backbones/
     shared/
@@ -55,7 +55,7 @@ This migration is intentionally **non-destructive** in phase 1:
 - New: `python -m segmentation.unet.train`
 
 - Old: `python -m sam`
-- New: `python -m segmentation.sam.runtime`
+- New: `python -m segmentation.sam.no_finetune`
 
 - Old: `python -m sam_finetune`
 - New: `python -m segmentation.sam.finetune`
@@ -97,14 +97,9 @@ python -m tools.download_models download --name grounding_dino_base
 - Added `setup.py`.
 - Added `tools/download_models.py`.
 
-## Phase 2: Next
+## Current Status
 
-- Move shared internals from `sam/` and `sam_finetune/` into `segmentation/sam/backbones` and `segmentation/sam/shared`.
-- Move `unet/` internals into `segmentation/unet/`.
-- Move `editor_app/` internals into `ui/editor_app/`.
-- Consolidate docs so examples prefer only the new commands.
-
-## Phase 3: Cleanup
-
-- Remove legacy top-level wrappers after notebooks and scripts stop using them.
-- Update CI/tests to target only the new namespace packages.
+- `segmentation/sam/backbones/segment_anything` is now the shared SAM base.
+- `segmentation/sam/no_finetune` is the canonical pure-SAM runtime path.
+- `segmentation/sam/finetune` keeps only finetune-specific layers such as delta tuning, trainers, and tiled inference.
+- `segmentation/datasets/core` is shared between `unet` and `sam_finetune`.

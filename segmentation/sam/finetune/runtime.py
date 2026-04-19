@@ -289,7 +289,7 @@ def load_sam_model(
         model_type = inferred
     else:
         model_type = inferred or requested
-    from .segment_anything import sam_model_registry
+    from ..backbones.segment_anything import sam_model_registry
 
     if model_type not in sam_model_registry:
         raise ValueError(f"Unknown SAM model type: {model_type!r}")

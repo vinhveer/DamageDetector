@@ -56,7 +56,7 @@ class SamRunner:
 
     def ensure_model_loaded(self, params: SamParams, *, log_fn=None) -> tuple[Any, str]:
         from .runtime import load_sam_model
-        from segment_anything import SamPredictor
+        from ..backbones.segment_anything import SamPredictor
 
         device = select_device_str(params.device)
         fallback = describe_device_fallback(params.device, device)

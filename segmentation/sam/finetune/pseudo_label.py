@@ -6,7 +6,7 @@ import shutil
 import cv2
 import numpy as np
 from torch_runtime import cudnn, torch
-from .segment_anything import sam_model_registry
+from ..backbones.segment_anything import sam_model_registry
 
 try:
     from .runtime import (

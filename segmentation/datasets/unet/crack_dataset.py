@@ -9,6 +9,15 @@ from torch_runtime import Dataset
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 
+from ..core import (
+    build_crop_metadata,
+    build_crack_profile_augment,
+    choose_centered_foreground_crop_coords,
+    choose_smart_crack_crop_coords,
+    list_valid_pairs,
+    pad_canvas_if_needed,
+    resize_with_center_padding,
+)
 from .utils import _list_valid_images, build_mask_index, find_mask_path
 
 class CrackDataset(Dataset):
@@ -43,6 +52,11 @@ class CrackDataset(Dataset):
         rotate_limit=10.0,
         brightness_limit=0.2,
         contrast_limit=0.2,
+        augment_profile="balanced",
+        crop_policy="smart",
+        background_crop_prob=0.2,
+        near_background_crop_prob=0.15,
+        hard_negative_crop_prob=0.1,
     ):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
@@ -56,6 +70,11 @@ class CrackDataset(Dataset):
         self.rotate_limit = float(rotate_limit)
         self.brightness_limit = float(brightness_limit)
         self.contrast_limit = float(contrast_limit)
+        self.augment_profile = str(augment_profile or "balanced").strip().lower()
+        self.crop_policy = str(crop_policy or "smart").strip().lower()
+        self.background_crop_prob = float(background_crop_prob)
+        self.near_background_crop_prob = float(near_background_crop_prob)
+        self.hard_negative_crop_prob = float(hard_negative_crop_prob)
 
         if cache_data and self.verbose:
              print("CrackDataset: cache_data enabled. This may increase RAM usage significantly.")
@@ -66,29 +85,17 @@ class CrackDataset(Dataset):
         if not os.path.exists(mask_dir):
             raise FileNotFoundError(f"Mask directory does not exist: {mask_dir}")
 
-        # Validate pairs and Pre-resolve paths
-        self.images = []
-        self.mask_paths = []
-        
-        # Temp local index for init only
         if mask_index is None:
-             mask_index = build_mask_index(mask_dir)
-
-        # Collect candidate files
-        if image_filenames is None:
-            # List directory if no filenames provided
-            valid_candidate_images = sorted(
-                [f for f in os.listdir(image_dir) if f.lower().endswith((".jpg", ".png", ".jpeg"))]
-            )
-        else:
-            valid_candidate_images = list(image_filenames)
-             
-        for img in valid_candidate_images: # We need to iterate over the candidate list passed or found
-            base_name = os.path.splitext(img)[0]
-            mask_path = find_mask_path(mask_dir, base_name, self.mask_prefix, mask_index=mask_index)
-            if mask_path is not None:
-                self.images.append(img)
-                self.mask_paths.append(mask_path)
+            mask_index = build_mask_index(mask_dir)
+        records = list_valid_pairs(
+            image_dir,
+            mask_dir,
+            mask_prefix=self.mask_prefix,
+            image_filenames=image_filenames,
+            mask_index=mask_index,
+        )
+        self.images = [record.image_name for record in records]
+        self.mask_paths = [record.mask_path for record in records]
         
         # Multi-Patch Training (Replication)
         if patches_per_image > 1:
@@ -108,15 +115,24 @@ class CrackDataset(Dataset):
         # --- RAM Caching ---
         self.cached_imgs = {}
         self.cached_masks = {}
+        self.cached_meta = {}
         
         if self.cache_data:
             if self.verbose:
                 print(f"CrackDataset: Pre-caching {len(self.images)} images into RAM...")
             
-            def load_func(idx):
-                name = self.images[idx]
+            unique_items = []
+            seen_items = set()
+            for name, m_path in zip(self.images, self.mask_paths):
+                key = (name, m_path)
+                if key in seen_items:
+                    continue
+                seen_items.add(key)
+                unique_items.append(key)
+
+            def load_func(item):
+                name, m_path = item
                 i_path = os.path.join(self.image_dir, name)
-                m_path = self.mask_paths[idx] # Direct access
                 
                 # Load as uint8 numpy via OpenCV (Standardize EXIF/Rotation handling)
                 # Load Image
@@ -139,117 +155,28 @@ class CrackDataset(Dataset):
                     h, w = img_cv.shape[:2]
                     mask_cv = cv2.resize(mask_cv, (w, h), interpolation=cv2.INTER_NEAREST)
 
-                return idx, img_cv, mask_cv
+                crop_metadata = build_crop_metadata(img_cv, mask_cv, crop_policy=self.crop_policy)
+                return name, m_path, img_cv, mask_cv, crop_metadata
 
             # Use ThreadPool for fast IO
             with ThreadPoolExecutor(max_workers=16) as executor:
-                results = list(tqdm(executor.map(load_func, range(len(self.images))), total=len(self.images), disable=not verbose))
+                results = list(tqdm(executor.map(load_func, unique_items), total=len(unique_items), disable=not verbose))
             
-            for idx, img, mask in results:
-                self.cached_imgs[idx] = img
-                self.cached_masks[idx] = mask
+            for name, m_path, img, mask, crop_metadata in results:
+                cache_key = f"{name}|{m_path}"
+                self.cached_imgs[cache_key] = img
+                self.cached_masks[cache_key] = mask
+                self.cached_meta[cache_key] = crop_metadata
             
             if self.verbose:
                 print("CrackDataset: Caching complete.")
 
-        # --- Transforms Setup (Albumentations) ---
-        
-        # Normalization (ImageNet Standard)
-        norm_transform = [
-            A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-        ]
-
         if self.augment:
-             # Heavy Augmentation w/o Sizing (Applied AFTER Smart Crop)
-             aug_list = [
-                 # Geometric (Safe)
-                 A.HorizontalFlip(p=0.5),
-                 A.VerticalFlip(p=0.5),
-                 A.RandomRotate90(p=0.5),
-                 A.Affine(scale=(0.8, 1.2), translate_percent=(0.1, 0.1), rotate=(-45, 45), p=0.5),
-                 
-                 # Distortions (Reduced: Too heavy deformation breaks crack continuity)
-                 # A.OneOf([
-                 #    A.GridDistortion(num_steps=5, distort_limit=0.3, p=1.0),
-                 #    A.OpticalDistortion(distort_limit=1, p=1.0),
-                 #    A.ElasticTransform(alpha=1, sigma=50, p=1.0)
-                 # ], p=0.1),
-
-                 # Occlusion (Disabled: CoarseDropout creates holes that look like disconnected cracks)
-                 # A.RandomShadow(num_shadows_limit=(1, 3), shadow_dimension=5, shadow_roi=(0, 0.5, 1, 1), p=0.1),
-                 # A.CoarseDropout(
-                 #    num_holes_range=(1, 10), hole_height_range=(8, 32), hole_width_range=(8, 32), 
-                 #    p=0.1
-                 # ),
-
-                 # Weather Effects (Disabled: Rain/Snow adds artifacts confusing with cracks)
-                 # A.OneOf([
-                 #     A.RandomRain(brightness_coefficient=0.9, drop_width=1, blur_value=3, p=1.0),
-                 #     A.RandomSnow(brightness_coeff=2.5, snow_point_range=(0.3, 0.5), p=1.0),
-                 #     A.RandomFog(fog_coef_range=(0.3, 0.5), alpha_coef=0.08, p=1.0),
-                 # ], p=0.1),
-
-                 # Color/Noise (Kept but reduced intensity)
-                 A.OneOf([
-                    A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=1.0),
-                    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
-                    A.RandomGamma(gamma_limit=(80, 120), p=1.0),            
-                 ], p=0.5),
-                 
-                 A.OneOf([
-                    A.GaussNoise(var_limit=(10.0, 30.0), p=1.0),
-                    A.Blur(blur_limit=3, p=1.0),
-                    A.MotionBlur(blur_limit=3, p=1.0),
-                 ], p=0.2),
-                 
-                 # A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
-            ]
-        else:
-             aug_list = []
-
-        # Construction Pipeline (Heavy Augmentation WITHOUT CROP/RESIZE)
-        # Sizing is handled manually in __getitem__ via Smart Crop
-        if self.augment:
-             self.transform = A.Compose([
-                 A.HorizontalFlip(p=self.aug_prob),
-                 A.VerticalFlip(p=min(1.0, self.aug_prob * 0.7)),
-                 A.RandomRotate90(p=min(1.0, self.aug_prob * 0.5)),
-                 
-                 # Geometric (Affine)
-                 A.Affine(
-                     scale=(0.8, 1.2),
-                     translate_percent=(0.1, 0.1),
-                     rotate=(-self.rotate_limit, self.rotate_limit),
-                     p=self.aug_prob,
-                 ),
-                 
-                 # Color/Noise (Moderate)
-                 A.OneOf([
-                    A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8), p=1.0),
-                    A.RandomBrightnessContrast(
-                        brightness_limit=self.brightness_limit,
-                        contrast_limit=self.contrast_limit,
-                        p=1.0,
-                    ),
-                    A.RandomGamma(gamma_limit=(80, 120), p=1.0),            
-                 ], p=self.aug_prob),
-                 
-                 A.OneOf([
-                    A.GaussNoise(var_limit=(10.0, 30.0), p=1.0),
-                    A.Blur(blur_limit=3, p=1.0),
-                    A.MotionBlur(blur_limit=3, p=1.0),
-                 ], p=min(1.0, self.aug_prob * 0.4)),
-                 
-                 # HueSaturationValue (Disabled)
-                 # A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.3),
-            ], is_check_shapes=False)
+             self.transform = build_crack_profile_augment(self.augment_profile)
         else:
              self.transform = A.Compose([], is_check_shapes=False)
 
-        # Normalization (ImageNet - Specific to UNet Backbones)
-        self.normalize = A.Compose([
-            A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), p=1.0)
-        ])
+        self.normalize = A.Compose([A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), p=1.0)])
 
     @staticmethod
     def list_valid_images(image_dir, mask_dir, mask_prefix="auto", mask_index=None):
@@ -263,15 +190,22 @@ class CrackDataset(Dataset):
         img_name = self.images[idx]
         img_path = os.path.join(self.image_dir, img_name)
         mask_path = self.mask_paths[idx] 
-        
-        image = cv2.imread(img_path)
-        if image is None: raise FileNotFoundError(f"Failed to load image: {img_path}")
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        cache_key = f"{img_name}|{mask_path}"
 
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-        if mask is None: raise FileNotFoundError(f"Failed to load mask: {mask_path}")
-        if mask.shape[:2] != image.shape[:2]:
-            mask = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+        if self.cache_data and cache_key in self.cached_imgs:
+            image = np.array(self.cached_imgs[cache_key], copy=True)
+            mask = np.array(self.cached_masks[cache_key], copy=True)
+            crop_metadata = self.cached_meta.get(cache_key)
+        else:
+            image = cv2.imread(img_path)
+            if image is None: raise FileNotFoundError(f"Failed to load image: {img_path}")
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+            mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+            if mask is None: raise FileNotFoundError(f"Failed to load mask: {mask_path}")
+            if mask.shape[:2] != image.shape[:2]:
+                mask = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+            crop_metadata = build_crop_metadata(image, mask, crop_policy=self.crop_policy)
         
         # --- Preprocessing Strategy Switch ---
         target_h, target_w = self.output_size, self.output_size
@@ -305,71 +239,34 @@ class CrackDataset(Dataset):
             mask = cv2.resize(mask, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
 
         else: 
-            # Default: Smart Crop (Random Crop on Train, Center/Median on Val)
-            # Find cracks (Optimized: Resize mask to 1/8 to find coords quickly)
-            small_scale = 0.125 # 1/8
-            mask_small = cv2.resize(mask, (0, 0), fx=small_scale, fy=small_scale, interpolation=cv2.INTER_NEAREST)
-            y_inds_small, x_inds_small = np.where(mask_small > 0)
-            
-            # Map back to original scale
-            if len(y_inds_small) > 0:
-                # Approximate coords
-                y_inds = (y_inds_small / small_scale).astype(int)
-                x_inds = (x_inds_small / small_scale).astype(int)
-            else:
-                y_inds, x_inds = [], []
-            
             th, tw = target_h, target_w
-            
-            # Pad if smaller than crop size
-            if w < tw or h < th:
-                pad_w = max(0, tw - w)
-                pad_h = max(0, th - h)
-                image = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=(0,0,0))
-                mask = cv2.copyMakeBorder(mask, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
-                h, w = image.shape[:2]
-
-            if len(y_inds) > 0:
-                # 30% chance to pick random crop (learn background), 70% force crack
-                if self.augment and random.random() < 0.3:
-                     y1 = random.randint(0, max(0, h - th))
-                     x1 = random.randint(0, max(0, w - tw))
-                elif self.augment:
-                    # Train: Smart Random (Force Crack)
-                    idx = random.randint(0, len(y_inds) - 1)
-                    cy, cx = y_inds[idx], x_inds[idx]
-                    y1_min = max(0, cy - th + 1)
-                    x1_min = max(0, cx - tw + 1)
-                    y1_max = min(h - th, cy)
-                    x1_max = min(w - tw, cx)
-
-                    # Clamp ranges to valid crop space
-                    max_y1 = max(0, h - th)
-                    max_x1 = max(0, w - tw)
-                    y1_min = max(0, min(y1_min, max_y1))
-                    x1_min = max(0, min(x1_min, max_x1))
-                    y1_max = max(0, min(y1_max, max_y1))
-                    x1_max = max(0, min(x1_max, max_x1))
-                    if y1_max < y1_min:
-                        y1_max = y1_min
-                    if x1_max < x1_min:
-                        x1_max = x1_min
-
-                    y1 = random.randint(y1_min, y1_max)
-                    x1 = random.randint(x1_min, x1_max)
-                else:
-                    # Val: Median Center
-                    cy, cx = int(np.median(y_inds)), int(np.median(x_inds))
-                    y1 = max(0, min(cy - th // 2, h - th))
-                    x1 = max(0, min(cx - tw // 2, w - tw))
+            image, mask = pad_canvas_if_needed(
+                image,
+                mask,
+                min_h=th,
+                min_w=tw,
+                image_border_mode=cv2.BORDER_CONSTANT,
+                image_fill=(0, 0, 0),
+                label_border_mode=cv2.BORDER_CONSTANT,
+                label_fill=0,
+            )
+            h, w = image.shape[:2]
+            if self.augment:
+                y1, x1 = choose_smart_crack_crop_coords(
+                    image,
+                    mask,
+                    h,
+                    w,
+                    th,
+                    tw,
+                    background_crop_prob=self.background_crop_prob,
+                    near_background_crop_prob=self.near_background_crop_prob,
+                    hard_negative_crop_prob=self.hard_negative_crop_prob,
+                    crop_policy=self.crop_policy,
+                    metadata=crop_metadata,
+                )
             else:
-                # No crack -> Random (Train) or Center (Val)
-                if self.augment:
-                    y1 = random.randint(0, max(0, h - th))
-                    x1 = random.randint(0, max(0, w - tw))
-                else:
-                    y1 = max(0, (h - th) // 2)
-                    x1 = max(0, (w - tw) // 2)
+                y1, x1 = choose_centered_foreground_crop_coords(mask, h, w, th, tw, metadata=crop_metadata)
 
             image = image[y1:y1+th, x1:x1+tw]
             mask = mask[y1:y1+th, x1:x1+tw]
@@ -395,37 +292,21 @@ class CrackDataset(Dataset):
         # 4. To Tensor
         # Robust Channel Handling
         target_h, target_w = self.output_size, self.output_size
-        final_image = np.zeros((target_h, target_w, 3), dtype=np.float32)
-        
-        h_aug, w_aug = image_aug.shape[:2]
-        
-        # Safety Resize (in case aug changed size)
-        if h_aug != target_h or w_aug != target_w:
-             image_aug = cv2.resize(image_aug, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-             mask_aug = cv2.resize(mask_aug, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
-             h_aug, w_aug = target_h, target_w
-
-        # Paste (should be full cover usually)
-        pad_top = max(0, (target_h - h_aug) // 2)
-        pad_left = max(0, (target_w - w_aug) // 2)
-        
-        if len(image_aug.shape) == 2:
-             final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, 0] = image_aug
-             final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, 1] = image_aug
-             final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, 2] = image_aug
-        elif image_aug.shape[2] == 1:
-             ck = image_aug[:, :, 0]
-             for k in range(3): final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, k] = ck
-        else:
-             final_image[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug, :] = image_aug
-             
-        # Mask Binarization
-        final_mask = np.zeros((target_h, target_w), dtype=np.float32)
-        final_mask[pad_top:pad_top+h_aug, pad_left:pad_left+w_aug] = mask_aug
-        final_mask = (final_mask > 0).astype(np.float32) # Strict 0/1
+        if image_aug.shape[:2] != (target_h, target_w):
+            image_aug = cv2.resize(image_aug, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            mask_aug = cv2.resize(mask_aug, (target_w, target_h), interpolation=cv2.INTER_NEAREST)
+        final_image, final_mask = resize_with_center_padding(
+            image_aug,
+            mask_aug.astype(np.float32),
+            target_h=target_h,
+            target_w=target_w,
+            normalize_image=False,
+        )
+        if final_image.shape[2] == 1:
+            final_image = np.repeat(final_image, 3, axis=2)
+        final_mask = (final_mask > 0).astype(np.float32)
 
         image = torch.from_numpy(final_image).permute(2, 0, 1).float() 
         mask = torch.from_numpy(final_mask).float().unsqueeze(0)       
         
         return image, mask
-

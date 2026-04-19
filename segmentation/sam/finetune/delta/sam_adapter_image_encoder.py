@@ -1,6 +1,6 @@
 from torch_runtime import nn, torch
 from torch_runtime import Parameter
-from ..segment_anything.modeling import Sam
+from ...backbones.segment_anything.modeling import Sam
 
 
 class _Adapter_MLP(nn.Module):
@@ -213,6 +213,5 @@ class Adapter_Sam(nn.Module):
 
     def forward(self, batched_input, multimask_output, image_size, boxes=None, points=None):
         return self.sam(batched_input, multimask_output, image_size, boxes=boxes, points=points)
-
 
 

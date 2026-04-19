@@ -83,7 +83,7 @@ class SamFinetuneRunner:
         log_fn=None,
         log_prefix: str = "coarse",
     ) -> tuple[Any, str, str, dict]:
-        from .segment_anything import SamPredictor
+        from ..backbones.segment_anything import SamPredictor
         from .runtime import (
             apply_delta_to_sam,
             infer_delta_type_from_path,
