@@ -59,6 +59,8 @@ parser.add_argument('--use_amp', action='store_true', help='If activated, adopt 
 parser.add_argument('--save_interval', type=int, default=1, help='Save and validation intervals')
 parser.add_argument('--num_workers', type=int, default=8, help='number of dataloader workers')
 parser.add_argument('--patches_per_image', type=int, default=1, help='number of random patches to crop per image per epoch')
+parser.add_argument('--grad_accum_steps', type=int, default=1, help='Gradient accumulation steps per optimizer update')
+parser.add_argument('--activation_checkpointing', action='store_true', help='Enable activation checkpointing for the SAM ViT image encoder blocks')
 parser.add_argument('--run_name', type=str, default='', help='Optional suffix added to the snapshot directory name to avoid collisions between runs')
 parser.add_argument('--profile', type=str, default='custom', choices=['custom', 'speed', 'balanced', 'research'], help='High-level training preset that fills in default knobs unless you override them')
 parser.add_argument('--train_use_boxes', type=int, default=1, help='Use box prompts during training')
@@ -162,10 +164,12 @@ def _run_manifest(args, snapshot_path: str) -> dict:
         "pipeline_stage": str(getattr(args, "pipeline_stage", "coarse")),
         "patches_per_image": int(getattr(args, "patches_per_image", 1)),
         "num_workers": int(getattr(args, "num_workers", 0)),
+        "grad_accum_steps": int(getattr(args, "grad_accum_steps", 1)),
         "seed": int(getattr(args, "seed", 0)),
         "vit_name": str(getattr(args, "vit_name", "")),
         "delta_type": str(getattr(args, "delta_type", "")),
         "decoder_type": str(getattr(args, "decoder_type", "")),
+        "activation_checkpointing": bool(getattr(args, "activation_checkpointing", False)),
     }
 
 
@@ -192,10 +196,12 @@ def _warn_existing_snapshot(snapshot_path: str, args) -> None:
         "crop_policy",
         "pipeline_stage",
         "patches_per_image",
+        "grad_accum_steps",
         "seed",
         "vit_name",
         "delta_type",
         "decoder_type",
+        "activation_checkpointing",
     ):
         if old_manifest.get(key) != new_manifest.get(key):
             mismatches.append(f"{key}: old={old_manifest.get(key)!r} new={new_manifest.get(key)!r}")
@@ -220,6 +226,17 @@ def _configure_hq_lora_training(net, mode: str) -> None:
         mask_decoder.set_trainable_mode(mode)
     elif hasattr(mask_decoder, "set_hq_only_trainable"):
         mask_decoder.set_hq_only_trainable()
+
+
+def _configure_activation_checkpointing(net, enabled: bool) -> None:
+    sam_model = getattr(net, "sam", net)
+    image_encoder = getattr(sam_model, "image_encoder", None)
+    if image_encoder is None:
+        return
+    if hasattr(image_encoder, "set_activation_checkpointing"):
+        image_encoder.set_activation_checkpointing(bool(enabled))
+    else:
+        image_encoder.use_activation_checkpointing = bool(enabled)
 
 
 def _apply_hq_balancing_defaults(args) -> None:
@@ -297,6 +314,11 @@ if __name__ == "__main__":
     args.world_size = world_size
     args.global_batch_size = int(args.batch_size) * int(world_size)
     args.distributed = bool(world_size > 1)
+    if int(args.n_gpu) > 1 and not args.distributed:
+        raise RuntimeError(
+            "Multi-GPU SAM finetune now requires torchrun/DDP. "
+            "Launch with torchrun --standalone --nproc_per_node=<num_gpus> -m segmentation.sam.finetune.train ..."
+        )
     if args.distributed and not dist.is_initialized():
         dist.init_process_group(backend="nccl", init_method="env://")
     if torch.cuda.is_available():
@@ -359,6 +381,7 @@ if __name__ == "__main__":
 
     if str(args.decoder_type).strip().lower() == "hq":
         _configure_hq_lora_training(net, args.hq_trainable_mode)
+    _configure_activation_checkpointing(net, bool(getattr(args, "activation_checkpointing", False)))
 
     multimask_output = False
 

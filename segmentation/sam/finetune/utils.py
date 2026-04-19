@@ -296,14 +296,15 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
         x, y = image.shape[-2:]
         if x != patch_size[0] or y != patch_size[1]:
             image = zoom(image, (1,1,patch_size[0] / x, patch_size[1] / y), order=3)  # ndarray   
-        inputs = torch.from_numpy(image).float().cuda() 
+        device = next(net.parameters()).device
+        inputs = torch.from_numpy(image).float().to(device=device)
         eval_boxes = boxes
         if use_full_image_box_prompt:
             full_h, full_w = image.shape[-2:]
             eval_boxes = torch.tensor(
                 [[0.0, 0.0, float(full_w - 1), float(full_h - 1)]],
                 dtype=torch.float32,
-                device=inputs.device,
+                device=device,
             )
         net.eval()
         with torch.no_grad():

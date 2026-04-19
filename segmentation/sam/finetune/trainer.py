@@ -105,6 +105,30 @@ def _reduce_sum_scalar(value: float, *, device: torch.device) -> float:
     return float(tensor.item())
 
 
+def _reduce_sum_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if not _dist_is_ready():
+        return tensor
+    reduced = tensor.clone()
+    dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+    return reduced
+
+
+def _all_gather_object(value):
+    if not _dist_is_ready():
+        return [value]
+    gathered = [None for _ in range(_get_world_size())]
+    dist.all_gather_object(gathered, value)
+    return gathered
+
+
+def _shard_sequence(values: list[str]) -> list[str]:
+    if not _dist_is_ready():
+        return list(values)
+    rank = _get_rank()
+    world = _get_world_size()
+    return [value for index, value in enumerate(values) if index % world == rank]
+
+
 def _init_table(name: str, headers: list[str]) -> None:
     if not name:
         return
@@ -416,23 +440,15 @@ def _run_tiled_full_image_eval(
     epoch_num: int | None = None,
 ):
     load_image_mask_arrays = _dataset_api().load_image_mask_arrays
-    metric_by_thr = {float(thr): np.zeros(4, dtype=np.float64) for thr in thresholds}
-    continuity_by_thr = (
-        {
-            float(thr): {
-                "skeleton_dice": 0.0,
-                "centerline_precision": 0.0,
-                "centerline_recall": 0.0,
-                "component_fragmentation": 0.0,
-            }
-            for thr in thresholds
-        }
-        if compute_continuity
-        else None
-    )
+    thresholds = [float(thr) for thr in thresholds]
+    device = next(model.parameters()).device
+    local_case_names = _shard_sequence(list(case_names))
+    metric_sum = np.zeros((len(thresholds), 4), dtype=np.float64)
+    continuity_sum = np.zeros((len(thresholds), 4), dtype=np.float64) if compute_continuity else None
     total_cases = 0
+    local_case_rows = []
 
-    for i_batch, case_name in enumerate(tqdm(case_names)):
+    for i_batch, case_name in enumerate(tqdm(local_case_names, disable=not _is_main_process())):
         image_hwc, label = load_image_mask_arrays(val_root, case_name)
         score_map = tiled_model_score_map(
             image_hwc,
@@ -446,16 +462,17 @@ def _run_tiled_full_image_eval(
         )
         sweep = threshold_sweep(score_map, label, thresholds)
         total_cases += 1
-        case_rows = []
-        for thr in thresholds:
-            metric_by_thr[float(thr)] += np.array(sweep[float(thr)], dtype=np.float64)
-            if continuity_by_thr is not None:
+        for thr_index, thr in enumerate(thresholds):
+            metric_sum[thr_index] += np.array(sweep[float(thr)], dtype=np.float64)
+            if continuity_sum is not None:
                 continuity = continuity_metrics((score_map >= float(thr)).astype(np.uint8), label)
-                for key in continuity_by_thr[float(thr)]:
-                    continuity_by_thr[float(thr)][key] += float(continuity[key])
+                continuity_sum[thr_index, 0] += float(continuity["skeleton_dice"])
+                continuity_sum[thr_index, 1] += float(continuity["centerline_precision"])
+                continuity_sum[thr_index, 2] += float(continuity["centerline_recall"])
+                continuity_sum[thr_index, 3] += float(continuity["component_fragmentation"])
             if case_metrics_csv_path is not None:
                 metrics = sweep[float(thr)]
-                case_rows.append(
+                local_case_rows.append(
                     [
                         int(epoch_num) if epoch_num is not None else -1,
                         int(i_batch),
@@ -467,19 +484,35 @@ def _run_tiled_full_image_eval(
                         float(metrics[3]),
                     ]
                 )
-        _append_table_rows(case_metrics_csv_path, case_rows)
+
+    metric_sum_tensor = _reduce_sum_tensor(torch.as_tensor(metric_sum, device=device, dtype=torch.float64))
+    total_cases = int(_reduce_sum_scalar(total_cases, device=device))
+    metric_sum = metric_sum_tensor.cpu().numpy()
+    if continuity_sum is not None:
+        continuity_sum_tensor = _reduce_sum_tensor(torch.as_tensor(continuity_sum, device=device, dtype=torch.float64))
+        continuity_sum = continuity_sum_tensor.cpu().numpy()
+
+    gathered_rows = _all_gather_object(local_case_rows) if case_metrics_csv_path is not None else None
+    if case_metrics_csv_path is not None and _is_main_process():
+        merged_rows = []
+        for rows in gathered_rows or []:
+            merged_rows.extend(rows or [])
+        _append_table_rows(case_metrics_csv_path, merged_rows)
 
     metric_by_thr = {
-        float(thr): metric_by_thr[float(thr)] / max(1, total_cases)
-        for thr in thresholds
+        float(thr): (metric_sum[index] / max(1, total_cases))
+        for index, thr in enumerate(thresholds)
     }
-    if continuity_by_thr is not None:
+    continuity_by_thr = None
+    if continuity_sum is not None:
         continuity_by_thr = {
             float(thr): {
-                key: float(value) / max(1, total_cases)
-                for key, value in continuity_by_thr[float(thr)].items()
+                "skeleton_dice": float(continuity_sum[index, 0]) / max(1, total_cases),
+                "centerline_precision": float(continuity_sum[index, 1]) / max(1, total_cases),
+                "centerline_recall": float(continuity_sum[index, 2]) / max(1, total_cases),
+                "component_fragmentation": float(continuity_sum[index, 3]) / max(1, total_cases),
             }
-            for thr in thresholds
+            for index, thr in enumerate(thresholds)
         }
     selected_thr, metric = best_threshold_result(metric_by_thr)
     return selected_thr, metric, metric_by_thr, continuity_by_thr, total_cases
@@ -536,10 +569,13 @@ def _run_legacy_box_eval(
     case_metrics_csv_path: str | None = None,
     epoch_num: int | None = None,
 ):
-    metric_by_thr = {float(thr): np.zeros(4, dtype=np.float64) for thr in thresholds}
+    thresholds = [float(thr) for thr in thresholds]
+    device = next(model.parameters()).device
+    metric_sum = np.zeros((len(thresholds), 4), dtype=np.float64)
     total_cases = 0
+    local_case_rows = []
 
-    for i_batch, sampled_batch in enumerate(tqdm(valloader)):
+    for i_batch, sampled_batch in enumerate(tqdm(valloader, disable=not _is_main_process())):
         image = sampled_batch["image"]
         label = sampled_batch["label"]
         case_name = sampled_batch["case_name"][0]
@@ -549,10 +585,9 @@ def _run_legacy_box_eval(
                 sampled_batch,
                 use_boxes=True,
                 use_points=False,
-                device=torch.device("cuda"),
+                device=device,
             )
-        case_rows = []
-        for thr in thresholds:
+        for thr_index, thr in enumerate(thresholds):
             metric_box_i = test_single_volume(
                 image,
                 label,
@@ -566,9 +601,9 @@ def _run_legacy_box_eval(
                 use_full_image_box_prompt=bool(getattr(args, "full_image_eval", False)),
                 threshold_prob=float(thr),
             )
-            metric_by_thr[float(thr)] += np.array(metric_box_i, dtype=np.float64)
+            metric_sum[thr_index] += np.array(metric_box_i, dtype=np.float64)
             if case_metrics_csv_path is not None:
-                case_rows.append(
+                local_case_rows.append(
                     [
                         int(epoch_num) if epoch_num is not None else -1,
                         int(i_batch),
@@ -581,11 +616,21 @@ def _run_legacy_box_eval(
                     ]
                 )
         total_cases += 1
-        _append_table_rows(case_metrics_csv_path, case_rows)
+
+    metric_sum_tensor = _reduce_sum_tensor(torch.as_tensor(metric_sum, device=device, dtype=torch.float64))
+    total_cases = int(_reduce_sum_scalar(total_cases, device=device))
+    metric_sum = metric_sum_tensor.cpu().numpy()
+
+    gathered_rows = _all_gather_object(local_case_rows) if case_metrics_csv_path is not None else None
+    if case_metrics_csv_path is not None and _is_main_process():
+        merged_rows = []
+        for rows in gathered_rows or []:
+            merged_rows.extend(rows or [])
+        _append_table_rows(case_metrics_csv_path, merged_rows)
 
     metric_by_thr = {
-        float(thr): metric_by_thr[float(thr)] / max(1, total_cases)
-        for thr in thresholds
+        float(thr): (metric_sum[index] / max(1, total_cases))
+        for index, thr in enumerate(thresholds)
     }
     selected_thr, metric = best_threshold_result(metric_by_thr)
     return selected_thr, metric, metric_by_thr, total_cases
@@ -686,12 +731,20 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         print("The length of train set is: {}".format(len(db_train)))
 
     train_sampler = None
+    val_sampler = None
     if bool(getattr(args, "distributed", False)):
         train_sampler = DistributedSampler(
             db_train,
             num_replicas=int(getattr(args, "world_size", _get_world_size())),
             rank=int(getattr(args, "global_rank", _get_rank())),
             shuffle=True,
+            drop_last=False,
+        )
+        val_sampler = DistributedSampler(
+            db_val_legacy,
+            num_replicas=int(getattr(args, "world_size", _get_world_size())),
+            rank=int(getattr(args, "global_rank", _get_rank())),
+            shuffle=False,
             drop_last=False,
         )
     loader_kwargs = {
@@ -705,6 +758,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     val_kwargs = {
         "batch_size": 1,
         "shuffle": False,
+        "sampler": val_sampler,
         "num_workers": max(1, args.num_workers // 2) if args.num_workers > 0 else 0,
         "pin_memory": True,
     }
@@ -726,7 +780,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             find_unused_parameters=False,
         )
     elif args.n_gpu > 1:
-        model = nn.DataParallel(model)
+        raise RuntimeError("Multi-GPU training requires torchrun/DDP. DataParallel fallback has been removed.")
 
     pos_weight_value = args.pos_weight
     auto_requested = isinstance(pos_weight_value, str) and str(pos_weight_value).lower() == "auto"
@@ -798,6 +852,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     scheduler = CosineAnnealingLR(optimizer, T_max=args.max_epochs, eta_min=1e-6)
     scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp) if args.use_amp else None
     iter_num = 0
+    optimizer_step_num = 0
+    grad_accum_steps = max(1, int(getattr(args, "grad_accum_steps", 1)))
 
     max_epoch = args.max_epochs
     stop_epoch = args.stop_epoch
@@ -898,6 +954,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     for epoch_num in iterator:
         if train_sampler is not None:
             train_sampler.set_epoch(epoch_num)
+        if val_sampler is not None:
+            val_sampler.set_epoch(epoch_num)
         model.train()
         epoch_prompt_counts = {
             "full_box_points": 0,
@@ -913,8 +971,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         epoch_loss_cldice_sum = 0.0
         epoch_loss_centerline_sum = 0.0
         epoch_step_count = 0
-        for sampled_batch in trainloader:
-            optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
+        for batch_index, sampled_batch in enumerate(trainloader):
             image_batch = sampled_batch["image"].cuda()
             label_batch = sampled_batch["label"].cuda()
 
@@ -954,11 +1012,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                         cldice_weight=getattr(args, "cldice_weight", 0.0),
                         centerline_aux_weight=getattr(args, "centerline_aux_weight", 0.0),
                     )
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
+                loss_to_backprop = loss / grad_accum_steps
+                scaler.scale(loss_to_backprop).backward()
             else:
                 outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)
                 loss, loss_bce, loss_dice, loss_tversky, loss_focal, loss_cldice_value_t, loss_centerline_value_t = calc_loss(
@@ -977,20 +1032,31 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     cldice_weight=getattr(args, "cldice_weight", 0.0),
                     centerline_aux_weight=getattr(args, "centerline_aux_weight", 0.0),
                 )
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                loss_to_backprop = loss / grad_accum_steps
+                loss_to_backprop.backward()
 
-            if args.warmup and iter_num < args.warmup_period:
-                warmup_factor = (iter_num + 1) / args.warmup_period
-                optimizer.param_groups[0]["lr"] = base_lr * warmup_factor
-                if len(optimizer.param_groups) > 1:
-                    optimizer.param_groups[1]["lr"] = (base_lr * decoder_lr_mult) * warmup_factor
-                lr_ = optimizer.param_groups[0]["lr"]
-            else:
-                lr_ = optimizer.param_groups[0]["lr"]
+            should_step = ((batch_index + 1) % grad_accum_steps == 0) or ((batch_index + 1) == len(trainloader))
+            if should_step:
+                if args.use_amp:
+                    scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+                if args.warmup and optimizer_step_num < args.warmup_period:
+                    warmup_factor = (optimizer_step_num + 1) / args.warmup_period
+                    optimizer.param_groups[0]["lr"] = base_lr * warmup_factor
+                    if len(optimizer.param_groups) > 1:
+                        optimizer.param_groups[1]["lr"] = (base_lr * decoder_lr_mult) * warmup_factor
+
+                if args.use_amp:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                optimizer_step_num += 1
 
             iter_num += 1
+            lr_ = optimizer.param_groups[0]["lr"]
             loss_value = float(loss.item())
             loss_bce_value = float(loss_bce.item())
             loss_dice_value = float(loss_dice.item())
@@ -1089,11 +1155,12 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             )
 
         val_interval = args.save_interval
-        if epoch_num % val_interval == 0 and is_main_process:
+        if epoch_num % val_interval == 0:
             model.eval()
             continuity_eval_interval = int(getattr(args, "continuity_eval_interval", 1))
             run_continuity = continuity_eval_interval > 0 and (epoch_num % continuity_eval_interval == 0)
-            logging.info("%d tiled full-image val iterations per epoch" % len(val_case_names))
+            if is_main_process:
+                logging.info("%d tiled full-image val iterations per epoch" % len(val_case_names))
             tile_selected_thr, tile_metric, tile_by_thr, tile_continuity_by_thr, total_cases = _run_tiled_full_image_eval(
                 args.val_path,
                 val_case_names,
@@ -1118,43 +1185,45 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     "centerline_recall": float("nan"),
                     "component_fragmentation": float("nan"),
                 }
-            threshold_rows = []
-            for thr in val_thresholds:
-                threshold_rows.append(
-                    [
-                        int(epoch_num),
-                        "tile",
-                        float(thr),
-                        float(tile_by_thr[float(thr)][0]),
-                        float(tile_by_thr[float(thr)][1]),
-                        float(tile_by_thr[float(thr)][2]),
-                        float(tile_by_thr[float(thr)][3]),
-                    ]
+            if is_main_process:
+                threshold_rows = []
+                for thr in val_thresholds:
+                    threshold_rows.append(
+                        [
+                            int(epoch_num),
+                            "tile",
+                            float(thr),
+                            float(tile_by_thr[float(thr)][0]),
+                            float(tile_by_thr[float(thr)][1]),
+                            float(tile_by_thr[float(thr)][2]),
+                            float(tile_by_thr[float(thr)][3]),
+                        ]
+                    )
+                _append_table_rows(val_threshold_csv_path, threshold_rows)
+                logging.info(
+                    "Epoch %d val(tile): thr=%.2f pr=%.4f re=%.4f f1=%.4f iou=%.4f"
+                    % (epoch_num + 1, tile_selected_thr, tile_metric[0], tile_metric[1], tile_metric[2], tile_metric[3])
                 )
-            _append_table_rows(val_threshold_csv_path, threshold_rows)
-            logging.info(
-                "Epoch %d val(tile): thr=%.2f pr=%.4f re=%.4f f1=%.4f iou=%.4f"
-                % (epoch_num + 1, tile_selected_thr, tile_metric[0], tile_metric[1], tile_metric[2], tile_metric[3])
-            )
-            logging.info(
-                "Epoch %d continuity: thr=%.2f skeleton_dice=%.4f centerline_precision=%.4f centerline_recall=%.4f fragmentation=%.4f"
-                % (
-                    epoch_num + 1,
-                    tile_selected_thr,
-                    tile_continuity["skeleton_dice"],
-                    tile_continuity["centerline_precision"],
-                    tile_continuity["centerline_recall"],
-                    tile_continuity["component_fragmentation"],
+                logging.info(
+                    "Epoch %d continuity: thr=%.2f skeleton_dice=%.4f centerline_precision=%.4f centerline_recall=%.4f fragmentation=%.4f"
+                    % (
+                        epoch_num + 1,
+                        tile_selected_thr,
+                        tile_continuity["skeleton_dice"],
+                        tile_continuity["centerline_precision"],
+                        tile_continuity["centerline_recall"],
+                        tile_continuity["component_fragmentation"],
+                    )
                 )
-            )
-            if not run_continuity:
-                logging.info("Continuity metrics skipped this cycle (continuity_eval_interval=%d)", continuity_eval_interval)
-            logging.info("Validation used reconstructed full-image metrics over %d image(s)." % total_cases)
+                if not run_continuity:
+                    logging.info("Continuity metrics skipped this cycle (continuity_eval_interval=%d)", continuity_eval_interval)
+                logging.info("Validation used reconstructed full-image metrics over %d image(s)." % total_cases)
 
             legacy_selected_thr = float("nan")
             legacy_metric = np.array([float("nan")] * 4)
             if bool(getattr(args, "legacy_box_eval", False)):
-                logging.info("%d legacy val iterations per epoch" % len(valloader_legacy))
+                if is_main_process:
+                    logging.info("%d legacy val iterations per epoch" % len(valloader_legacy))
                 legacy_selected_thr, legacy_metric, legacy_by_thr, _legacy_cases = _run_legacy_box_eval(
                     valloader_legacy,
                     model,
@@ -1164,67 +1233,69 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     case_metrics_csv_path=val_legacy_case_csv_path,
                     epoch_num=epoch_num,
                 )
-                legacy_rows = []
-                for thr in val_thresholds:
-                    legacy_rows.append(
-                        [
-                            int(epoch_num),
-                            "legacy",
-                            float(thr),
-                            float(legacy_by_thr[float(thr)][0]),
-                            float(legacy_by_thr[float(thr)][1]),
-                            float(legacy_by_thr[float(thr)][2]),
-                            float(legacy_by_thr[float(thr)][3]),
-                        ]
+                if is_main_process:
+                    legacy_rows = []
+                    for thr in val_thresholds:
+                        legacy_rows.append(
+                            [
+                                int(epoch_num),
+                                "legacy",
+                                float(thr),
+                                float(legacy_by_thr[float(thr)][0]),
+                                float(legacy_by_thr[float(thr)][1]),
+                                float(legacy_by_thr[float(thr)][2]),
+                                float(legacy_by_thr[float(thr)][3]),
+                            ]
+                        )
+                    _append_table_rows(val_threshold_csv_path, legacy_rows)
+                    logging.info(
+                        "Epoch %d val(legacy): thr=%.2f pr=%.4f re=%.4f f1=%.4f iou=%.4f"
+                        % (epoch_num + 1, legacy_selected_thr, legacy_metric[0], legacy_metric[1], legacy_metric[2], legacy_metric[3])
                     )
-                _append_table_rows(val_threshold_csv_path, legacy_rows)
-                logging.info(
-                    "Epoch %d val(legacy): thr=%.2f pr=%.4f re=%.4f f1=%.4f iou=%.4f"
-                    % (epoch_num + 1, legacy_selected_thr, legacy_metric[0], legacy_metric[1], legacy_metric[2], legacy_metric[3])
+
+            if is_main_process:
+                _append_table_row(
+                    csv_path,
+                    [
+                        epoch_num,
+                        tile_selected_thr,
+                        tile_metric[0],
+                        tile_metric[1],
+                        tile_metric[2],
+                        tile_metric[3],
+                        tile_continuity["skeleton_dice"],
+                        tile_continuity["centerline_precision"],
+                        tile_continuity["centerline_recall"],
+                        tile_continuity["component_fragmentation"],
+                        legacy_selected_thr,
+                        legacy_metric[0],
+                        legacy_metric[1],
+                        legacy_metric[2],
+                        legacy_metric[3],
+                    ],
                 )
 
-            _append_table_row(
-                csv_path,
-                [
-                    epoch_num,
-                    tile_selected_thr,
-                    tile_metric[0],
-                    tile_metric[1],
-                    tile_metric[2],
-                    tile_metric[3],
-                    tile_continuity["skeleton_dice"],
-                    tile_continuity["centerline_precision"],
-                    tile_continuity["centerline_recall"],
-                    tile_continuity["component_fragmentation"],
-                    legacy_selected_thr,
-                    legacy_metric[0],
-                    legacy_metric[1],
-                    legacy_metric[2],
-                    legacy_metric[3],
-                ],
-            )
+                performance = float(tile_metric[3])
+                if performance > best_performance:
+                    best_performance = performance
+                    best_threshold = float(tile_selected_thr)
+                    patience_counter = 0
+                    save_best_path = os.path.join(snapshot_path, "best_model.pth")
+                    _save_delta_model(model, save_best_path)
+                    with open(os.path.join(snapshot_path, "best_threshold.txt"), "w", encoding="utf-8") as f:
+                        f.write(f"{best_threshold:.4f}\n")
+                    _write_inference_config(snapshot_path, args, best_threshold)
+                    logging.info(
+                        "New best tile_full_box IoU: %f at threshold %.2f. Saved best model to %s"
+                        % (best_performance, best_threshold, save_best_path)
+                    )
+                else:
+                    patience_counter += 1
+                    logging.info("Best tile_full_box IoU did not improve. Patience: %d/%d" % (patience_counter, patience))
 
-            performance = float(tile_metric[3])
-            if performance > best_performance:
-                best_performance = performance
-                best_threshold = float(tile_selected_thr)
-                patience_counter = 0
-                save_best_path = os.path.join(snapshot_path, "best_model.pth")
-                _save_delta_model(model, save_best_path)
-                with open(os.path.join(snapshot_path, "best_threshold.txt"), "w", encoding="utf-8") as f:
-                    f.write(f"{best_threshold:.4f}\n")
-                _write_inference_config(snapshot_path, args, best_threshold)
-                logging.info(
-                    "New best tile_full_box IoU: %f at threshold %.2f. Saved best model to %s"
-                    % (best_performance, best_threshold, save_best_path)
-                )
-            else:
-                patience_counter += 1
-                logging.info("Best tile_full_box IoU did not improve. Patience: %d/%d" % (patience_counter, patience))
-
-            if patience_counter >= patience:
-                logging.info("Early stopping triggered")
-                stop_training = True
+                if patience_counter >= patience:
+                    logging.info("Early stopping triggered")
+                    stop_training = True
 
         scheduler.step()
 

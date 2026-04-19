@@ -6,6 +6,7 @@
 
 from torch_runtime import F, nn, torch
 from typing import Optional, Tuple, Type
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 from .common import LayerNorm2d, MLPBlock
 
 
@@ -50,6 +51,7 @@ class ImageEncoderViT(nn.Module):
         """
         super().__init__()
         self.img_size = img_size
+        self.use_activation_checkpointing = False
 
         self.patch_embed = PatchEmbed(
             kernel_size=(patch_size, patch_size),
@@ -99,13 +101,19 @@ class ImageEncoderViT(nn.Module):
             LayerNorm2d(out_chans),
         )
 
+    def set_activation_checkpointing(self, enabled: bool) -> None:
+        self.use_activation_checkpointing = bool(enabled)
+
     def forward(self, x: torch.Tensor, return_interm_embeddings: bool = False):
         x = self.patch_embed(x)  
         if self.pos_embed is not None:
             x = x + self.pos_embed
         interm_embeddings = [] if return_interm_embeddings else None
         for blk in self.blocks:
-            x = blk(x)
+            if self.use_activation_checkpointing and self.training:
+                x = activation_checkpoint(blk, x, use_reentrant=False)
+            else:
+                x = blk(x)
             if return_interm_embeddings and blk.window_size == 0:
                 interm_embeddings.append(x)
         x = self.neck(x.permute(0, 3, 1, 2))  
