@@ -186,7 +186,10 @@ def _safe_thresholds(args) -> list[float]:
 
 
 def worker_init_fn(worker_id):
-    random.seed(3407 + worker_id)
+    seed = int(torch.initial_seed() % (2 ** 32))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 def _find_mask_path(mask_dir: str, base_name: str) -> str | None:
