@@ -13,10 +13,7 @@ def _normalize_name(name: str) -> str:
         raise ValueError("SQLite table name must not be empty.")
     out = []
     for ch in text:
-        if ch.isalnum() or ch == "_":
-            out.append(ch)
-        else:
-            out.append("_")
+        out.append(ch if ch.isalnum() or ch == "_" else "_")
     normalized = "".join(out)
     if normalized[0].isdigit():
         normalized = f"t_{normalized}"
@@ -47,6 +44,7 @@ class SQLiteRunStore:
             "mode",
             "message",
             "level",
+            "logger",
             "module",
             "path",
             "argv",
@@ -61,9 +59,7 @@ class SQLiteRunStore:
             "case",
             "threshold_source",
         )
-        if any(marker in key for marker in text_markers):
-            return "TEXT"
-        return "REAL"
+        return "TEXT" if any(marker in key for marker in text_markers) else "REAL"
 
     def ensure_table(self, name: str, columns: Iterable[str], column_types: dict[str, str] | None = None) -> str:
         table = _normalize_name(name)
@@ -72,7 +68,6 @@ class SQLiteRunStore:
             raise ValueError(f"Table '{table}' must declare at least one column.")
         if table in self._tables:
             return table
-
         type_map = {str(k): str(v) for k, v in (column_types or {}).items()}
         col_defs = []
         for col in cols:
@@ -99,7 +94,8 @@ class SQLiteRunStore:
         if not prepared_rows:
             return
         placeholders = ", ".join(["?"] * len(cols))
-        sql = f'INSERT INTO "{table}" ({", ".join(f"""\"{col}\"""" for col in cols)}) VALUES ({placeholders})'
+        columns_sql = ", ".join(f'"{col}"' for col in cols)
+        sql = f'INSERT INTO "{table}" ({columns_sql}) VALUES ({placeholders})'
         with self._lock:
             self._conn.executemany(sql, prepared_rows)
             self._conn.commit()
@@ -127,13 +123,14 @@ class SQLiteLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            row = (
-                float(record.created),
-                str(record.levelname),
-                str(record.name),
-                str(record.getMessage()),
+            self._buffer.append(
+                (
+                    float(record.created),
+                    str(record.levelname),
+                    str(record.name),
+                    str(record.getMessage()),
+                )
             )
-            self._buffer.append(row)
             if len(self._buffer) >= self.flush_every:
                 self.flush()
         except Exception:

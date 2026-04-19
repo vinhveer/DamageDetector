@@ -6,6 +6,7 @@ import sys
 
 import numpy as np
 from PIL import Image
+from runtime_lib import SQLiteLogHandler, SQLiteRunStore
 from torch_runtime import DataLoader
 from torch_runtime import cudnn, torch
 from ..backbones.segment_anything import sam_model_registry
@@ -591,13 +592,22 @@ if __name__ == "__main__":
 
     log_folder = os.path.join(args.output_dir, "test_log")
     os.makedirs(log_folder, exist_ok=True)
-    logging.basicConfig(
-        filename=os.path.join(log_folder, "log.txt"),
-        level=logging.INFO,
-        format="[%(asctime)s.%(msecs)03d] %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    log_db_path = os.path.join(log_folder, "test.sqlite3")
+    log_store = SQLiteRunStore(log_db_path)
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+    root_logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("[%(asctime)s.%(msecs)03d] %(message)s", datefmt="%H:%M:%S")
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    sqlite_handler = SQLiteLogHandler(log_store, table_name="logs", flush_every=20)
+    root_logger.addHandler(stream_handler)
+    root_logger.addHandler(sqlite_handler)
 
     args.val_thresholds = sorted(set(float(x) for x in args.val_thresholds if 0.0 < float(x) < 1.0)) or [0.5]
     resolved_mode = resolve_predict_mode(args.delta_ckpt, args.eval_mode)
@@ -645,3 +655,5 @@ if __name__ == "__main__":
         float(primary["best_metric"][3]),
     )
     logging.info("Testing Finished!")
+    sqlite_handler.close()
+    log_store.close()

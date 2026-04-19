@@ -11,7 +11,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
-from ...shared import SQLiteLogHandler, SQLiteRunStore
+from runtime_lib import SQLiteLogHandler, SQLiteRunStore
 
 try:
     from .tiled_inference import (
@@ -105,41 +105,26 @@ def _reduce_sum_scalar(value: float, *, device: torch.device) -> float:
     return float(tensor.item())
 
 
-def _init_csv(path: str, headers: list[str]) -> None:
-    if not path:
+def _init_table(name: str, headers: list[str]) -> None:
+    if not name:
         return
-    if _RUN_STORE is not None:
-        _RUN_STORE.ensure_table(path, headers)
-        return
-    import csv
-
-    with open(path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(headers)
+    if _RUN_STORE is None:
+        raise RuntimeError("SQLite run store is not initialized.")
+    _RUN_STORE.ensure_table(name, headers)
 
 
-def _append_csv_rows(path: str, rows: list[list]) -> None:
+def _append_table_rows(name: str, rows: list[list]) -> None:
     if not rows:
         return
-    if _RUN_STORE is not None:
-        _RUN_STORE.insert_rows(path, rows)
-        return
-    import csv
-
-    with open(path, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerows(rows)
+    if _RUN_STORE is None:
+        raise RuntimeError("SQLite run store is not initialized.")
+    _RUN_STORE.insert_rows(name, rows)
 
 
-def _append_csv_row(path: str, row: list) -> None:
-    if _RUN_STORE is not None:
-        _RUN_STORE.insert_row(path, row)
-        return
-    import csv
-
-    with open(path, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(row)
+def _append_table_row(name: str, row: list) -> None:
+    if _RUN_STORE is None:
+        raise RuntimeError("SQLite run store is not initialized.")
+    _RUN_STORE.insert_row(name, row)
 
 
 def calc_loss(
@@ -482,7 +467,7 @@ def _run_tiled_full_image_eval(
                         float(metrics[3]),
                     ]
                 )
-        _append_csv_rows(case_metrics_csv_path, case_rows)
+        _append_table_rows(case_metrics_csv_path, case_rows)
 
     metric_by_thr = {
         float(thr): metric_by_thr[float(thr)] / max(1, total_cases)
@@ -596,7 +581,7 @@ def _run_legacy_box_eval(
                     ]
                 )
         total_cases += 1
-        _append_csv_rows(case_metrics_csv_path, case_rows)
+        _append_table_rows(case_metrics_csv_path, case_rows)
 
     metric_by_thr = {
         float(thr): metric_by_thr[float(thr)] / max(1, total_cases)
@@ -825,7 +810,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     val_tile_case_csv_path = "val_tile_cases"
     val_legacy_case_csv_path = "val_legacy_cases"
     if is_main_process:
-        _init_csv(
+        _init_table(
             csv_path,
             [
                 "epoch",
@@ -845,11 +830,11 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 "legacy_iou",
             ],
         )
-        _init_csv(
+        _init_table(
             train_step_csv_path,
             ["epoch", "iteration", "loss", "loss_bce", "loss_dice", "loss_tversky", "loss_focal", "loss_cldice", "loss_centerline", "lr"],
         )
-        _init_csv(
+        _init_table(
             train_epoch_csv_path,
             [
                 "epoch",
@@ -867,15 +852,15 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 "background_full_box_only",
             ],
         )
-        _init_csv(
+        _init_table(
             val_threshold_csv_path,
             ["epoch", "mode", "threshold", "precision", "recall", "dice", "iou"],
         )
-        _init_csv(
+        _init_table(
             val_tile_case_csv_path,
             ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
         )
-        _init_csv(
+        _init_table(
             val_legacy_case_csv_path,
             ["epoch", "case_index", "case_name", "threshold", "precision", "recall", "dice", "iou"],
         )
@@ -1037,11 +1022,11 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                     ]
                 )
                 if len(train_step_buffer) >= train_step_flush_every:
-                    _append_csv_rows(train_step_csv_path, train_step_buffer)
+                    _append_table_rows(train_step_csv_path, train_step_buffer)
                     train_step_buffer.clear()
 
         if is_main_process and train_step_buffer:
-            _append_csv_rows(train_step_csv_path, train_step_buffer)
+            _append_table_rows(train_step_csv_path, train_step_buffer)
             train_step_buffer.clear()
 
         total_steps = _reduce_sum_scalar(epoch_step_count, device=device)
@@ -1057,7 +1042,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             for key, value in epoch_prompt_counts.items()
         }
         if is_main_process:
-            _append_csv_rows(
+            _append_table_rows(
                 train_epoch_csv_path,
                 [[
                     int(epoch_num),
@@ -1146,7 +1131,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                         float(tile_by_thr[float(thr)][3]),
                     ]
                 )
-            _append_csv_rows(val_threshold_csv_path, threshold_rows)
+            _append_table_rows(val_threshold_csv_path, threshold_rows)
             logging.info(
                 "Epoch %d val(tile): thr=%.2f pr=%.4f re=%.4f f1=%.4f iou=%.4f"
                 % (epoch_num + 1, tile_selected_thr, tile_metric[0], tile_metric[1], tile_metric[2], tile_metric[3])
@@ -1192,13 +1177,13 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                             float(legacy_by_thr[float(thr)][3]),
                         ]
                     )
-                _append_csv_rows(val_threshold_csv_path, legacy_rows)
+                _append_table_rows(val_threshold_csv_path, legacy_rows)
                 logging.info(
                     "Epoch %d val(legacy): thr=%.2f pr=%.4f re=%.4f f1=%.4f iou=%.4f"
                     % (epoch_num + 1, legacy_selected_thr, legacy_metric[0], legacy_metric[1], legacy_metric[2], legacy_metric[3])
                 )
 
-            _append_csv_row(
+            _append_table_row(
                 csv_path,
                 [
                     epoch_num,

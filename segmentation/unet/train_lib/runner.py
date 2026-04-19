@@ -11,12 +11,12 @@ from torch_runtime import DataLoader
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from PIL import Image
+from runtime_lib import SQLiteLogHandler, SQLiteRunStore
 
 from .collate import collate_skip_none
 from .losses import dice_loss, focal_loss_with_logits
 from .training import train_model
 from ..model_io import build_model_config, save_training_config
-from ...shared import SQLiteLogHandler, SQLiteRunStore
 
 
 def _dataset_api():

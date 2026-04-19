@@ -5,6 +5,7 @@ from tqdm import tqdm
 
 from .metrics import dice_score_from_prob, iou_score_from_prob
 from .visualization import _HAS_MPL, plt, visualize_predictions
+from runtime_lib import SQLiteRunStore
 
 
 def _dist_on():
@@ -176,43 +177,30 @@ def _iter_prefetch(loader, device):
 import logging
 
 from ..model_io import save_checkpoint
-from ...shared import SQLiteRunStore
 
 
-def _init_csv(path, header, sqlite_store: SQLiteRunStore | None = None):
-    if not path:
+def _init_table(name, header, sqlite_store: SQLiteRunStore | None = None):
+    if not name:
         return
-    if sqlite_store is not None:
-        sqlite_store.ensure_table(path, header)
+    if sqlite_store is None:
+        raise RuntimeError("SQLite store is required for training metrics.")
+    sqlite_store.ensure_table(name, header)
+
+
+def _append_table_row(name, row, sqlite_store: SQLiteRunStore | None = None):
+    if not name:
         return
-    import csv
+    if sqlite_store is None:
+        raise RuntimeError("SQLite store is required for training metrics.")
+    sqlite_store.insert_row(name, row)
 
-    with open(path, "w", newline="") as f:
-        csv.writer(f).writerow(header)
 
-
-def _append_csv_row(path, row, sqlite_store: SQLiteRunStore | None = None):
-    if not path:
+def _append_table_rows(name, rows, sqlite_store: SQLiteRunStore | None = None):
+    if not name or not rows:
         return
-    if sqlite_store is not None:
-        sqlite_store.insert_row(path, row)
-        return
-    import csv
-
-    with open(path, "a", newline="") as f:
-        csv.writer(f).writerow(row)
-
-
-def _append_csv_rows(path, rows, sqlite_store: SQLiteRunStore | None = None):
-    if not path or not rows:
-        return
-    if sqlite_store is not None:
-        sqlite_store.insert_rows(path, rows)
-        return
-    import csv
-
-    with open(path, "a", newline="") as f:
-        csv.writer(f).writerows(rows)
+    if sqlite_store is None:
+        raise RuntimeError("SQLite store is required for training metrics.")
+    sqlite_store.insert_rows(name, rows)
 
 
 def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, model_config=None, csv_paths=None, grad_accum_steps=1, use_amp=False):
@@ -246,17 +234,17 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     val_thresholds_csv = csv_paths.get("val_thresholds")
 
     if is_main:
-        _init_csv(
+        _init_table(
             train_steps_csv,
             ["epoch", "step_in_epoch", "global_step", "loss", "loss_bce", "loss_dice", "loss_focal", "lr"],
             sqlite_store=sqlite_store,
         )
-        _init_csv(
+        _init_table(
             train_epochs_csv,
             ["epoch", "train_loss", "lr"],
             sqlite_store=sqlite_store,
         )
-        _init_csv(
+        _init_table(
             val_csv,
             [
                 "epoch",
@@ -273,7 +261,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             ],
             sqlite_store=sqlite_store,
         )
-        _init_csv(
+        _init_table(
             val_thresholds_csv,
             ["epoch", "threshold", "dice", "iou"],
             sqlite_store=sqlite_store,
@@ -341,7 +329,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                     ]
                 )
                 if len(train_step_buffer) >= train_step_flush_every:
-                    _append_csv_rows(train_steps_csv, train_step_buffer, sqlite_store=sqlite_store)
+                    _append_table_rows(train_steps_csv, train_step_buffer, sqlite_store=sqlite_store)
                     train_step_buffer.clear()
 
         train_loss_sum = _all_reduce_sum(train_loss, device=device)
@@ -352,7 +340,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             avg_train_loss = train_loss_sum / max(1.0, train_steps_sum)
         train_losses.append(avg_train_loss)
         if is_main and train_step_buffer:
-            _append_csv_rows(train_steps_csv, train_step_buffer, sqlite_store=sqlite_store)
+            _append_table_rows(train_steps_csv, train_step_buffer, sqlite_store=sqlite_store)
             train_step_buffer.clear()
 
         # Validation phase
@@ -518,8 +506,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             logging.info(f"Current learning rate: {current_lr:.7f}")
 
         if is_main:
-            _append_csv_row(train_epochs_csv, [epoch + 1, avg_train_loss, float(current_lr)], sqlite_store=sqlite_store)
-            _append_csv_row(
+            _append_table_row(train_epochs_csv, [epoch + 1, avg_train_loss, float(current_lr)], sqlite_store=sqlite_store)
+            _append_table_row(
                 val_csv,
                 [
                     epoch + 1,
@@ -542,7 +530,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                     threshold_rows.append(
                         [epoch + 1, float(t), float(val_thr_report[t]["dice_avg"]), float(val_thr_report[t]["iou_avg"])]
                     )
-                _append_csv_rows(val_thresholds_csv, threshold_rows, sqlite_store=sqlite_store)
+                _append_table_rows(val_thresholds_csv, threshold_rows, sqlite_store=sqlite_store)
 
         metrics = {
             "train_loss": avg_train_loss,

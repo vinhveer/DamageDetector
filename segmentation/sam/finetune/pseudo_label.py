@@ -1,10 +1,10 @@
 import argparse
-import csv
 import os
 import shutil
 
 import cv2
 import numpy as np
+from runtime_lib import SQLiteRunStore
 from torch_runtime import cudnn, torch
 from ..backbones.segment_anything import sam_model_registry
 
@@ -203,10 +203,18 @@ if __name__ == "__main__":
     image_names = _dataset_api().list_image_files(image_dir)
     tile_size, tile_overlap = resolve_tile_settings(args.delta_ckpt, args.tile_size, args.tile_overlap)
     threshold = resolve_predict_threshold(args.delta_ckpt, args.pred_threshold)
-    meta_path = os.path.join(args.output_root, "pseudo_label_metadata.csv")
-    with open(meta_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["image_name", "positive_pixels", "positive_confidence", "saved"])
+    meta_store = SQLiteRunStore(os.path.join(args.output_root, "pseudo_labels.sqlite3"))
+    meta_table = meta_store.ensure_table(
+        "pseudo_label_metadata",
+        ["image_name", "positive_pixels", "positive_confidence", "saved"],
+        column_types={
+            "image_name": "TEXT",
+            "positive_pixels": "REAL",
+            "positive_confidence": "REAL",
+            "saved": "REAL",
+        },
+    )
+    try:
         for image_name in image_names:
             image_path = os.path.join(image_dir, image_name)
             image_hwc = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
@@ -249,7 +257,7 @@ if __name__ == "__main__":
             positive_pixels = int(pred_mask.sum())
             positive_conf = float(score_map[pred_mask > 0].mean()) if positive_pixels > 0 else 0.0
             saved = int(positive_pixels >= int(args.min_positive_pixels) and positive_conf >= float(args.min_positive_confidence))
-            writer.writerow([image_name, positive_pixels, positive_conf, saved])
+            meta_store.insert_row(meta_table, [image_name, positive_pixels, positive_conf, saved])
             if not saved:
                 continue
 
@@ -262,5 +270,7 @@ if __name__ == "__main__":
                     os.remove(dst_img)
                 os.symlink(os.path.abspath(image_path), dst_img)
             cv2.imwrite(dst_mask, pred_mask * 255)
+    finally:
+        meta_store.close()
 
     print(f"Saved pseudo labels to {args.output_root}")
