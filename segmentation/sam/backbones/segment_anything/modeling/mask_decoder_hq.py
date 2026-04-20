@@ -14,9 +14,7 @@ class MaskDecoderHQ(nn.Module):
         "embedding_maskfeature",
     )
     balanced_trainable_prefixes = hq_trainable_prefixes + (
-        "iou_token",
         "mask_tokens",
-        "iou_prediction_head",
         "output_hypernetworks_mlps.0",
         "centerline_head",
     )
