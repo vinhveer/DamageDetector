@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import sys
+from contextlib import nullcontext
 
 import numpy as np
 from torch_runtime import DataLoader, get_torch_utils_data
@@ -85,7 +86,10 @@ def _is_main_process() -> bool:
 
 def _barrier() -> None:
     if _dist_is_ready():
-        dist.barrier()
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[torch.cuda.current_device()])
+        else:
+            dist.barrier()
 
 
 def _reduce_mean_scalar(value: float, *, device: torch.device) -> float:
@@ -777,7 +781,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             model,
             device_ids=[int(getattr(args, "local_rank", 0))],
             output_device=int(getattr(args, "local_rank", 0)),
-            find_unused_parameters=True,
+            broadcast_buffers=False,
+            find_unused_parameters=bool(getattr(args, "ddp_find_unused_parameters", False)),
         )
     elif args.n_gpu > 1:
         raise RuntimeError("Multi-GPU training requires torchrun/DDP. DataParallel fallback has been removed.")
@@ -850,10 +855,17 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     from torch.optim.lr_scheduler import CosineAnnealingLR
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.max_epochs, eta_min=1e-6)
-    scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp) if args.use_amp else None
+    if args.use_amp:
+        if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+            scaler = torch.amp.GradScaler("cuda", enabled=True)
+        else:
+            scaler = torch.cuda.amp.GradScaler(enabled=True)
+    else:
+        scaler = None
     iter_num = 0
     optimizer_step_num = 0
     grad_accum_steps = max(1, int(getattr(args, "grad_accum_steps", 1)))
+    params_to_clip = [parameter for parameter in (lora_params + decoder_params) if parameter.requires_grad]
 
     max_epoch = args.max_epochs
     stop_epoch = args.stop_epoch
@@ -973,6 +985,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         epoch_step_count = 0
         optimizer.zero_grad(set_to_none=True)
         for batch_index, sampled_batch in enumerate(trainloader):
+            should_step = ((batch_index + 1) % grad_accum_steps == 0) or ((batch_index + 1) == len(trainloader))
+            ddp_no_sync = bool(getattr(args, "distributed", False)) and grad_accum_steps > 1 and not should_step and hasattr(model, "no_sync")
             image_batch = sampled_batch["image"].cuda()
             label_batch = sampled_batch["label"].cuda()
 
@@ -993,8 +1007,30 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 for key, value in prompt_counts.items():
                     epoch_prompt_counts[key] += int(value)
 
-            if args.use_amp:
-                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=args.use_amp):
+            sync_context = model.no_sync() if ddp_no_sync else nullcontext()
+            with sync_context:
+                if args.use_amp:
+                    with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=args.use_amp):
+                        outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)
+                        loss, loss_bce, loss_dice, loss_tversky, loss_focal, loss_cldice_value_t, loss_centerline_value_t = calc_loss(
+                            outputs,
+                            label_batch,
+                            bce_loss,
+                            dice_loss,
+                            tversky_loss,
+                            focal_loss,
+                            cldice_loss,
+                            centerline_loss,
+                            bce_weight=args.bce_weight,
+                            dice_weight=args.dice_weight,
+                            tversky_weight=args.tversky_weight,
+                            focal_weight=args.focal_weight,
+                            cldice_weight=getattr(args, "cldice_weight", 0.0),
+                            centerline_aux_weight=getattr(args, "centerline_aux_weight", 0.0),
+                        )
+                    loss_to_backprop = loss / grad_accum_steps
+                    scaler.scale(loss_to_backprop).backward()
+                else:
                     outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)
                     loss, loss_bce, loss_dice, loss_tversky, loss_focal, loss_cldice_value_t, loss_centerline_value_t = calc_loss(
                         outputs,
@@ -1012,34 +1048,14 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                         cldice_weight=getattr(args, "cldice_weight", 0.0),
                         centerline_aux_weight=getattr(args, "centerline_aux_weight", 0.0),
                     )
-                loss_to_backprop = loss / grad_accum_steps
-                scaler.scale(loss_to_backprop).backward()
-            else:
-                outputs = model(image_batch, multimask_output, args.img_size, boxes=box_batch, points=points_batch)
-                loss, loss_bce, loss_dice, loss_tversky, loss_focal, loss_cldice_value_t, loss_centerline_value_t = calc_loss(
-                    outputs,
-                    label_batch,
-                    bce_loss,
-                    dice_loss,
-                    tversky_loss,
-                    focal_loss,
-                    cldice_loss,
-                    centerline_loss,
-                    bce_weight=args.bce_weight,
-                    dice_weight=args.dice_weight,
-                    tversky_weight=args.tversky_weight,
-                    focal_weight=args.focal_weight,
-                    cldice_weight=getattr(args, "cldice_weight", 0.0),
-                    centerline_aux_weight=getattr(args, "centerline_aux_weight", 0.0),
-                )
-                loss_to_backprop = loss / grad_accum_steps
-                loss_to_backprop.backward()
+                    loss_to_backprop = loss / grad_accum_steps
+                    loss_to_backprop.backward()
 
-            should_step = ((batch_index + 1) % grad_accum_steps == 0) or ((batch_index + 1) == len(trainloader))
             if should_step:
                 if args.use_amp:
                     scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                if params_to_clip:
+                    torch.nn.utils.clip_grad_norm_(params_to_clip, max_norm=1.0)
 
                 if args.warmup and optimizer_step_num < args.warmup_period:
                     warmup_factor = (optimizer_step_num + 1) / args.warmup_period

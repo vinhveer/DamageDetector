@@ -61,6 +61,7 @@ parser.add_argument('--num_workers', type=int, default=8, help='number of datalo
 parser.add_argument('--patches_per_image', type=int, default=1, help='number of random patches to crop per image per epoch')
 parser.add_argument('--grad_accum_steps', type=int, default=1, help='Gradient accumulation steps per optimizer update')
 parser.add_argument('--activation_checkpointing', action='store_true', help='Enable activation checkpointing for the SAM ViT image encoder blocks')
+parser.add_argument('--ddp_find_unused', type=str, default='auto', choices=['auto', 'on', 'off'], help='DDP unused-parameter detection policy')
 parser.add_argument('--run_name', type=str, default='', help='Optional suffix added to the snapshot directory name to avoid collisions between runs')
 parser.add_argument('--profile', type=str, default='custom', choices=['custom', 'speed', 'balanced', 'research'], help='High-level training preset that fills in default knobs unless you override them')
 parser.add_argument('--train_use_boxes', type=int, default=1, help='Use box prompts during training')
@@ -170,6 +171,8 @@ def _run_manifest(args, snapshot_path: str) -> dict:
         "delta_type": str(getattr(args, "delta_type", "")),
         "decoder_type": str(getattr(args, "decoder_type", "")),
         "activation_checkpointing": bool(getattr(args, "activation_checkpointing", False)),
+        "ddp_find_unused": str(getattr(args, "ddp_find_unused", "auto")),
+        "ddp_find_unused_parameters": bool(getattr(args, "ddp_find_unused_parameters", False)),
     }
 
 
@@ -202,6 +205,8 @@ def _warn_existing_snapshot(snapshot_path: str, args) -> None:
         "delta_type",
         "decoder_type",
         "activation_checkpointing",
+        "ddp_find_unused",
+        "ddp_find_unused_parameters",
     ):
         if old_manifest.get(key) != new_manifest.get(key):
             mismatches.append(f"{key}: old={old_manifest.get(key)!r} new={new_manifest.get(key)!r}")
@@ -237,6 +242,63 @@ def _configure_activation_checkpointing(net, enabled: bool) -> None:
         image_encoder.set_activation_checkpointing(bool(enabled))
     else:
         image_encoder.use_activation_checkpointing = bool(enabled)
+
+
+def _set_module_requires_grad(module, enabled: bool) -> int:
+    if module is None:
+        return 0
+    changed = 0
+    for parameter in module.parameters():
+        if bool(parameter.requires_grad) != bool(enabled):
+            parameter.requires_grad = bool(enabled)
+            changed += 1
+    return changed
+
+
+def _configure_decoder_training_objective(net, *, centerline_aux_weight: float, multimask_output: bool) -> list[str]:
+    sam_model = getattr(net, "sam", net)
+    mask_decoder = getattr(sam_model, "mask_decoder", None)
+    if mask_decoder is None:
+        return []
+
+    frozen_groups: list[str] = []
+
+    if _set_module_requires_grad(getattr(mask_decoder, "iou_token", None), False):
+        frozen_groups.append("iou_token")
+    if _set_module_requires_grad(getattr(mask_decoder, "iou_prediction_head", None), False):
+        frozen_groups.append("iou_prediction_head")
+
+    hypernets = getattr(mask_decoder, "output_hypernetworks_mlps", None)
+    if isinstance(hypernets, torch.nn.ModuleList) and not bool(multimask_output):
+        frozen_count = 0
+        for index in range(1, len(hypernets)):
+            frozen_count += _set_module_requires_grad(hypernets[index], False)
+        if frozen_count > 0:
+            frozen_groups.append("output_hypernetworks_mlps[1:]")
+
+    if float(centerline_aux_weight) <= 0.0:
+        if _set_module_requires_grad(getattr(mask_decoder, "centerline_head", None), False):
+            frozen_groups.append("centerline_head")
+
+    return frozen_groups
+
+
+def _resolve_ddp_find_unused(args, net) -> bool:
+    mode = str(getattr(args, "ddp_find_unused", "auto")).strip().lower()
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+
+    trainable_names = [name for name, parameter in net.named_parameters() if parameter.requires_grad]
+    if float(getattr(args, "centerline_aux_weight", 0.0)) <= 0.0 and any(
+        "mask_decoder.centerline_head" in name for name in trainable_names
+    ):
+        return True
+    return any(
+        ("mask_decoder.iou_token" in name) or ("mask_decoder.iou_prediction_head" in name)
+        for name in trainable_names
+    )
 
 
 def _apply_hq_balancing_defaults(args) -> None:
@@ -319,10 +381,14 @@ if __name__ == "__main__":
             "Multi-GPU SAM finetune now requires torchrun/DDP. "
             "Launch with torchrun --standalone --nproc_per_node=<num_gpus> -m segmentation.sam.finetune.train ..."
         )
-    if args.distributed and not dist.is_initialized():
-        dist.init_process_group(backend="nccl", init_method="env://")
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank if args.distributed else 0)
+    if args.distributed and not dist.is_initialized():
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            device_id=torch.device("cuda", int(local_rank)),
+        )
     if args.tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -355,7 +421,7 @@ if __name__ == "__main__":
         _warn_existing_snapshot(snapshot_path, args)
     os.makedirs(snapshot_path, exist_ok=True)
     if args.distributed:
-        dist.barrier()
+        dist.barrier(device_ids=[int(local_rank)])
 
     # register model
     sam, img_embedding_size = sam_model_registry[args.vit_name](image_size=args.img_size,
@@ -384,6 +450,12 @@ if __name__ == "__main__":
     _configure_activation_checkpointing(net, bool(getattr(args, "activation_checkpointing", False)))
 
     multimask_output = False
+    frozen_decoder_groups = _configure_decoder_training_objective(
+        net,
+        centerline_aux_weight=float(getattr(args, "centerline_aux_weight", 0.0)),
+        multimask_output=bool(multimask_output),
+    )
+    args.ddp_find_unused_parameters = _resolve_ddp_find_unused(args, net)
 
     low_res = img_embedding_size * 4  # It's better to use high resolution in crack segmentation
 
@@ -411,10 +483,18 @@ if __name__ == "__main__":
     total_params_train = sum(p.numel() for p in net.parameters() if p.requires_grad)
     if global_rank == 0:
         print(f"Total number of trainable parameters:{total_params_train}")
+        if frozen_decoder_groups:
+            print("Frozen unsupervised decoder groups: " + ", ".join(frozen_decoder_groups))
+        if args.distributed:
+            print(
+                "DDP tuning: "
+                f"find_unused_parameters={bool(getattr(args, 'ddp_find_unused_parameters', False))} "
+                "broadcast_buffers=False"
+            )
 
     try:
         trainer_generic(args, net, snapshot_path, multimask_output, low_res)
     finally:
         if args.distributed and dist.is_initialized():
-            dist.barrier()
+            dist.barrier(device_ids=[int(local_rank)])
             dist.destroy_process_group()
