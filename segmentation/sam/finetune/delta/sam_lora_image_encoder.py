@@ -139,13 +139,15 @@ class LoRA_Sam(nn.Module):
 
         for i, w_A_linear in enumerate(self.w_As):
             saved_key = f"w_a_{i:03d}"
-            saved_tensor = state_dict[saved_key]
-            w_A_linear.weight = Parameter(saved_tensor)
+            saved_tensor = state_dict[saved_key].to(device=w_A_linear.weight.device, dtype=w_A_linear.weight.dtype)
+            with torch.no_grad():
+                w_A_linear.weight.copy_(saved_tensor)
 
         for i, w_B_linear in enumerate(self.w_Bs):
             saved_key = f"w_b_{i:03d}"
-            saved_tensor = state_dict[saved_key]
-            w_B_linear.weight = Parameter(saved_tensor)
+            saved_tensor = state_dict[saved_key].to(device=w_B_linear.weight.device, dtype=w_B_linear.weight.dtype)
+            with torch.no_grad():
+                w_B_linear.weight.copy_(saved_tensor)
 
         sam_dict = self.sam.state_dict()
         sam_keys = sam_dict.keys()
@@ -171,4 +173,3 @@ class LoRA_Sam(nn.Module):
 
     def forward(self, batched_input, multimask_output, image_size, boxes=None, points=None):
         return self.sam(batched_input, multimask_output, image_size, boxes=boxes, points=points)
-

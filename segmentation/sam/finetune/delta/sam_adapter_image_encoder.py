@@ -161,37 +161,41 @@ class Adapter_Sam(nn.Module):
         for i, w_down_linear_attn in enumerate(self.w_down_attn):
             saved_key = f"w_a_{i:03d}"
             saved_key_bia = f"w_a_{i:03d}_bia"
-            saved_tensor = state_dict[saved_key]
-            saved_tensor_bia = state_dict[saved_key_bia]            
-            w_down_linear_attn.weight = Parameter(saved_tensor)
-            w_down_linear_attn.bias = Parameter(saved_tensor_bia)
+            saved_tensor = state_dict[saved_key].to(device=w_down_linear_attn.weight.device, dtype=w_down_linear_attn.weight.dtype)
+            saved_tensor_bia = state_dict[saved_key_bia].to(device=w_down_linear_attn.bias.device, dtype=w_down_linear_attn.bias.dtype)
+            with torch.no_grad():
+                w_down_linear_attn.weight.copy_(saved_tensor)
+                w_down_linear_attn.bias.copy_(saved_tensor_bia)
 
 
         for i, w_up_linear_attn in enumerate(self.w_up_attn):
             saved_key = f"w_b_{i:03d}"
             saved_key_bia = f"w_b_{i:03d}_bia"
-            saved_tensor = state_dict[saved_key]
-            saved_tensor_bia = state_dict[saved_key_bia]            
-            w_up_linear_attn.weight = Parameter(saved_tensor)
-            w_up_linear_attn.bias = Parameter(saved_tensor_bia)
+            saved_tensor = state_dict[saved_key].to(device=w_up_linear_attn.weight.device, dtype=w_up_linear_attn.weight.dtype)
+            saved_tensor_bia = state_dict[saved_key_bia].to(device=w_up_linear_attn.bias.device, dtype=w_up_linear_attn.bias.dtype)
+            with torch.no_grad():
+                w_up_linear_attn.weight.copy_(saved_tensor)
+                w_up_linear_attn.bias.copy_(saved_tensor_bia)
 
 
         for i, w_down_linear_mlp in enumerate(self.w_down_mlp):
             saved_key = f"w_c_{i:03d}"
             saved_key_bia = f"w_c_{i:03d}_bia"
-            saved_tensor = state_dict[saved_key]
-            saved_tensor_bia = state_dict[saved_key_bia]            
-            w_down_linear_mlp.weight = Parameter(saved_tensor)
-            w_down_linear_mlp.bias = Parameter(saved_tensor_bia)
+            saved_tensor = state_dict[saved_key].to(device=w_down_linear_mlp.weight.device, dtype=w_down_linear_mlp.weight.dtype)
+            saved_tensor_bia = state_dict[saved_key_bia].to(device=w_down_linear_mlp.bias.device, dtype=w_down_linear_mlp.bias.dtype)
+            with torch.no_grad():
+                w_down_linear_mlp.weight.copy_(saved_tensor)
+                w_down_linear_mlp.bias.copy_(saved_tensor_bia)
 
 
         for i, w_up_linear_mlp in enumerate(self.w_up_mlp):
             saved_key = f"w_d_{i:03d}"
             saved_key_bia = f"w_d_{i:03d}_bia"
-            saved_tensor = state_dict[saved_key]
-            saved_tensor_bia = state_dict[saved_key_bia]            
-            w_up_linear_mlp.weight = Parameter(saved_tensor)
-            w_up_linear_mlp.bias = Parameter(saved_tensor_bia)
+            saved_tensor = state_dict[saved_key].to(device=w_up_linear_mlp.weight.device, dtype=w_up_linear_mlp.weight.dtype)
+            saved_tensor_bia = state_dict[saved_key_bia].to(device=w_up_linear_mlp.bias.device, dtype=w_up_linear_mlp.bias.dtype)
+            with torch.no_grad():
+                w_up_linear_mlp.weight.copy_(saved_tensor)
+                w_up_linear_mlp.bias.copy_(saved_tensor_bia)
 
 
         sam_dict = self.sam.state_dict()
@@ -213,5 +217,4 @@ class Adapter_Sam(nn.Module):
 
     def forward(self, batched_input, multimask_output, image_size, boxes=None, points=None):
         return self.sam(batched_input, multimask_output, image_size, boxes=boxes, points=points)
-
 
