@@ -117,6 +117,21 @@ def _reduce_sum_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return reduced
 
 
+def _broadcast_auto_pos_weight(auto_info, *, device: torch.device):
+    if not _dist_is_ready():
+        return auto_info
+    payload = torch.zeros(4, device=device, dtype=torch.float64)
+    if _is_main_process() and auto_info is not None:
+        payload[0] = 1.0
+        payload[1] = float(auto_info[0])
+        payload[2] = float(auto_info[1])
+        payload[3] = float(auto_info[2])
+    dist.broadcast(payload, src=0)
+    if float(payload[0].item()) <= 0.0:
+        return None
+    return float(payload[1].item()), float(payload[2].item()), int(round(float(payload[3].item())))
+
+
 def _all_gather_object(value):
     if not _dist_is_ready():
         return [value]
@@ -689,7 +704,8 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         stream_handler = logging.StreamHandler(sys.stdout)
         stream_handler.setFormatter(formatter)
         logger.addHandler(stream_handler)
-    logging.info(str(args))
+    if is_main_process:
+        logging.info(str(args))
 
     base_lr = args.base_lr
     batch_size = int(args.batch_size)
@@ -790,21 +806,26 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     pos_weight_value = args.pos_weight
     auto_requested = isinstance(pos_weight_value, str) and str(pos_weight_value).lower() == "auto"
     if auto_requested:
-        auto_info = _estimate_pos_weight_across_roots(
-            train_roots,
-            sample_size=int(getattr(args, "pos_weight_sample", 200)),
-            min_weight=float(getattr(args, "pos_weight_min", 1.0)),
-            max_weight=float(getattr(args, "pos_weight_max", 20.0)),
-        )
+        auto_info = None
+        if (not _dist_is_ready()) or _is_main_process():
+            auto_info = _estimate_pos_weight_across_roots(
+                train_roots,
+                sample_size=int(getattr(args, "pos_weight_sample", 200)),
+                min_weight=float(getattr(args, "pos_weight_min", 1.0)),
+                max_weight=float(getattr(args, "pos_weight_max", 20.0)),
+            )
+        auto_info = _broadcast_auto_pos_weight(auto_info, device=device)
         if auto_info is None:
             pos_weight_value = 1.0
-            logging.info("Auto pos_weight failed. Falling back to 1.0.")
+            if is_main_process:
+                logging.info("Auto pos_weight failed. Falling back to 1.0.")
         else:
             pos_weight_value, pos_ratio, used = auto_info
-            logging.info(
-                "Auto pos_weight: %.2f (pos_ratio=%.4f, samples=%d)"
-                % (float(pos_weight_value), float(pos_ratio), int(used))
-            )
+            if is_main_process:
+                logging.info(
+                    "Auto pos_weight: %.2f (pos_ratio=%.4f, samples=%d)"
+                    % (float(pos_weight_value), float(pos_ratio), int(used))
+                )
     else:
         pos_weight_value = float(pos_weight_value)
 
