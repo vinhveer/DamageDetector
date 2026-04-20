@@ -952,7 +952,6 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 )
             )
 
-    iterator = tqdm(range(max_epoch), ncols=70, disable=not is_main_process)
     best_performance = 0.0
     best_threshold = None
     patience = max_epoch
@@ -963,7 +962,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
     if is_main_process:
         _write_inference_config(snapshot_path, args, best_threshold)
 
-    for epoch_num in iterator:
+    for epoch_num in range(max_epoch):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch_num)
         if val_sampler is not None:
@@ -984,7 +983,17 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
         epoch_loss_centerline_sum = 0.0
         epoch_step_count = 0
         optimizer.zero_grad(set_to_none=True)
-        for batch_index, sampled_batch in enumerate(trainloader):
+        train_iter = (
+            tqdm(
+                trainloader,
+                desc=f"Epoch {epoch_num + 1}/{max_epoch} [Train]",
+                ncols=100,
+                disable=not is_main_process,
+            )
+            if is_main_process
+            else trainloader
+        )
+        for batch_index, sampled_batch in enumerate(train_iter):
             should_step = ((batch_index + 1) % grad_accum_steps == 0) or ((batch_index + 1) == len(trainloader))
             ddp_no_sync = bool(getattr(args, "distributed", False)) and grad_accum_steps > 1 and not should_step and hasattr(model, "no_sync")
             image_batch = sampled_batch["image"].cuda()
@@ -1106,10 +1115,20 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 if len(train_step_buffer) >= train_step_flush_every:
                     _append_table_rows(train_step_csv_path, train_step_buffer)
                     train_step_buffer.clear()
+                if hasattr(train_iter, "set_postfix"):
+                    running_loss = epoch_loss_sum / max(1, epoch_step_count)
+                    train_iter.set_postfix(
+                        step=f"{batch_index + 1}/{len(trainloader)}",
+                        loss=f"{loss_value:.4f}",
+                        avg=f"{running_loss:.4f}",
+                        lr=f"{float(lr_):.2e}",
+                    )
 
         if is_main_process and train_step_buffer:
             _append_table_rows(train_step_csv_path, train_step_buffer)
             train_step_buffer.clear()
+        if is_main_process and hasattr(train_iter, "close"):
+            train_iter.close()
 
         total_steps = _reduce_sum_scalar(epoch_step_count, device=device)
         mean_loss = _reduce_sum_scalar(epoch_loss_sum, device=device) / max(1.0, total_steps)
@@ -1333,7 +1352,6 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
                 save_mode_path = os.path.join(snapshot_path, "epoch_" + str(epoch_num) + ".pth")
                 _save_delta_model(model, save_mode_path)
                 logging.info("save model to %s" % save_mode_path)
-            iterator.close()
             break
 
     if is_main_process and _RUN_STORE is not None:
