@@ -777,7 +777,7 @@ def trainer_generic(args, model, snapshot_path, multimask_output, low_res):
             model,
             device_ids=[int(getattr(args, "local_rank", 0))],
             output_device=int(getattr(args, "local_rank", 0)),
-            find_unused_parameters=False,
+            find_unused_parameters=True,
         )
     elif args.n_gpu > 1:
         raise RuntimeError("Multi-GPU training requires torchrun/DDP. DataParallel fallback has been removed.")
