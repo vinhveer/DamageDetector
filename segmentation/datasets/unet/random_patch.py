@@ -199,12 +199,15 @@ class RandomPatchDataset(Dataset):
                 std = torch.tensor([0.229, 0.224, 0.225], dtype=image.dtype).view(3, 1, 1)
                 image = (image - mean) / std
 
-            # Mask: [H, W] -> [1, H, W], float32 [0, 1]
+            # Mask: keep binary labels robust across both float masks and uint8 0/1 masks.
+            # torchvision.ToTensor() divides uint8 by 255, so passing a 0/1 uint8 mask would
+            # turn positives into 1/255 and the later >0.5 threshold would erase them.
+            mask_binary = ((np.asarray(mask_np) > 0).astype(np.uint8) * 255)
             if self.mask_transform is not None:
-                mask = self.mask_transform(Image.fromarray(mask_np))
+                mask = self.mask_transform(Image.fromarray(mask_binary, mode="L"))
                 mask = (mask > 0.5).float()
             else:
-                mask = (mask_np > 127).astype(np.float32)
+                mask = (mask_binary > 0).astype(np.float32)
                 mask = torch.from_numpy(mask).unsqueeze(0)
 
             return image, mask
