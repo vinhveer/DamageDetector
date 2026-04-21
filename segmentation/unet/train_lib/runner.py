@@ -327,7 +327,7 @@ def run_training(args):
     pin_memory = args.pin_memory
     if pin_memory is None:
         pin_memory = device.type == "cuda"
-    loader_kwargs = {
+    train_loader_kwargs = {
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
         "collate_fn": collate_skip_none,
@@ -335,42 +335,49 @@ def run_training(args):
     }
     if args.num_workers > 0:
         if bool(args.persistent_workers):
-            loader_kwargs["persistent_workers"] = True
+            train_loader_kwargs["persistent_workers"] = True
         prefetch_factor = int(args.prefetch_factor) if args.prefetch_factor is not None else None
         if prefetch_factor and prefetch_factor > 0:
-            loader_kwargs["prefetch_factor"] = prefetch_factor
+            train_loader_kwargs["prefetch_factor"] = prefetch_factor
+    val_loader_kwargs = dict(train_loader_kwargs)
     try:
         train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
-        val_sampler = DistributedSampler(val_dataset, shuffle=False) if is_distributed else None
+        use_distributed_val_sampler = is_distributed and val_preprocess != "patch"
+        val_sampler = DistributedSampler(val_dataset, shuffle=False) if use_distributed_val_sampler else None
         train_loader = DataLoader(
             train_dataset,
             shuffle=(train_sampler is None),
             sampler=train_sampler,
-            **loader_kwargs,
+            **train_loader_kwargs,
         )
         val_loader = DataLoader(
             val_dataset,
             shuffle=False,
             sampler=val_sampler,
-            **loader_kwargs,
+            **val_loader_kwargs,
         )
     except TypeError:
-        loader_kwargs.pop("persistent_workers", None)
-        loader_kwargs.pop("prefetch_factor", None)
+        train_loader_kwargs.pop("persistent_workers", None)
+        train_loader_kwargs.pop("prefetch_factor", None)
+        val_loader_kwargs.pop("persistent_workers", None)
+        val_loader_kwargs.pop("prefetch_factor", None)
         train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
-        val_sampler = DistributedSampler(val_dataset, shuffle=False) if is_distributed else None
+        use_distributed_val_sampler = is_distributed and val_preprocess != "patch"
+        val_sampler = DistributedSampler(val_dataset, shuffle=False) if use_distributed_val_sampler else None
         train_loader = DataLoader(
             train_dataset,
             shuffle=(train_sampler is None),
             sampler=train_sampler,
-            **loader_kwargs,
+            **train_loader_kwargs,
         )
         val_loader = DataLoader(
             val_dataset,
             shuffle=False,
             sampler=val_sampler,
-            **loader_kwargs,
+            **val_loader_kwargs,
         )
+    if rank == 0 and is_distributed and val_preprocess == "patch":
+        print("DDP val sampler disabled for tiled validation to avoid cross-rank tile reconstruction OOM.")
 
     # Model: Using Segmentation Models Pytorch (SMP) for SOTA backbones
     import segmentation_models_pytorch as smp

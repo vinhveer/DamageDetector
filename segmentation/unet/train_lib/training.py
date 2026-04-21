@@ -141,6 +141,13 @@ def _broadcast_optional_metrics(metrics, device):
     return payload[0]
 
 
+def _loader_uses_distributed_sampler(loader):
+    sampler = getattr(loader, "sampler", None)
+    if sampler is None:
+        return False
+    return sampler.__class__.__name__ == "DistributedSampler"
+
+
 def _iter_prefetch(loader, device):
     if device.type != "cuda":
         for batch in loader:
@@ -426,14 +433,21 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         threshold_values = sorted(set(threshold_values))
         reconstructed_metrics = None
         if _dist_any(has_tile_metadata, device):
-            reconstructed_tile_predictions = _gather_reconstructed_tiles(tile_predictions)
-            if reconstructed_tile_predictions:
+            if _loader_uses_distributed_sampler(val_loader):
+                reconstructed_tile_predictions = _gather_reconstructed_tiles(tile_predictions)
+                if reconstructed_tile_predictions:
+                    reconstructed_metrics = _compute_reconstructed_metrics(
+                        reconstructed_tile_predictions,
+                        threshold_values,
+                        metric_threshold,
+                    )
+                reconstructed_metrics = _broadcast_optional_metrics(reconstructed_metrics, device)
+            elif tile_predictions:
                 reconstructed_metrics = _compute_reconstructed_metrics(
-                    reconstructed_tile_predictions,
+                    tile_predictions,
                     threshold_values,
                     metric_threshold,
                 )
-            reconstructed_metrics = _broadcast_optional_metrics(reconstructed_metrics, device)
         sweep_best_iou = avg_val_iou = 0.0 if val_steps == 0 else None
         sweep_best_dice = avg_val_dice = 0.0 if val_steps == 0 else None
         sweep_best_iou_thr = metric_threshold
