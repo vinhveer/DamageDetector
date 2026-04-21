@@ -76,8 +76,8 @@ parser.add_argument(
     '--augment_profile',
     type=str,
     default='balanced',
-    choices=['light', 'balanced', 'aggressive', 'strong'],
-    help='Augmentation profile for crack segmentation: light, balanced, or aggressive/strong',
+    choices=['light', 'balanced', 'aggressive', 'strong', 'outdomain', 'advanced'],
+    help='Augmentation profile for crack segmentation: light, balanced, aggressive/strong, or outdomain/advanced',
 )
 parser.add_argument('--tversky_alpha', type=float, default=0.3, help='False-positive weight in Tversky loss')
 parser.add_argument('--tversky_beta', type=float, default=0.7, help='False-negative weight in Tversky loss')
@@ -354,7 +354,7 @@ def _apply_profile_defaults(args) -> None:
             "continuity_eval_interval": 1,
         },
         "research": {
-            "augment_profile": "light",
+            "augment_profile": "outdomain",
             "crop_policy": "smart",
             "tile_batch_size": 4,
             "refine_batch_size": 2,

@@ -6,6 +6,57 @@ def build_crack_profile_augment(profile: str):
     profile = str(profile or "balanced").strip().lower()
     if profile == "strong":
         profile = "aggressive"
+    if profile == "advanced":
+        profile = "outdomain"
+
+    if profile == "outdomain":
+        return A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.RandomRotate90(p=0.5),
+            A.OneOf([
+                A.Affine(
+                    scale=(0.80, 1.20),
+                    translate_percent=(-0.08, 0.08),
+                    rotate=(-40, 40),
+                    shear=(-8, 8),
+                    interpolation=cv2.INTER_LINEAR,
+                    mask_interpolation=cv2.INTER_NEAREST,
+                    p=1.0,
+                ),
+                A.Perspective(scale=(0.03, 0.08), keep_size=True, fit_output=False, p=1.0),
+            ], p=0.65),
+            A.OneOf([
+                A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1.0),
+                A.RandomBrightnessContrast(brightness_limit=0.28, contrast_limit=0.28, p=1.0),
+                A.RandomGamma(gamma_limit=(70, 135), p=1.0),
+                A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=18, val_shift_limit=15, p=1.0),
+                A.RGBShift(r_shift_limit=14, g_shift_limit=14, b_shift_limit=14, p=1.0),
+            ], p=0.65),
+            A.OneOf([
+                A.RandomShadow(shadow_roi=(0.0, 0.0, 1.0, 1.0), p=1.0),
+                A.RandomToneCurve(scale=0.20, p=1.0),
+                A.Sharpen(alpha=(0.15, 0.35), lightness=(0.7, 1.2), p=1.0),
+            ], p=0.35),
+            A.OneOf([
+                A.ImageCompression(p=1.0),
+                A.Downscale(p=1.0),
+            ], p=0.40),
+            A.OneOf([
+                A.GaussNoise(p=1.0),
+                A.Blur(blur_limit=5, p=1.0),
+                A.MotionBlur(blur_limit=5, p=1.0),
+            ], p=0.45),
+            A.ToGray(p=0.08),
+            A.CoarseDropout(
+                num_holes_range=(1, 6),
+                hole_height_range=(0.04, 0.14),
+                hole_width_range=(0.04, 0.14),
+                fill=0,
+                fill_mask=0,
+                p=0.28,
+            ),
+        ], is_check_shapes=False)
 
     if profile == "aggressive":
         return A.Compose([

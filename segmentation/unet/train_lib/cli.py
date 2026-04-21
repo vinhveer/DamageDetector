@@ -35,7 +35,7 @@ def build_arg_parser():
     parser.add_argument("--max-patch-tries", type=int, default=5, help="Max tries to find a patch with crack")
     parser.add_argument("--negative-patch-prob", type=float, default=0.25, help="Probability of keeping a background-only patch in patch mode")
     parser.add_argument("--val-stride", type=int, default=0, help="Stride for validation patching (0 = input_size)")
-    parser.add_argument("--augment-profile", type=str, default=None, choices=["light", "balanced", "aggressive", "strong"], help="SAM-style augmentation profile. When set, this becomes the primary augmentation knob.")
+    parser.add_argument("--augment-profile", type=str, default=None, choices=["light", "balanced", "aggressive", "strong", "outdomain", "advanced"], help="SAM-style augmentation profile. When set, this becomes the primary augmentation knob.")
     parser.add_argument("--crop-policy", type=str, default=None, choices=["smart", "fast"], help="SAM-style crop policy for crack sampling.")
     parser.add_argument("--background-crop-prob", type=float, default=None, help="SAM-style probability of sampling a random background crop.")
     parser.add_argument("--near-background-crop-prob", type=float, default=None, help="SAM-style probability of sampling a near-background crop.")

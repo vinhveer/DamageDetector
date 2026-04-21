@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 import random
@@ -9,6 +10,7 @@ from PIL import Image
 from runtime_lib import SQLiteLogHandler, SQLiteRunStore
 from torch_runtime import DataLoader
 from torch_runtime import cudnn, torch
+from device_utils import select_device_str, select_torch_device
 from ..backbones.segment_anything import sam_model_registry
 
 try:
@@ -84,6 +86,7 @@ def _load_finetuned_sam(
     rank: int,
     decoder_type: str = "auto",
     centerline_head: bool = False,
+    device=None,
 ):
     decoder = resolve_decoder_type(delta_ckpt, decoder_type)
     image_size = resolve_image_size(delta_ckpt, img_size if int(img_size) > 0 else None)
@@ -104,7 +107,9 @@ def _load_finetuned_sam(
         scaling_factor=float(scaling_factor),
         rank=int(rank),
     )
-    return sam.cuda(), int(image_size), decoder
+    if device is None:
+        device = select_torch_device("auto")
+    return sam.to(device=device), int(image_size), decoder
 
 
 def _tiled_score_map_ensemble(
@@ -453,6 +458,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default=None, help="The config file provided by the trained model")
     parser.add_argument("--volume_path", type=str, required=True, help="Dataset root containing images/ and masks/")
     parser.add_argument("--output_dir", type=str, default="./output/test")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"], help="Inference device")
     parser.add_argument("--img_size", type=int, default=448, help="Input image size of the network")
     parser.add_argument("--seed", type=int, default=3407, help="random seed")
     parser.add_argument("--is_savenii", action="store_true", help="Whether to save results during inference")
@@ -528,7 +534,11 @@ if __name__ == "__main__":
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+
+    device = select_torch_device(args.device)
+    resolved_device = select_device_str(args.device)
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -543,11 +553,13 @@ if __name__ == "__main__":
         rank=args.rank,
         decoder_type=args.decoder_type,
         centerline_head=bool(getattr(args, "centerline_head", False) or load_inference_config(args.delta_ckpt).get("centerline_head", False)),
+        device=device,
     )
     args.img_size = int(coarse_img_size)
     args.decoder_type = coarse_decoder
     ensemble_models = [sam]
     ensemble_image_sizes = [int(coarse_img_size)]
+    resolved_mode = resolve_predict_mode(args.delta_ckpt, args.eval_mode)
     extra_ckpts = list(getattr(args, "ensemble_delta_ckpts", None) or [])
     extra_types = list(getattr(args, "ensemble_delta_types", None) or [])
     extra_ranks = list(getattr(args, "ensemble_ranks", None) or [])
@@ -567,6 +579,7 @@ if __name__ == "__main__":
             rank=extra_rank,
             decoder_type=extra_decoder,
             centerline_head=bool(getattr(args, "centerline_head", False) or load_inference_config(extra_ckpt).get("centerline_head", False)),
+            device=device,
         )
         ensemble_models.append(extra_model)
         ensemble_image_sizes.append(int(extra_image_size))
@@ -587,6 +600,7 @@ if __name__ == "__main__":
             rank=refine_rank,
             decoder_type=args.refine_decoder_type,
             centerline_head=bool(getattr(args, "refine_centerline_head", False) or load_inference_config(args.refine_delta_ckpt).get("centerline_head", False)),
+            device=device,
         )
     multimask_output = False
 
@@ -610,10 +624,10 @@ if __name__ == "__main__":
     root_logger.addHandler(sqlite_handler)
 
     args.val_thresholds = sorted(set(float(x) for x in args.val_thresholds if 0.0 < float(x) < 1.0)) or [0.5]
-    resolved_mode = resolve_predict_mode(args.delta_ckpt, args.eval_mode)
     args.pred_threshold = str(args.pred_threshold)
     logging.info(str(args))
     logging.info("Resolved eval mode: %s", resolved_mode)
+    logging.info("Resolved device: %s", resolved_device)
 
     if args.is_savenii:
         test_save_path = os.path.join(args.output_dir, "predictions")
@@ -654,6 +668,37 @@ if __name__ == "__main__":
         float(primary["save_threshold"]),
         float(primary["best_metric"][3]),
     )
+    summary_path = os.path.join(args.output_dir, "metrics_summary.json")
+    summary_payload = {
+        "volume_path": os.path.abspath(args.volume_path),
+        "delta_ckpt": os.path.abspath(args.delta_ckpt) if args.delta_ckpt else "",
+        "eval_mode": resolved_mode,
+        "device": resolved_device,
+        "best_threshold": float(primary["best_threshold"]),
+        "save_threshold": float(primary["save_threshold"]),
+        "best_metric": {
+            "precision": float(primary["best_metric"][0]),
+            "recall": float(primary["best_metric"][1]),
+            "f1": float(primary["best_metric"][2]),
+            "iou": float(primary["best_metric"][3]),
+        },
+        "metric_by_thr": {
+            str(float(thr)): {
+                "precision": float(values[0]),
+                "recall": float(values[1]),
+                "f1": float(values[2]),
+                "iou": float(values[3]),
+            }
+            for thr, values in primary.get("metric_by_thr", {}).items()
+        },
+    }
+    if "continuity" in primary:
+        summary_payload["continuity"] = {
+            key: float(value) for key, value in primary["continuity"].items()
+        }
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary_payload, f, ensure_ascii=False, indent=2)
+    logging.info("Saved metrics summary to %s", summary_path)
     logging.info("Testing Finished!")
     sqlite_handler.close()
     log_store.close()
