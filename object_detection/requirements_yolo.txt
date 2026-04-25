@@ -1,0 +1,11 @@
+# YOLO extra dependencies (Ultralytics).
+#
+# Install from repo root (recommended):
+#   DamageDetector/.venv/bin/python -m pip install -e DamageDetector
+#   DamageDetector/.venv/bin/python -m pip install -r DamageDetector/object_detection/requirements_yolo.txt
+
+ultralytics>=8.3.0
+
+# Optional but commonly needed for COCO-style eval/export.
+pycocotools>=2.0.7
+
