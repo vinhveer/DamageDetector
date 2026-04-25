@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from object_detection.dino.dinov2_prototypes import default_dinov2_embedding_checkpoint
+from object_detection.dinov2.dinov2_prototypes import default_dinov2_embedding_checkpoint
 
 
 def parse_args() -> argparse.Namespace:

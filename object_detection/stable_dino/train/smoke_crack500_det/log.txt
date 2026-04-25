@@ -1,0 +1,311 @@
+[04/25 18:25:34] detectron2 INFO: Rank of current process: 0. World size: 1
+[04/25 18:25:34] detectron2 INFO: Environment info:
+-------------------------------  --------------------------------------------------------------------------------------------------------
+sys.platform                     darwin
+Python                           3.12.2 (main, Dec 24 2025, 08:29:08) [Clang 17.0.0 (clang-1700.6.3.2)]
+numpy                            2.4.4
+detectron2                       0.6 @/Users/nguyenquangvinh/Desktop/Lab/DamageDetector/.venv/lib/python3.12/site-packages/detectron2
+Compiler                         clang 17.0.0
+CUDA compiler                    not available
+DETECTRON2_ENV_MODULE            <not set>
+PyTorch                          2.11.0 @/Users/nguyenquangvinh/Desktop/Lab/DamageDetector/.venv/lib/python3.12/site-packages/torch
+PyTorch debug build              False
+torch._C._GLIBCXX_USE_CXX11_ABI  True
+GPU available                    No: torch.cuda.is_available() == False
+Pillow                           12.2.0
+torchvision                      0.26.0 @/Users/nguyenquangvinh/Desktop/Lab/DamageDetector/.venv/lib/python3.12/site-packages/torchvision
+fvcore                           0.1.5.post20221221
+iopath                           0.1.9
+cv2                              4.13.0
+-------------------------------  --------------------------------------------------------------------------------------------------------
+PyTorch built with:
+  - GCC 4.2
+  - C++ Version: 201703
+  - clang 15.0.0
+  - OpenMP 201811
+  - LAPACK is enabled (usually provided by MKL)
+  - NNPACK is enabled
+  - CPU capability usage: DEFAULT
+  - Build settings: BLAS_INFO=accelerate, BUILD_TYPE=Release, COMMIT_SHA=70d99e998b4955e0049d13a98d77ae1b14db1f45, CXX_COMPILER=/usr/bin/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_PYTORCH_QNNPACK -DAT_BUILD_ARM_VEC256_WITH_SLEEF -DUSE_XNNPACK -DUSE_PYTORCH_METAL_EXPORT -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -DUSE_COREML_DELEGATE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=braced-scalar-init -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wvla-extension -Wsuggest-override -Wnewline-eof -Winconsistent-missing-override -Winconsistent-missing-destructor-override -Wno-pass-failed -Wno-error=old-style-cast -Wconstant-conversion -Qunused-arguments -faligned-new -fno-math-errno -fno-trapping-math -Werror=format -DUSE_MPS -Wno-missing-braces, LAPACK_INFO=accelerate, TORCH_VERSION=2.11.0, USE_CUDA=OFF, USE_CUDNN=OFF, USE_CUSPARSELT=OFF, USE_EIGEN_FOR_BLAS=ON, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKL=OFF, USE_MKLDNN=OFF, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, 
+
+[04/25 18:25:34] detectron2 INFO: Command line arguments: Namespace(config_file='/Users/nguyenquangvinh/Desktop/Lab/DamageDetector/object_detection/stable_dino/projects/stabledino/configs/damage_detector_stabledino_r50_4scale_12ep.py', resume=False, eval_only=True, opts=['dataloader.train.dataset.names="damage_detector_crack500_det_train"', 'dataloader.test.dataset.names="damage_detector_crack500_det_val"', 'dataloader.evaluator.dataset_name="damage_detector_crack500_det_val"', 'dataloader.train.total_batch_size=1', 'dataloader.train.num_workers=0', 'train.output_dir="/Users/nguyenquangvinh/Desktop/Lab/DamageDetector/object_detection/stable_dino/train/smoke_crack500_det"', 'train.device="cpu"', 'model.device="cpu"', 'model.num_classes=1', 'dataloader.train.mapper.augmentation.image_size=640', 'dataloader.train.mapper.augmentation.min_scale=0.3', 'dataloader.train.mapper.augmentation.max_scale=1.7', 'dataloader.train.mapper.augmentation.random_flip="horizontal"'], num_gpus=1, num_machines=1, machine_rank=0, dist_url='auto')
+[04/25 18:25:34] detectron2 INFO: Contents of args.config_file=/Users/nguyenquangvinh/Desktop/Lab/DamageDetector/object_detection/stable_dino/projects/stabledino/configs/damage_detector_stabledino_r50_4scale_12ep.py:
+[38;5;204mfrom[39m[38;5;255m [39m[38;5;255mdetrex[39m[38;5;255m.[39m[38;5;255mconfig[39m[38;5;255m [39m[38;5;204mimport[39m[38;5;255m [39m[38;5;255mget_config[39m
+
+[38;5;204mfrom[39m[38;5;255m [39m[38;5;255m.[39m[38;5;255mdata[39m[38;5;255m.[39m[38;5;255mcoco_instance_seg[39m[38;5;255m [39m[38;5;204mimport[39m[38;5;255m [39m[38;5;255mdataloader[39m
+[38;5;204mfrom[39m[38;5;255m [39m[38;5;255m.[39m[38;5;255mmodels[39m[38;5;255m.[39m[38;5;255mstabledino_r50[39m[38;5;255m [39m[38;5;204mimport[39m[38;5;255m [39m[38;5;255mmodel[39m
+
+[38;5;245m# Optim/schedule/train boilerplate from detrex.[39m
+[38;5;255moptimizer[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;255mget_config[39m[38;5;255m([39m[38;5;186m"[39m[38;5;186mcommon/optim.py[39m[38;5;186m"[39m[38;5;255m)[39m[38;5;204m.[39m[38;5;255mAdamW[39m
+[38;5;255mlr_multiplier[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;255mget_config[39m[38;5;255m([39m[38;5;186m"[39m[38;5;186mcommon/coco_schedule.py[39m[38;5;186m"[39m[38;5;255m)[39m[38;5;204m.[39m[38;5;255mlr_multiplier_12ep[39m
+[38;5;255mtrain[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;255mget_config[39m[38;5;255m([39m[38;5;186m"[39m[38;5;186mcommon/train.py[39m[38;5;186m"[39m[38;5;255m)[39m[38;5;204m.[39m[38;5;255mtrain[39m
+
+[38;5;245m# Defaults (overridden by object_detection.datasets adapter via LazyConfig opts).[39m
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255minit_checkpoint[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;186m"[39m[38;5;186mdetectron2://ImageNetPretrained/torchvision/R-50.pkl[39m[38;5;186m"[39m
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255moutput_dir[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;186m"[39m[38;5;186m./output/damage_detector_stabledino_r50_4scale_12ep[39m[38;5;186m"[39m
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mmax_iter[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m90000[39m
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255meval_period[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m5000[39m
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mlog_period[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m20[39m
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mseed[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m60[39m
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mcheckpointer[39m[38;5;204m.[39m[38;5;255mperiod[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m5000[39m
+
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mclip_grad[39m[38;5;204m.[39m[38;5;255menabled[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;81mTrue[39m
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mclip_grad[39m[38;5;204m.[39m[38;5;255mparams[39m[38;5;204m.[39m[38;5;255mmax_norm[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m0.1[39m
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mclip_grad[39m[38;5;204m.[39m[38;5;255mparams[39m[38;5;204m.[39m[38;5;255mnorm_type[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m2[39m
+
+[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mdevice[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;186m"[39m[38;5;186mcuda[39m[38;5;186m"[39m
+[38;5;255mmodel[39m[38;5;204m.[39m[38;5;255mdevice[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mdevice[39m
+
+[38;5;255moptimizer[39m[38;5;204m.[39m[38;5;255mlr[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m1e-4[39m
+[38;5;255moptimizer[39m[38;5;204m.[39m[38;5;255mbetas[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;255m([39m[38;5;141m0.9[39m[38;5;255m,[39m[38;5;255m [39m[38;5;141m0.999[39m[38;5;255m)[39m
+[38;5;255moptimizer[39m[38;5;204m.[39m[38;5;255mweight_decay[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m1e-4[39m
+[38;5;255moptimizer[39m[38;5;204m.[39m[38;5;255mparams[39m[38;5;204m.[39m[38;5;255mlr_factor_func[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;81mlambda[39m[38;5;255m [39m[38;5;255mmodule_name[39m[38;5;255m:[39m[38;5;255m [39m[38;5;141m0.1[39m[38;5;255m [39m[38;5;81mif[39m[38;5;255m [39m[38;5;186m"[39m[38;5;186mbackbone[39m[38;5;186m"[39m[38;5;255m [39m[38;5;204min[39m[38;5;255m [39m[38;5;255mmodule_name[39m[38;5;255m [39m[38;5;81melse[39m[38;5;255m [39m[38;5;141m1[39m
+
+[38;5;255mdataloader[39m[38;5;204m.[39m[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mnum_workers[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m4[39m
+[38;5;255mdataloader[39m[38;5;204m.[39m[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255mtotal_batch_size[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;141m16[39m
+[38;5;255mdataloader[39m[38;5;204m.[39m[38;5;255mevaluator[39m[38;5;204m.[39m[38;5;255moutput_dir[39m[38;5;255m [39m[38;5;204m=[39m[38;5;255m [39m[38;5;255mtrain[39m[38;5;204m.[39m[38;5;255moutput_dir[39m
+
+[04/25 18:25:34] d2.config.lazy WARNING: The config contains objects that cannot serialize to a valid yaml. /Users/nguyenquangvinh/Desktop/Lab/DamageDetector/object_detection/stable_dino/train/smoke_crack500_det/config.yaml is human-readable but cannot be loaded.
+[04/25 18:25:34] d2.config.lazy WARNING: Config is saved using cloudpickle at /Users/nguyenquangvinh/Desktop/Lab/DamageDetector/object_detection/stable_dino/train/smoke_crack500_det/config.yaml.pkl.
+[04/25 18:25:34] detectron2 INFO: Full config saved to /Users/nguyenquangvinh/Desktop/Lab/DamageDetector/object_detection/stable_dino/train/smoke_crack500_det/config.yaml
+[04/25 18:25:34] d2.checkpoint.detection_checkpoint INFO: [DetectionCheckpointer] Loading from detectron2://ImageNetPretrained/torchvision/R-50.pkl ...
+[04/25 18:25:41] fvcore.common.checkpoint INFO: [Checkpointer] Loading from /Users/nguyenquangvinh/.torch/iopath_cache/detectron2/ImageNetPretrained/torchvision/R-50.pkl ...
+[04/25 18:25:41] fvcore.common.checkpoint INFO: Reading a file from 'torchvision'
+[04/25 18:25:41] d2.checkpoint.c2_model_loading INFO: Following weights matched with submodule backbone - Total num: 53
+[04/25 18:25:41] fvcore.common.checkpoint WARNING: Some model parameters or buffers are not found in the checkpoint:
+bbox_embed.0.layers.0.{bias, weight}
+bbox_embed.0.layers.1.{bias, weight}
+bbox_embed.0.layers.2.{bias, weight}
+bbox_embed.1.layers.0.{bias, weight}
+bbox_embed.1.layers.1.{bias, weight}
+bbox_embed.1.layers.2.{bias, weight}
+bbox_embed.2.layers.0.{bias, weight}
+bbox_embed.2.layers.1.{bias, weight}
+bbox_embed.2.layers.2.{bias, weight}
+bbox_embed.3.layers.0.{bias, weight}
+bbox_embed.3.layers.1.{bias, weight}
+bbox_embed.3.layers.2.{bias, weight}
+bbox_embed.4.layers.0.{bias, weight}
+bbox_embed.4.layers.1.{bias, weight}
+bbox_embed.4.layers.2.{bias, weight}
+bbox_embed.5.layers.0.{bias, weight}
+bbox_embed.5.layers.1.{bias, weight}
+bbox_embed.5.layers.2.{bias, weight}
+bbox_embed.6.layers.0.{bias, weight}
+bbox_embed.6.layers.1.{bias, weight}
+bbox_embed.6.layers.2.{bias, weight}
+class_embed.0.{bias, weight}
+class_embed.1.{bias, weight}
+class_embed.2.{bias, weight}
+class_embed.3.{bias, weight}
+class_embed.4.{bias, weight}
+class_embed.5.{bias, weight}
+class_embed.6.{bias, weight}
+label_enc.weight
+neck.convs.0.conv.{bias, weight}
+neck.convs.0.norm.{bias, weight}
+neck.convs.1.conv.{bias, weight}
+neck.convs.1.norm.{bias, weight}
+neck.convs.2.conv.{bias, weight}
+neck.convs.2.norm.{bias, weight}
+neck.extra_convs.0.conv.{bias, weight}
+neck.extra_convs.0.norm.{bias, weight}
+transformer.decoder.bbox_embed.0.layers.0.{bias, weight}
+transformer.decoder.bbox_embed.0.layers.1.{bias, weight}
+transformer.decoder.bbox_embed.0.layers.2.{bias, weight}
+transformer.decoder.bbox_embed.1.layers.0.{bias, weight}
+transformer.decoder.bbox_embed.1.layers.1.{bias, weight}
+transformer.decoder.bbox_embed.1.layers.2.{bias, weight}
+transformer.decoder.bbox_embed.2.layers.0.{bias, weight}
+transformer.decoder.bbox_embed.2.layers.1.{bias, weight}
+transformer.decoder.bbox_embed.2.layers.2.{bias, weight}
+transformer.decoder.bbox_embed.3.layers.0.{bias, weight}
+transformer.decoder.bbox_embed.3.layers.1.{bias, weight}
+transformer.decoder.bbox_embed.3.layers.2.{bias, weight}
+transformer.decoder.bbox_embed.4.layers.0.{bias, weight}
+transformer.decoder.bbox_embed.4.layers.1.{bias, weight}
+transformer.decoder.bbox_embed.4.layers.2.{bias, weight}
+transformer.decoder.bbox_embed.5.layers.0.{bias, weight}
+transformer.decoder.bbox_embed.5.layers.1.{bias, weight}
+transformer.decoder.bbox_embed.5.layers.2.{bias, weight}
+transformer.decoder.bbox_embed.6.layers.0.{bias, weight}
+transformer.decoder.bbox_embed.6.layers.1.{bias, weight}
+transformer.decoder.bbox_embed.6.layers.2.{bias, weight}
+transformer.decoder.class_embed.0.{bias, weight}
+transformer.decoder.class_embed.1.{bias, weight}
+transformer.decoder.class_embed.2.{bias, weight}
+transformer.decoder.class_embed.3.{bias, weight}
+transformer.decoder.class_embed.4.{bias, weight}
+transformer.decoder.class_embed.5.{bias, weight}
+transformer.decoder.class_embed.6.{bias, weight}
+transformer.decoder.layers.0.attentions.0.attn.out_proj.{bias, weight}
+transformer.decoder.layers.0.attentions.0.attn.{in_proj_bias, in_proj_weight}
+transformer.decoder.layers.0.attentions.1.attention_weights.{bias, weight}
+transformer.decoder.layers.0.attentions.1.output_proj.{bias, weight}
+transformer.decoder.layers.0.attentions.1.sampling_offsets.{bias, weight}
+transformer.decoder.layers.0.attentions.1.value_proj.{bias, weight}
+transformer.decoder.layers.0.ffns.0.layers.0.0.{bias, weight}
+transformer.decoder.layers.0.ffns.0.layers.1.{bias, weight}
+transformer.decoder.layers.0.norms.0.{bias, weight}
+transformer.decoder.layers.0.norms.1.{bias, weight}
+transformer.decoder.layers.0.norms.2.{bias, weight}
+transformer.decoder.layers.1.attentions.0.attn.out_proj.{bias, weight}
+transformer.decoder.layers.1.attentions.0.attn.{in_proj_bias, in_proj_weight}
+transformer.decoder.layers.1.attentions.1.attention_weights.{bias, weight}
+transformer.decoder.layers.1.attentions.1.output_proj.{bias, weight}
+transformer.decoder.layers.1.attentions.1.sampling_offsets.{bias, weight}
+transformer.decoder.layers.1.attentions.1.value_proj.{bias, weight}
+transformer.decoder.layers.1.ffns.0.layers.0.0.{bias, weight}
+transformer.decoder.layers.1.ffns.0.layers.1.{bias, weight}
+transformer.decoder.layers.1.norms.0.{bias, weight}
+transformer.decoder.layers.1.norms.1.{bias, weight}
+transformer.decoder.layers.1.norms.2.{bias, weight}
+transformer.decoder.layers.2.attentions.0.attn.out_proj.{bias, weight}
+transformer.decoder.layers.2.attentions.0.attn.{in_proj_bias, in_proj_weight}
+transformer.decoder.layers.2.attentions.1.attention_weights.{bias, weight}
+transformer.decoder.layers.2.attentions.1.output_proj.{bias, weight}
+transformer.decoder.layers.2.attentions.1.sampling_offsets.{bias, weight}
+transformer.decoder.layers.2.attentions.1.value_proj.{bias, weight}
+transformer.decoder.layers.2.ffns.0.layers.0.0.{bias, weight}
+transformer.decoder.layers.2.ffns.0.layers.1.{bias, weight}
+transformer.decoder.layers.2.norms.0.{bias, weight}
+transformer.decoder.layers.2.norms.1.{bias, weight}
+transformer.decoder.layers.2.norms.2.{bias, weight}
+transformer.decoder.layers.3.attentions.0.attn.out_proj.{bias, weight}
+transformer.decoder.layers.3.attentions.0.attn.{in_proj_bias, in_proj_weight}
+transformer.decoder.layers.3.attentions.1.attention_weights.{bias, weight}
+transformer.decoder.layers.3.attentions.1.output_proj.{bias, weight}
+transformer.decoder.layers.3.attentions.1.sampling_offsets.{bias, weight}
+transformer.decoder.layers.3.attentions.1.value_proj.{bias, weight}
+transformer.decoder.layers.3.ffns.0.layers.0.0.{bias, weight}
+transformer.decoder.layers.3.ffns.0.layers.1.{bias, weight}
+transformer.decoder.layers.3.norms.0.{bias, weight}
+transformer.decoder.layers.3.norms.1.{bias, weight}
+transformer.decoder.layers.3.norms.2.{bias, weight}
+transformer.decoder.layers.4.attentions.0.attn.out_proj.{bias, weight}
+transformer.decoder.layers.4.attentions.0.attn.{in_proj_bias, in_proj_weight}
+transformer.decoder.layers.4.attentions.1.attention_weights.{bias, weight}
+transformer.decoder.layers.4.attentions.1.output_proj.{bias, weight}
+transformer.decoder.layers.4.attentions.1.sampling_offsets.{bias, weight}
+transformer.decoder.layers.4.attentions.1.value_proj.{bias, weight}
+transformer.decoder.layers.4.ffns.0.layers.0.0.{bias, weight}
+transformer.decoder.layers.4.ffns.0.layers.1.{bias, weight}
+transformer.decoder.layers.4.norms.0.{bias, weight}
+transformer.decoder.layers.4.norms.1.{bias, weight}
+transformer.decoder.layers.4.norms.2.{bias, weight}
+transformer.decoder.layers.5.attentions.0.attn.out_proj.{bias, weight}
+transformer.decoder.layers.5.attentions.0.attn.{in_proj_bias, in_proj_weight}
+transformer.decoder.layers.5.attentions.1.attention_weights.{bias, weight}
+transformer.decoder.layers.5.attentions.1.output_proj.{bias, weight}
+transformer.decoder.layers.5.attentions.1.sampling_offsets.{bias, weight}
+transformer.decoder.layers.5.attentions.1.value_proj.{bias, weight}
+transformer.decoder.layers.5.ffns.0.layers.0.0.{bias, weight}
+transformer.decoder.layers.5.ffns.0.layers.1.{bias, weight}
+transformer.decoder.layers.5.norms.0.{bias, weight}
+transformer.decoder.layers.5.norms.1.{bias, weight}
+transformer.decoder.layers.5.norms.2.{bias, weight}
+transformer.decoder.norm.{bias, weight}
+transformer.decoder.ref_point_head.layers.0.{bias, weight}
+transformer.decoder.ref_point_head.layers.1.{bias, weight}
+transformer.enc_output.{bias, weight}
+transformer.enc_output_norm.{bias, weight}
+transformer.encoder.fusion_layer.0.{bias, weight}
+transformer.encoder.fusion_layer.1.{bias, weight}
+transformer.encoder.layers.0.attentions.0.attention_weights.{bias, weight}
+transformer.encoder.layers.0.attentions.0.output_proj.{bias, weight}
+transformer.encoder.layers.0.attentions.0.sampling_offsets.{bias, weight}
+transformer.encoder.layers.0.attentions.0.value_proj.{bias, weight}
+transformer.encoder.layers.0.ffns.0.layers.0.0.{bias, weight}
+transformer.encoder.layers.0.ffns.0.layers.1.{bias, weight}
+transformer.encoder.layers.0.norms.0.{bias, weight}
+transformer.encoder.layers.0.norms.1.{bias, weight}
+transformer.encoder.layers.1.attentions.0.attention_weights.{bias, weight}
+transformer.encoder.layers.1.attentions.0.output_proj.{bias, weight}
+transformer.encoder.layers.1.attentions.0.sampling_offsets.{bias, weight}
+transformer.encoder.layers.1.attentions.0.value_proj.{bias, weight}
+transformer.encoder.layers.1.ffns.0.layers.0.0.{bias, weight}
+transformer.encoder.layers.1.ffns.0.layers.1.{bias, weight}
+transformer.encoder.layers.1.norms.0.{bias, weight}
+transformer.encoder.layers.1.norms.1.{bias, weight}
+transformer.encoder.layers.2.attentions.0.attention_weights.{bias, weight}
+transformer.encoder.layers.2.attentions.0.output_proj.{bias, weight}
+transformer.encoder.layers.2.attentions.0.sampling_offsets.{bias, weight}
+transformer.encoder.layers.2.attentions.0.value_proj.{bias, weight}
+transformer.encoder.layers.2.ffns.0.layers.0.0.{bias, weight}
+transformer.encoder.layers.2.ffns.0.layers.1.{bias, weight}
+transformer.encoder.layers.2.norms.0.{bias, weight}
+transformer.encoder.layers.2.norms.1.{bias, weight}
+transformer.encoder.layers.3.attentions.0.attention_weights.{bias, weight}
+transformer.encoder.layers.3.attentions.0.output_proj.{bias, weight}
+transformer.encoder.layers.3.attentions.0.sampling_offsets.{bias, weight}
+transformer.encoder.layers.3.attentions.0.value_proj.{bias, weight}
+transformer.encoder.layers.3.ffns.0.layers.0.0.{bias, weight}
+transformer.encoder.layers.3.ffns.0.layers.1.{bias, weight}
+transformer.encoder.layers.3.norms.0.{bias, weight}
+transformer.encoder.layers.3.norms.1.{bias, weight}
+transformer.encoder.layers.4.attentions.0.attention_weights.{bias, weight}
+transformer.encoder.layers.4.attentions.0.output_proj.{bias, weight}
+transformer.encoder.layers.4.attentions.0.sampling_offsets.{bias, weight}
+transformer.encoder.layers.4.attentions.0.value_proj.{bias, weight}
+transformer.encoder.layers.4.ffns.0.layers.0.0.{bias, weight}
+transformer.encoder.layers.4.ffns.0.layers.1.{bias, weight}
+transformer.encoder.layers.4.norms.0.{bias, weight}
+transformer.encoder.layers.4.norms.1.{bias, weight}
+transformer.encoder.layers.5.attentions.0.attention_weights.{bias, weight}
+transformer.encoder.layers.5.attentions.0.output_proj.{bias, weight}
+transformer.encoder.layers.5.attentions.0.sampling_offsets.{bias, weight}
+transformer.encoder.layers.5.attentions.0.value_proj.{bias, weight}
+transformer.encoder.layers.5.ffns.0.layers.0.0.{bias, weight}
+transformer.encoder.layers.5.ffns.0.layers.1.{bias, weight}
+transformer.encoder.layers.5.norms.0.{bias, weight}
+transformer.encoder.layers.5.norms.1.{bias, weight}
+transformer.level_embeds
+transformer.tgt_embed.weight
+[04/25 18:25:41] fvcore.common.checkpoint WARNING: The checkpoint state_dict contains keys that are not used by the model:
+  stem.fc.{bias, weight}
+[04/25 18:25:41] d2.data.datasets.coco INFO: Loaded 540 images in COCO format from /Users/nguyenquangvinh/Desktop/Lab/DamageDetector/object_detection/stable_dino/train/smoke_crack500_det/dataset_cache/val_coco.json
+[04/25 18:25:41] d2.data.build INFO: Distribution of instances among all 1 categories:
+|  category  | #instances   |
+|:----------:|:-------------|
+|   crack    | 2689         |
+|            |              |
+[04/25 18:25:41] d2.data.common INFO: Serializing the dataset using: <class 'detectron2.data.common._TorchSerializedList'>
+[04/25 18:25:41] d2.data.common INFO: Serializing 540 elements to byte tensors and concatenating them all ...
+[04/25 18:25:41] d2.data.common INFO: Serialized dataset takes 0.50 MiB
+[04/25 18:25:41] d2.evaluation.evaluator INFO: Start inference on 540 batches
+[04/25 18:25:57] d2.evaluation.evaluator INFO: Inference done 11/540. Dataloading: 0.0002 s/iter. Inference: 1.2210 s/iter. Eval: 0.0001 s/iter. Total: 1.2213 s/iter. ETA=0:10:46
+[04/25 18:26:03] d2.evaluation.evaluator INFO: Inference done 16/540. Dataloading: 0.0002 s/iter. Inference: 1.2201 s/iter. Eval: 0.0001 s/iter. Total: 1.2204 s/iter. ETA=0:10:39
+[04/25 18:26:09] d2.evaluation.evaluator INFO: Inference done 21/540. Dataloading: 0.0003 s/iter. Inference: 1.2220 s/iter. Eval: 0.0001 s/iter. Total: 1.2223 s/iter. ETA=0:10:34
+[04/25 18:26:15] d2.evaluation.evaluator INFO: Inference done 26/540. Dataloading: 0.0003 s/iter. Inference: 1.2230 s/iter. Eval: 0.0001 s/iter. Total: 1.2234 s/iter. ETA=0:10:28
+[04/25 18:26:21] d2.evaluation.evaluator INFO: Inference done 31/540. Dataloading: 0.0003 s/iter. Inference: 1.2243 s/iter. Eval: 0.0001 s/iter. Total: 1.2247 s/iter. ETA=0:10:23
+[04/25 18:26:26] d2.evaluation.evaluator INFO: Inference done 35/540. Dataloading: 0.0003 s/iter. Inference: 1.2280 s/iter. Eval: 0.0001 s/iter. Total: 1.2284 s/iter. ETA=0:10:20
+[04/25 18:26:32] d2.evaluation.evaluator INFO: Inference done 40/540. Dataloading: 0.0003 s/iter. Inference: 1.2266 s/iter. Eval: 0.0001 s/iter. Total: 1.2270 s/iter. ETA=0:10:13
+[04/25 18:26:38] d2.evaluation.evaluator INFO: Inference done 45/540. Dataloading: 0.0003 s/iter. Inference: 1.2246 s/iter. Eval: 0.0001 s/iter. Total: 1.2250 s/iter. ETA=0:10:06
+[04/25 18:26:44] d2.evaluation.evaluator INFO: Inference done 50/540. Dataloading: 0.0003 s/iter. Inference: 1.2239 s/iter. Eval: 0.0001 s/iter. Total: 1.2243 s/iter. ETA=0:09:59
+[04/25 18:26:51] d2.evaluation.evaluator INFO: Inference done 55/540. Dataloading: 0.0003 s/iter. Inference: 1.2246 s/iter. Eval: 0.0001 s/iter. Total: 1.2250 s/iter. ETA=0:09:54
+[04/25 18:26:56] d2.evaluation.evaluator INFO: Inference done 59/540. Dataloading: 0.0003 s/iter. Inference: 1.2297 s/iter. Eval: 0.0001 s/iter. Total: 1.2301 s/iter. ETA=0:09:51
+[04/25 18:27:01] d2.evaluation.evaluator INFO: Inference done 63/540. Dataloading: 0.0003 s/iter. Inference: 1.2328 s/iter. Eval: 0.0001 s/iter. Total: 1.2332 s/iter. ETA=0:09:48
+[04/25 18:27:06] d2.evaluation.evaluator INFO: Inference done 67/540. Dataloading: 0.0003 s/iter. Inference: 1.2359 s/iter. Eval: 0.0001 s/iter. Total: 1.2363 s/iter. ETA=0:09:44
+[04/25 18:27:11] d2.evaluation.evaluator INFO: Inference done 71/540. Dataloading: 0.0003 s/iter. Inference: 1.2368 s/iter. Eval: 0.0001 s/iter. Total: 1.2372 s/iter. ETA=0:09:40
+[04/25 18:27:17] d2.evaluation.evaluator INFO: Inference done 76/540. Dataloading: 0.0003 s/iter. Inference: 1.2376 s/iter. Eval: 0.0001 s/iter. Total: 1.2380 s/iter. ETA=0:09:34
+[04/25 18:27:22] d2.evaluation.evaluator INFO: Inference done 80/540. Dataloading: 0.0003 s/iter. Inference: 1.2388 s/iter. Eval: 0.0001 s/iter. Total: 1.2392 s/iter. ETA=0:09:30
+[04/25 18:27:27] d2.evaluation.evaluator INFO: Inference done 84/540. Dataloading: 0.0003 s/iter. Inference: 1.2396 s/iter. Eval: 0.0001 s/iter. Total: 1.2400 s/iter. ETA=0:09:25
+[04/25 18:27:34] d2.evaluation.evaluator INFO: Inference done 89/540. Dataloading: 0.0003 s/iter. Inference: 1.2402 s/iter. Eval: 0.0001 s/iter. Total: 1.2406 s/iter. ETA=0:09:19
+[04/25 18:27:40] d2.evaluation.evaluator INFO: Inference done 94/540. Dataloading: 0.0003 s/iter. Inference: 1.2407 s/iter. Eval: 0.0001 s/iter. Total: 1.2411 s/iter. ETA=0:09:13
+[04/25 18:27:46] d2.evaluation.evaluator INFO: Inference done 99/540. Dataloading: 0.0003 s/iter. Inference: 1.2413 s/iter. Eval: 0.0001 s/iter. Total: 1.2417 s/iter. ETA=0:09:07
+[04/25 18:27:51] d2.evaluation.evaluator INFO: Inference done 103/540. Dataloading: 0.0003 s/iter. Inference: 1.2444 s/iter. Eval: 0.0001 s/iter. Total: 1.2448 s/iter. ETA=0:09:03
+[04/25 18:27:57] d2.evaluation.evaluator INFO: Inference done 107/540. Dataloading: 0.0003 s/iter. Inference: 1.2466 s/iter. Eval: 0.0001 s/iter. Total: 1.2471 s/iter. ETA=0:08:59
+[04/25 18:28:02] d2.evaluation.evaluator INFO: Inference done 111/540. Dataloading: 0.0003 s/iter. Inference: 1.2475 s/iter. Eval: 0.0001 s/iter. Total: 1.2480 s/iter. ETA=0:08:55
+[04/25 18:28:07] d2.evaluation.evaluator INFO: Inference done 115/540. Dataloading: 0.0003 s/iter. Inference: 1.2501 s/iter. Eval: 0.0001 s/iter. Total: 1.2505 s/iter. ETA=0:08:51
+[04/25 18:28:12] d2.evaluation.evaluator INFO: Inference done 119/540. Dataloading: 0.0003 s/iter. Inference: 1.2513 s/iter. Eval: 0.0001 s/iter. Total: 1.2518 s/iter. ETA=0:08:46
+[04/25 18:28:17] d2.evaluation.evaluator INFO: Inference done 123/540. Dataloading: 0.0003 s/iter. Inference: 1.2527 s/iter. Eval: 0.0001 s/iter. Total: 1.2531 s/iter. ETA=0:08:42
+[04/25 18:28:24] d2.evaluation.evaluator INFO: Inference done 128/540. Dataloading: 0.0003 s/iter. Inference: 1.2525 s/iter. Eval: 0.0001 s/iter. Total: 1.2530 s/iter. ETA=0:08:36
+[04/25 18:28:30] d2.evaluation.evaluator INFO: Inference done 133/540. Dataloading: 0.0003 s/iter. Inference: 1.2523 s/iter. Eval: 0.0001 s/iter. Total: 1.2527 s/iter. ETA=0:08:29
+[04/25 18:28:36] d2.evaluation.evaluator INFO: Inference done 138/540. Dataloading: 0.0003 s/iter. Inference: 1.2520 s/iter. Eval: 0.0001 s/iter. Total: 1.2525 s/iter. ETA=0:08:23
+[04/25 18:28:41] d2.evaluation.evaluator INFO: Inference done 142/540. Dataloading: 0.0003 s/iter. Inference: 1.2554 s/iter. Eval: 0.0001 s/iter. Total: 1.2559 s/iter. ETA=0:08:19
+[04/25 18:28:46] d2.evaluation.evaluator INFO: Inference done 146/540. Dataloading: 0.0003 s/iter. Inference: 1.2553 s/iter. Eval: 0.0001 s/iter. Total: 1.2558 s/iter. ETA=0:08:14
+[04/25 18:28:53] d2.evaluation.evaluator INFO: Inference done 151/540. Dataloading: 0.0003 s/iter. Inference: 1.2544 s/iter. Eval: 0.0001 s/iter. Total: 1.2549 s/iter. ETA=0:08:08
+[04/25 18:28:59] d2.evaluation.evaluator INFO: Inference done 156/540. Dataloading: 0.0003 s/iter. Inference: 1.2534 s/iter. Eval: 0.0001 s/iter. Total: 1.2539 s/iter. ETA=0:08:01
+[04/25 18:29:04] d2.evaluation.evaluator INFO: Inference done 160/540. Dataloading: 0.0003 s/iter. Inference: 1.2557 s/iter. Eval: 0.0001 s/iter. Total: 1.2562 s/iter. ETA=0:07:57
+[04/25 18:29:09] d2.evaluation.evaluator INFO: Inference done 164/540. Dataloading: 0.0003 s/iter. Inference: 1.2574 s/iter. Eval: 0.0001 s/iter. Total: 1.2579 s/iter. ETA=0:07:52
+[04/25 18:29:14] d2.evaluation.evaluator INFO: Inference done 168/540. Dataloading: 0.0003 s/iter. Inference: 1.2573 s/iter. Eval: 0.0001 s/iter. Total: 1.2578 s/iter. ETA=0:07:47

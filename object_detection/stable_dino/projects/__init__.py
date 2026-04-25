@@ -1,0 +1,1 @@
+"""StableDINO project assets."""

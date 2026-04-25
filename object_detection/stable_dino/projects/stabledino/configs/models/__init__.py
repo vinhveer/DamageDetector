@@ -1,0 +1,1 @@
+"""StableDINO model config package."""

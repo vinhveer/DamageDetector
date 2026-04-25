@@ -304,7 +304,10 @@ def load_sam_model(checkpoint_path: str, requested_model_type: str) -> Tuple[Any
         model_type = inferred or requested
     if model_type not in sam_model_registry:
         raise ValueError(f"Unknown SAM model type: {model_type!r}")
-    sam_model = sam_model_registry[model_type](checkpoint=None)
+    # The upstream SAM checkpoints expect the default multimask head with 3
+    # disambiguation masks (+1). Our local backbone factory uses `num_classes`
+    # to control multimask outputs, so request 3 here to match the checkpoint.
+    sam_model, _ = sam_model_registry[model_type](image_size=1024, num_classes=3, checkpoint=None)
     if isinstance(sam_model, tuple):
         sam_model = sam_model[0]
     try:

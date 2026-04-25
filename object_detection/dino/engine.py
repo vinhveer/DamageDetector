@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Sequence
 
-from .dinov2_classifier import DinoV2ClassifierRunner, default_dinov2_checkpoint
-from .dinov2_prototypes import DinoV2PrototypeRunner, default_dinov2_embedding_checkpoint
+from object_detection.dinov2.dinov2_classifier import DinoV2ClassifierRunner, default_dinov2_checkpoint
+from object_detection.dinov2.dinov2_prototypes import DinoV2PrototypeRunner, default_dinov2_embedding_checkpoint
 from torch_runtime import describe_device_fallback, get_torch, select_device_str
 
 _RECURSIVE_TILE_SIZE = 512

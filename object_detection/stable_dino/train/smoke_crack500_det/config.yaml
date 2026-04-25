@@ -1,0 +1,108 @@
+dataloader:
+  evaluator: {_target_: detectron2.evaluation.COCOEvaluator, dataset_name: damage_detector_crack500_det_val, output_dir: ./output/damage_detector_stabledino_r50_4scale_12ep}
+  test:
+    _target_: detectron2.data.build_detection_test_loader
+    dataset: {_target_: detectron2.data.get_detection_dataset_dicts, filter_empty: false, names: damage_detector_crack500_det_val}
+    mapper:
+      _target_: detrex.data.COCOInstanceNewBaselineDatasetMapper
+      augmentation:
+      - {_target_: detectron2.data.transforms.ResizeShortestEdge, max_size: 1333, short_edge_length: 800}
+      image_format: RGB
+      is_train: false
+    num_workers: 4
+  train:
+    _target_: detectron2.data.build_detection_train_loader
+    dataset: {_target_: detectron2.data.get_detection_dataset_dicts, names: damage_detector_crack500_det_train}
+    mapper:
+      _target_: detrex.data.COCOInstanceNewBaselineDatasetMapper
+      augmentation: {_target_: detrex.data.dataset_mappers.coco_instance_new_baseline_dataset_mapper.build_transform_gen, image_size: 640, max_scale: 1.7, min_scale: 0.3, random_flip: horizontal}
+      image_format: RGB
+      is_train: true
+    num_workers: 0
+    total_batch_size: 1
+lr_multiplier:
+  _target_: detectron2.solver.WarmupParamScheduler
+  scheduler:
+    _target_: fvcore.common.param_scheduler.MultiStepParamScheduler
+    milestones: [82500, 90000]
+    values: [1.0, 0.1]
+  warmup_factor: 0.001
+  warmup_length: 0.0
+  warmup_method: linear
+model:
+  _target_: projects.stabledino.modeling.DINO
+  aux_loss: true
+  backbone:
+    _target_: detectron2.modeling.ResNet
+    freeze_at: 1
+    out_features: [res3, res4, res5]
+    stages: {_target_: detectron2.modeling.ResNet.make_default_stages, depth: 50, norm: FrozenBN, stride_in_1x1: false}
+    stem: {_target_: detectron2.modeling.backbone.BasicStem, in_channels: 3, norm: FrozenBN, out_channels: 64}
+  box_noise_scale: 1.0
+  criterion:
+    _target_: projects.stabledino.modeling.StableDINOCriterion
+    alpha: 0.25
+    gamma: 2.0
+    loss_class_type: focal_loss
+    matcher: {_target_: projects.stabledino.modeling.StableDINOHungarianMatcher, alpha: 0.25, cec_beta: 0.5, cost_bbox: 5.0, cost_class: 2.0, cost_class_type: focal_loss_cost, cost_giou: 2.0, gamma: 2.0}
+    num_classes: ${..num_classes}
+    ta_alpha: 0.0
+    ta_beta: 2.0
+    two_stage_binary_cls: false
+    use_ce_loss_type: stable-dino
+    weight_dict: {loss_bbox: 5.0, loss_bbox_dn: 5.0, loss_class: 6.0, loss_class_dn: 1, loss_giou: 2.0, loss_giou_dn: 2.0}
+  device: cpu
+  dn_number: 100
+  dn_to_matching_block: false
+  embed_dim: 256
+  gdn_k: 2
+  label_noise_ratio: 0.5
+  neck:
+    _target_: detrex.modeling.ChannelMapper
+    in_features: [res3, res4, res5]
+    input_shapes:
+      res3: !!python/object:detectron2.layers.shape_spec.ShapeSpec {channels: 512, height: null, stride: null, width: null}
+      res4: !!python/object:detectron2.layers.shape_spec.ShapeSpec {channels: 1024, height: null, stride: null, width: null}
+      res5: !!python/object:detectron2.layers.shape_spec.ShapeSpec {channels: 2048, height: null, stride: null, width: null}
+    kernel_size: 1
+    norm_layer: {_target_: torch.nn.GroupNorm, num_channels: 256, num_groups: 32}
+    num_outs: 4
+    out_channels: 256
+  neg_step_type: none
+  no_img_padding: false
+  num_classes: 1
+  num_queries: 900
+  pixel_mean: [123.675, 116.28, 103.53]
+  pixel_std: [58.395, 57.12, 57.375]
+  position_embedding: {_target_: detrex.layers.PositionEmbeddingSine, normalize: true, num_pos_feats: 128, offset: -0.5, temperature: 10000}
+  transformer:
+    _target_: projects.stabledino.modeling.DINOTransformer
+    decoder: {_target_: projects.stabledino.modeling.DINOTransformerDecoder, attn_dropout: 0.0, embed_dim: 256, feedforward_dim: 2048, ffn_dropout: 0.0, num_feature_levels: '${..num_feature_levels}', num_heads: 8, num_layers: 6, return_intermediate: true}
+    encoder: {_target_: projects.stabledino.modeling.StableDINOTransformerEncoder, attn_dropout: 0.0, embed_dim: 256, feedforward_dim: 2048, ffn_dropout: 0.0, multi_level_fusion: dense-fusion, num_feature_levels: '${..num_feature_levels}', num_heads: 8, num_layers: 6, post_norm: false}
+    num_feature_levels: 4
+    two_stage_num_proposals: ${..num_queries}
+optimizer:
+  _target_: torch.optim.AdamW
+  betas: [0.9, 0.999]
+  lr: 0.0001
+  params: {_target_: detectron2.solver.get_default_optimizer_params, base_lr: '${..lr}', lr_factor_func: !!python/name:None.%3Clambda%3E '', weight_decay_norm: 0.0}
+  weight_decay: 0.0001
+train:
+  amp: {enabled: false}
+  checkpointer: {max_to_keep: 100, period: 5000}
+  clip_grad:
+    enabled: true
+    params: {max_norm: 0.1, norm_type: 2}
+  ddp: {broadcast_buffers: false, find_unused_parameters: false, fp16_compression: false}
+  device: cpu
+  eval_period: 5000
+  fast_dev_run: {enabled: false}
+  init_checkpoint: detectron2://ImageNetPretrained/torchvision/R-50.pkl
+  log_period: 20
+  max_iter: 90000
+  model_ema: {decay: 0.999, device: '', enabled: false, use_ema_weights_for_eval_only: false}
+  output_dir: /Users/nguyenquangvinh/Desktop/Lab/DamageDetector/object_detection/stable_dino/train/smoke_crack500_det
+  seed: 60
+  wandb:
+    enabled: false
+    params: {dir: ./wandb_output, name: detrex_experiment, project: detrex}

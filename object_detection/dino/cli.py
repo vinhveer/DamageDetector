@@ -4,10 +4,10 @@ import argparse
 from pathlib import Path
 
 from inference_api.cli_support import log_to_stderr, parse_label_list, parse_queries, parse_roi, print_json
+from object_detection.dinov2.dinov2_classifier import default_dinov2_checkpoint
+from object_detection.dinov2.dinov2_prototypes import default_dinov2_embedding_checkpoint
+from object_detection.dinov2.prototype_dataset import build_prototypes_from_yolo_dataset
 from .engine import default_gdino_checkpoint
-from .dinov2_classifier import default_dinov2_checkpoint
-from .dinov2_prototypes import default_dinov2_embedding_checkpoint
-from .prototype_dataset import build_prototypes_from_yolo_dataset
 from .client import get_dino_service
 
 

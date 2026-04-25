@@ -55,6 +55,8 @@ setup(
     name="damage-detector",
     version="0.1.0",
     description="DamageDetector model runtimes, training pipelines, and tooling.",
+    # These are repo-root helper modules imported as top-level modules.
+    py_modules=["torch_runtime", "device_utils"],
     packages=find_packages(
         include=[
             "inference_api",
@@ -78,6 +80,8 @@ setup(
             "damage-dino-download=object_detection.dino.download:main",
             "damage-grounding-dino-image=object_detection.grounding_dino.image:main",
             "damage-grounding-dino-folder=object_detection.grounding_dino.folder:main",
+            "damage-stable-dino-train=object_detection.stable_dino.train:main",
+            "damage-stable-dino-infer=object_detection.stable_dino.Inference:main",
             "damage-unet=segmentation.unet.cli:main",
             "damage-unet-train=segmentation.unet.train:main",
             "damage-unet-predict=segmentation.unet.predict:main",

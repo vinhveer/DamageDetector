@@ -1,0 +1,16 @@
+# Example detection dataset manifest (YOLO-style).
+#
+# Place your dataset under: object_detection/datasets/crack_example/
+# with this layout:
+#   crack_example/
+#     train/images/
+#     train/labels/
+#     val/images/
+#     val/labels/
+
+path: object_detection/datasets/crack_example
+train: train/images
+val: val/images
+
+names:
+  0: crack

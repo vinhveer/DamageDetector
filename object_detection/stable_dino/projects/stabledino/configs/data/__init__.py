@@ -1,0 +1,1 @@
+"""StableDINO data config package."""

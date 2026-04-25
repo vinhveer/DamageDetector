@@ -1,0 +1,18 @@
+[console_scripts]
+damage-cropper = ui.create_data_tools.cropper_app.main:main
+damage-dino = object_detection.dino:main
+damage-dino-download = object_detection.dino.download:main
+damage-editor = ui.editor_app:main
+damage-grounding-dino-folder = object_detection.grounding_dino.folder:main
+damage-grounding-dino-image = object_detection.grounding_dino.image:main
+damage-models = tools.download_models:main
+damage-sam = segmentation.sam.no_finetune.cli:main
+damage-sam-finetune = segmentation.sam.finetune.cli:main
+damage-sam-finetune-pseudo-label = segmentation.sam.finetune.pseudo_label:main
+damage-sam-finetune-test = segmentation.sam.finetune.test:main
+damage-sam-finetune-train = segmentation.sam.finetune.train:main
+damage-stable-dino-infer = object_detection.stable_dino.Inference:main
+damage-stable-dino-train = object_detection.stable_dino.train:main
+damage-unet = segmentation.unet.cli:main
+damage-unet-predict = segmentation.unet.predict:main
+damage-unet-train = segmentation.unet.train:main
