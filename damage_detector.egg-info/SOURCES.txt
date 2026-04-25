@@ -21,6 +21,15 @@ inference_api/workflow_resolver.py
 inference_api/workflows.py
 object_detection/__init__.py
 object_detection/__main__.py
+object_detection/damage_scan/__init__.py
+object_detection/damage_scan/__main__.py
+object_detection/damage_scan/cli.py
+object_detection/damage_scan/detectors.py
+object_detection/damage_scan/geometry.py
+object_detection/damage_scan/models.py
+object_detection/damage_scan/pipeline.py
+object_detection/damage_scan/prompts.py
+object_detection/damage_scan/sqlite_store.py
 object_detection/datasets/__init__.py
 object_detection/datasets/adapters.py
 object_detection/datasets/augment.py
@@ -198,6 +207,7 @@ tools/__init__.py
 tools/clean_binary_mask_dataset.py
 tools/convert_crack500_seg_to_detection.py
 tools/crop_images.py
+tools/detect_damage_tiled_sqlite.py
 tools/download_models.py
 tools/extract_dataset_subset.py
 tools/gdino_detect_folder.py

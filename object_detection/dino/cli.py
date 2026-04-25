@@ -73,6 +73,10 @@ def _checkpoint_help(default_path: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m object_detection.dino", description="CLI for the DINO engine.")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    parser.add_argument("--service-workers", type=int, default=0, help="How many DINO worker processes to keep. 0 = auto.")
+    parser.add_argument("--service-queue-size", type=int, default=0, help="How many waiting calls to buffer before rejecting. 0 = auto.")
+    parser.add_argument("--service-batch-size", type=int, default=0, help="Chunk size per worker for predict-batch. 0 = auto.")
+    parser.add_argument("--service-device-ids", default="", help="Optional comma-separated CUDA device ids to pin DINO workers to, e.g. 0,1.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_common(subparser: argparse.ArgumentParser) -> None:
@@ -185,7 +189,12 @@ def main(argv: list[str] | None = None) -> int:
         print_json(result, pretty=bool(args.pretty))
         return 0
 
-    service = get_dino_service()
+    service = get_dino_service(
+        num_workers=int(args.service_workers or 0),
+        queue_size=int(args.service_queue_size or 0),
+        batch_size=int(args.service_batch_size or 0),
+        device_ids=str(args.service_device_ids or "").strip() or None,
+    )
     try:
         params = _common_params(args)
         if args.command == "warmup":

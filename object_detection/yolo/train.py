@@ -8,7 +8,7 @@ from typing import Any
 from inference_api.cli_support import print_json
 from object_detection.datasets import build_yolo_training_kwargs, load_detection_dataset
 
-from .lib import load_yolo_class, resolve_device
+from .lib import configure_yolo_dataloader, load_yolo_class, resolve_device
 
 
 @contextmanager
@@ -31,8 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=1024)
     parser.add_argument("--batch", type=int, default=16)
-    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
+    parser.add_argument("--device", default="auto", help="Device selector. Examples: auto, cpu, mps, cuda, 0, 0,1, cuda:0,1")
+    parser.add_argument("--num-gpus", type=int, default=0, help="How many CUDA GPUs to use when --device is auto/cuda. 0 = all available.")
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=None, help="Use pinned host memory for the dataloader.")
+    parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=None, help="Keep dataloader workers alive across epochs.")
+    parser.add_argument("--prefetch-factor", type=int, default=None, help="Dataloader prefetch_factor when workers > 0.")
     parser.add_argument("--patience", type=int, default=50)
     parser.add_argument("--project", default="object_detection/yolo/train")
     parser.add_argument("--name", default="train")
@@ -55,7 +59,12 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest = load_detection_dataset(args.data)
 
-    resolved_device = resolve_device(args.device)
+    resolved_device = resolve_device(args.device, num_gpus=int(args.num_gpus or 0))
+    configure_yolo_dataloader(
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
+        prefetch_factor=args.prefetch_factor,
+    )
 
     YOLO = load_yolo_class()
     model = YOLO(args.model)

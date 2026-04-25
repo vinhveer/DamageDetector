@@ -143,6 +143,9 @@ def build_stable_dino_overrides(
     image_size: int,
     batch_size: int,
     workers: int,
+    pin_memory: bool | None,
+    persistent_workers: bool | None,
+    prefetch_factor: int | None,
     device: str,
     output_dir: str,
     init_checkpoint: str | None,
@@ -172,6 +175,12 @@ def build_stable_dino_overrides(
         f"dataloader.train.mapper.augmentation.max_scale={float(aug['max_scale'])}",
         _string_override("dataloader.train.mapper.augmentation.random_flip", str(aug["random_flip"])),
     ]
+    if pin_memory is not None:
+        overrides.append(f"dataloader.train.pin_memory={bool(pin_memory)}")
+    if persistent_workers is not None and int(workers) > 0:
+        overrides.append(f"dataloader.train.persistent_workers={bool(persistent_workers)}")
+    if prefetch_factor is not None and int(prefetch_factor) > 0 and int(workers) > 0:
+        overrides.append(f"dataloader.train.prefetch_factor={int(prefetch_factor)}")
     if init_checkpoint:
         overrides.append(_string_override("train.init_checkpoint", str(init_checkpoint)))
     return overrides

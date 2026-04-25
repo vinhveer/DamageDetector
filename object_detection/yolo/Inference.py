@@ -20,7 +20,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--iou", type=float, default=0.45)
     parser.add_argument("--max-det", type=int, default=300)
-    parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
+    parser.add_argument("--device", default="auto", help="Device selector. Examples: auto, cpu, mps, cuda, 0, 0,1, cuda:0,1")
+    parser.add_argument("--num-gpus", type=int, default=0, help="How many CUDA GPUs to use when --device is auto/cuda. 0 = all available.")
+    parser.add_argument("--batch", type=int, default=1, help="Ultralytics predict batch size for folder/video-style sources.")
     parser.add_argument("--save", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--project", default="object_detection/yolo/inference")
     parser.add_argument("--name", default="predict")
@@ -67,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     source_path = Path(args.source).expanduser()
     source: str = str(source_path.resolve()) if source_path.exists() else str(args.source)
 
-    resolved_device = resolve_device(args.device)
+    resolved_device = resolve_device(args.device, num_gpus=int(args.num_gpus or 0))
 
     YOLO = load_yolo_class()
     model = YOLO(str(model_path))
@@ -77,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
         conf=float(args.conf),
         iou=float(args.iou),
         max_det=int(args.max_det),
+        batch=int(args.batch),
         device=resolved_device,
         save=bool(args.save),
         project=str(args.project),
