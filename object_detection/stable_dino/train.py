@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import pkgutil
 from pathlib import Path
 
 from object_detection.datasets import build_stable_dino_overrides, load_detection_dataset
 from torch_runtime import get_torch, select_device_str
+
+
+def _ensure_python312_pkg_resources_compat() -> None:
+    """Shim removed pkgutil symbols for old pkg_resources consumers on Python 3.12+."""
+    if not hasattr(pkgutil, "ImpImporter"):
+        class ImpImporter:  # pragma: no cover - compatibility shim
+            pass
+
+        pkgutil.ImpImporter = ImpImporter
+    if not hasattr(pkgutil, "ImpLoader"):
+        class ImpLoader:  # pragma: no cover - compatibility shim
+            pass
+
+        pkgutil.ImpLoader = ImpLoader
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +71,7 @@ def _resolve_launch_num_gpus(device: str, requested_num_gpus: int) -> int:
 
 
 def _worker_main(args: argparse.Namespace) -> None:
+    _ensure_python312_pkg_resources_compat()
     from object_detection.stable_dino.tools import train_net
 
     manifest = load_detection_dataset(args.dataset)
@@ -93,6 +109,7 @@ def _worker_main(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _ensure_python312_pkg_resources_compat()
     parser = build_parser()
     args = parser.parse_args(argv)
     resolved_device = select_device_str(args.device)
