@@ -1,11 +1,11 @@
-from detrex.config import get_config
+from object_detection.stable_dino.detrex_compat import get_detrex_config
 from .models.stablegdino_swin_large_384 import model
 
 # get default config
-dataloader = get_config("common/data/coco_detr.py").dataloader
-optimizer = get_config("common/optim.py").AdamW
-lr_multiplier = get_config("common/coco_schedule.py").lr_multiplier_12ep
-train = get_config("common/train.py").train
+dataloader = get_detrex_config("common/data/coco_detr.py").dataloader
+optimizer = get_detrex_config("common/optim.py").AdamW
+lr_multiplier = get_detrex_config("common/coco_schedule.py").lr_multiplier_12ep
+train = get_detrex_config("common/train.py").train
 
 # modify training config
 train.init_checkpoint = "detectron2://ImageNetPretrained/torchvision/R-50.pkl"

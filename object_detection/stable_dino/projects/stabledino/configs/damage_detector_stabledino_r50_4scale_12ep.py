@@ -1,12 +1,12 @@
-from detrex.config import get_config
+from object_detection.stable_dino.detrex_compat import get_detrex_config
 
 from .data.coco_instance_seg import dataloader
 from .models.stabledino_r50 import model
 
 # Optim/schedule/train boilerplate from detrex.
-optimizer = get_config("common/optim.py").AdamW
-lr_multiplier = get_config("common/coco_schedule.py").lr_multiplier_12ep
-train = get_config("common/train.py").train
+optimizer = get_detrex_config("common/optim.py").AdamW
+lr_multiplier = get_detrex_config("common/coco_schedule.py").lr_multiplier_12ep
+train = get_detrex_config("common/train.py").train
 
 # Defaults (overridden by object_detection.datasets adapter via LazyConfig opts).
 train.init_checkpoint = "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
