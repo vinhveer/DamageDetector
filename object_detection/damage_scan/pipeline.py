@@ -36,12 +36,22 @@ class DamageScanConfig:
     service_queue_size: int = 0
     service_batch_size: int = 0
     service_device_ids: str = ""
+    store_image_path_mode: str = "name"
 
     def as_jsonable(self) -> dict:
         data = asdict(self)
         data["input_dir"] = str(self.input_dir)
         data["db_path"] = str(self.db_path)
         return data
+
+
+def stored_image_path(image: ImageInfo, *, mode: str) -> str:
+    raw_mode = str(mode or "name").strip().lower()
+    if raw_mode == "absolute":
+        return str(image.path)
+    if raw_mode == "relative":
+        return str(image.rel_path)
+    return str(image.path.name)
 
 
 def iter_images(input_dir: Path, *, recursive: bool, limit: int = 0) -> list[Path]:
@@ -144,7 +154,12 @@ class DamageScanPipeline:
         if log_fn is not None:
             log_fn(f"[{index}/{total}] {image_path.name}")
         info = read_image_info(input_dir, image_path)
-        image_id = self.store.upsert_image(run_id=run_id, image=info, status="running")
+        image_id = self.store.upsert_image(
+            run_id=run_id,
+            image=info,
+            stored_path=stored_image_path(info, mode=str(self.config.store_image_path_mode)),
+            status="running",
+        )
         try:
             self._process_image(
                 run_id=run_id,
@@ -217,9 +232,8 @@ class DamageScanPipeline:
             roi_box=None,
             log_fn=log_fn,
         )
-        raw_detections = [det for det in raw_detections if self._box_within_image_fraction(det, image=image)]
-        final = nms_detections(raw_detections, iou_threshold=float(spec.nms_iou), max_dets=int(self.config.final_max_dets_per_class))
-        final = [det for det in final if self._box_within_image_fraction(det, image=image)]
+        # Keep all detections as-is (no max-size filter, no NMS).
+        final = list(raw_detections)
         final = [
             Detection(
                 box=det.box,
@@ -236,7 +250,3 @@ class DamageScanPipeline:
             for det in final
         ]
         return raw_detections, final
-
-    def _box_within_image_fraction(self, det: Detection, *, image: ImageInfo) -> bool:
-        max_fraction = float(self.config.max_box_fraction_of_image)
-        return float(det.box.width) <= float(image.width) * max_fraction and float(det.box.height) <= float(image.height) * max_fraction

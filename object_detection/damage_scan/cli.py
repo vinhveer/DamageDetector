@@ -20,6 +20,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--service-queue-size", type=int, default=0, help="How many waiting DINO calls to buffer. 0 = auto.")
     parser.add_argument("--service-batch-size", type=int, default=0, help="Chunk size per DINO worker for predict-batch. 0 = auto.")
     parser.add_argument("--service-device-ids", default="", help="Optional comma-separated CUDA ids for DINO workers, e.g. 0,1.")
+    parser.add_argument(
+        "--store-image-path-mode",
+        default="name",
+        choices=["name", "relative", "absolute"],
+        help="How to store `images.path` in SQLite. Default: name. Use `relative` or `absolute` only when needed.",
+    )
     parser.add_argument("--save-overlays", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--include-full-raw-in-overlay", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -42,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         service_queue_size=int(args.service_queue_size),
         service_batch_size=int(args.service_batch_size),
         service_device_ids=str(args.service_device_ids or ""),
+        store_image_path_mode=str(args.store_image_path_mode),
         save_overlays=bool(args.save_overlays),
         include_full_raw_in_overlay=bool(args.include_full_raw_in_overlay),
     )

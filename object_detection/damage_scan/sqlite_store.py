@@ -122,14 +122,14 @@ class DamageScanStore:
             )
             self.conn.commit()
 
-    def upsert_image(self, *, run_id: str, image: ImageInfo, status: str = "pending") -> int:
+    def upsert_image(self, *, run_id: str, image: ImageInfo, stored_path: str, status: str = "pending") -> int:
         with self._lock:
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO images (run_id, rel_path, path, name, width, height, status)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (run_id, image.rel_path, str(image.path), image.path.name, int(image.width), int(image.height), status),
+                (run_id, image.rel_path, str(stored_path), image.path.name, int(image.width), int(image.height), status),
             )
             self.conn.execute(
                 """
@@ -137,7 +137,7 @@ class DamageScanStore:
                 SET path = ?, name = ?, width = ?, height = ?, status = ?
                 WHERE run_id = ? AND rel_path = ?
                 """,
-                (str(image.path), image.path.name, int(image.width), int(image.height), status, run_id, image.rel_path),
+                (str(stored_path), image.path.name, int(image.width), int(image.height), status, run_id, image.rel_path),
             )
             row = self.conn.execute(
                 "SELECT image_id FROM images WHERE run_id = ? AND rel_path = ?",
