@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import pkgutil
+from importlib.machinery import FileFinder
 from pathlib import Path
 
 from object_detection.datasets import build_stable_dino_overrides, load_detection_dataset
@@ -20,6 +21,12 @@ def _ensure_python312_pkg_resources_compat() -> None:
             pass
 
         pkgutil.ImpLoader = ImpLoader
+    if not hasattr(FileFinder, "find_module"):
+        def find_module(self, fullname: str, path: object | None = None):
+            spec = self.find_spec(fullname)
+            return spec.loader if spec is not None else None
+
+        FileFinder.find_module = find_module
 
 
 def build_parser() -> argparse.ArgumentParser:
