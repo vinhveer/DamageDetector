@@ -34,7 +34,7 @@ from detectron2.engine.defaults import create_ddp_model
 from detectron2.evaluation import inference_on_dataset, print_csv_format
 from detectron2.utils import comm
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 
@@ -80,8 +80,8 @@ class Trainer(SimpleTrainer):
         Implement the standard training logic described above.
         """
         assert self.model.training, "[Trainer] model was changed to eval mode!"
-        assert torch.cuda.is_available(), "[Trainer] CUDA is required for AMP training!"
-        from torch.cuda.amp import autocast
+        use_cuda_amp = bool(self.amp and torch.cuda.is_available())
+        autocast = torch.amp.autocast if hasattr(torch, "amp") else None
 
         start = time.perf_counter()
         """
@@ -94,7 +94,12 @@ class Trainer(SimpleTrainer):
         If you want to do something with the losses, you can wrap the model.
         """
         loss_dict = self.model(data)
-        with autocast(enabled=self.amp):
+        autocast_context = (
+            autocast(device_type="cuda", enabled=True)
+            if use_cuda_amp and autocast is not None
+            else nullcontext()
+        )
+        with autocast_context:
             if isinstance(loss_dict, torch.Tensor):
                 losses = loss_dict
                 loss_dict = {"total_loss": loss_dict}
@@ -107,7 +112,7 @@ class Trainer(SimpleTrainer):
         """
         self.optimizer.zero_grad()
 
-        if self.amp:
+        if use_cuda_amp:
             self.grad_scaler.scale(losses).backward()
             if self.clip_grad_params is not None:
                 self.grad_scaler.unscale_(self.optimizer)

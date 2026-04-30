@@ -355,6 +355,7 @@ class StableDINOCriterion(TwoStageCriterion):
             focal_alpha:  for focal loss
         """
         losses = {}
+        device = targets[0]["labels"].device if targets else torch.device("cpu")
         if dn_metas and "output_known_lbs_bboxes" in dn_metas:
             output_known_lbs_bboxes, dn_num, single_padding = (
                 dn_metas["output_known_lbs_bboxes"],
@@ -363,16 +364,17 @@ class StableDINOCriterion(TwoStageCriterion):
             )
             dn_idx = []
             for i in range(len(targets)):
+                device = targets[i]["labels"].device
                 if len(targets[i]["labels"]) > 0:
-                    t = torch.arange(0, len(targets[i]["labels"])).long().cuda()
+                    t = torch.arange(0, len(targets[i]["labels"]), device=device).long()
                     t = t.unsqueeze(0).repeat(dn_num, 1)
                     tgt_idx = t.flatten()
                     output_idx = (
                         torch.tensor(range(dn_num)) * single_padding
-                    ).long().cuda().unsqueeze(1) + t
+                    ).long().to(device).unsqueeze(1) + t
                     output_idx = output_idx.flatten()
                 else:
-                    output_idx = tgt_idx = torch.tensor([]).long().cuda()
+                    output_idx = tgt_idx = torch.tensor([], device=device).long()
 
                 dn_idx.append((output_idx, tgt_idx))
             l_dict = {}
@@ -389,9 +391,9 @@ class StableDINOCriterion(TwoStageCriterion):
             l_dict = {k + "_dn": v for k, v in l_dict.items()}
             losses.update(l_dict)
         else:
-            losses["loss_bbox_dn"] = torch.as_tensor(0.0).to("cuda")
-            losses["loss_giou_dn"] = torch.as_tensor(0.0).to("cuda")
-            losses["loss_class_dn"] = torch.as_tensor(0.0).to("cuda")
+            losses["loss_bbox_dn"] = torch.as_tensor(0.0, device=device)
+            losses["loss_giou_dn"] = torch.as_tensor(0.0, device=device)
+            losses["loss_class_dn"] = torch.as_tensor(0.0, device=device)
 
         for i in range(aux_num):
             # dn aux loss
@@ -414,9 +416,9 @@ class StableDINOCriterion(TwoStageCriterion):
                     )
                 l_dict = {k + f"_dn_{i}": v for k, v in l_dict.items()}
             else:
-                l_dict["loss_bbox_dn"] = torch.as_tensor(0.0).to("cuda")
-                l_dict["loss_giou_dn"] = torch.as_tensor(0.0).to("cuda")
-                l_dict["loss_class_dn"] = torch.as_tensor(0.0).to("cuda")
+                l_dict["loss_bbox_dn"] = torch.as_tensor(0.0, device=device)
+                l_dict["loss_giou_dn"] = torch.as_tensor(0.0, device=device)
+                l_dict["loss_class_dn"] = torch.as_tensor(0.0, device=device)
                 l_dict = {k + f"_{i}": v for k, v in l_dict.items()}
             losses.update(l_dict)
         return losses

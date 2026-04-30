@@ -41,10 +41,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=None, help="Use pinned host memory for the train dataloader.")
     parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=None, help="Keep train dataloader workers alive across epochs.")
     parser.add_argument("--prefetch-factor", type=int, default=None, help="Train dataloader prefetch_factor when workers > 0.")
+    parser.add_argument("--max-iter", type=int, default=None, help="Override StableDINO train.max_iter.")
+    parser.add_argument("--eval-period", type=int, default=None, help="Override StableDINO train.eval_period. 0 disables periodic eval.")
+    parser.add_argument("--log-period", type=int, default=None, help="Override StableDINO train.log_period.")
+    parser.add_argument("--checkpoint-period", type=int, default=None, help="Override StableDINO train.checkpointer.period.")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--augmentation-profile", default="balanced", choices=["light", "balanced", "aggressive"])
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--eval-split", default="val", choices=["train", "val", "test"], help="Dataset split used by eval-only and periodic evaluation.")
     parser.add_argument("--num-gpus", type=int, default=0, help="How many CUDA GPUs to launch. 0 = all available.")
     parser.add_argument("--num-machines", type=int, default=1)
     parser.add_argument("--machine-rank", type=int, default=0)
@@ -92,7 +97,16 @@ def _worker_main(args: argparse.Namespace) -> None:
         device=resolved_device,
         output_dir=str(Path(args.output_dir).expanduser().resolve()),
         init_checkpoint=str(args.init_checkpoint or "").strip() or None,
+        eval_split=str(args.eval_split),
     )
+    if args.max_iter is not None:
+        overrides.append(f"train.max_iter={int(args.max_iter)}")
+    if args.eval_period is not None:
+        overrides.append(f"train.eval_period={int(args.eval_period)}")
+    if args.log_period is not None:
+        overrides.append(f"train.log_period={int(args.log_period)}")
+    if args.checkpoint_period is not None:
+        overrides.append(f"train.checkpointer.period={int(args.checkpoint_period)}")
     if args.opts:
         overrides.extend(list(args.opts))
     train_args = argparse.Namespace(

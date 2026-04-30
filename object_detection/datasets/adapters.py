@@ -39,7 +39,6 @@ def _convert_yolo_label_line(parts: list[str], width: int, height: int, names: l
         "bbox": [x, y, box_width, box_height],
         "area": box_width * box_height,
         "iscrowd": 0,
-        "segmentation": [[x, y, x + box_width, y, x + box_width, y + box_height, x, y + box_height]],
     }
 
 
@@ -149,6 +148,7 @@ def build_stable_dino_overrides(
     device: str,
     output_dir: str,
     init_checkpoint: str | None,
+    eval_split: str = "val",
 ) -> list[str]:
     dataset_info = prepare_stable_dino_dataset(
         manifest,
@@ -156,14 +156,17 @@ def build_stable_dino_overrides(
         cache_root=cache_root,
     )
     aug = build_stable_dino_augmentation(augmentation_profile, image_size)
+    eval_key = f"{str(eval_split or 'val').strip().lower()}_name"
+    eval_name = dataset_info.get(eval_key) or dataset_info.get("val_name") or dataset_info.get("train_name")
 
     def _string_override(key: str, value: str) -> str:
         return f"{key}={json.dumps(str(value))}"
 
     overrides = [
         _string_override("dataloader.train.dataset.names", str(dataset_info["train_name"])),
-        _string_override("dataloader.test.dataset.names", str(dataset_info["val_name"])),
-        _string_override("dataloader.evaluator.dataset_name", str(dataset_info["val_name"])),
+        _string_override("dataloader.test.dataset.names", str(eval_name)),
+        _string_override("dataloader.evaluator.dataset_name", str(eval_name)),
+        _string_override("dataloader.evaluator.output_dir", str(output_dir)),
         f"dataloader.train.total_batch_size={int(batch_size)}",
         f"dataloader.train.num_workers={int(workers)}",
         _string_override("train.output_dir", str(output_dir)),

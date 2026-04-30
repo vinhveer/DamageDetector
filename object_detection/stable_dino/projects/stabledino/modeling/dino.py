@@ -506,7 +506,8 @@ class DINO(nn.Module):
             return None, None, None, None
             # positive and negative dn queries
         dn_number = dn_number * gdn_k
-        known = [(torch.ones_like(t["labels"])).cuda() for t in targets]
+        device = targets[0]["labels"].device
+        known = [torch.ones_like(t["labels"], device=device) for t in targets]
         batch_size = len(known)
         known_num = [sum(k) for k in known]
         if int(max(known_num)) == 0:
@@ -547,7 +548,7 @@ class DINO(nn.Module):
         # add noise to boxes
         pad_size = int(single_padding * gdn_k * dn_number)
         total_gt = sum(known_num).item()
-        item_idx_of_k = torch.arange(gdn_k).repeat(dn_number).repeat_interleave(total_gt).cuda()
+        item_idx_of_k = torch.arange(gdn_k, device=device).repeat(dn_number).repeat_interleave(total_gt)
         # for example: single_padding is 4, gdn_k is 2, dn_number is 33
         # bs = 2, total_gt = 5
         # item_idx_of_k: [0, 0, 0, 0, 0, 1, 1, 1, 1, 1] x25
@@ -600,7 +601,7 @@ class DINO(nn.Module):
             rand_part *= rand_sign
 
             # add noise
-            known_bbox_ = known_bbox_ + torch.mul(rand_part, diff).cuda() * box_noise_scale
+            known_bbox_ = known_bbox_ + torch.mul(rand_part, diff).to(device) * box_noise_scale
             known_bbox_ = known_bbox_.clamp(min=0.0, max=1.0)
 
             # convert back to [x, y, w, h]
@@ -615,24 +616,24 @@ class DINO(nn.Module):
                 else:
                     gious = generalized_box_iou_pairwise(box_cxcywh_to_xyxy(known_bbox_expand), box_cxcywh_to_xyxy(known_bboxs)) # [dn_number * gdn_k * total_gt]
                     k_indice = gious.view(dn_number, gdn_k, total_gt).max(1)[1].flatten() # [dn_number * total_gt]
-                    tgtid_indice = torch.arange(total_gt).repeat(dn_number).cuda()
-                    group_indices = torch.arange(dn_number).repeat_interleave(total_gt).cuda() * gdn_k * total_gt
+                    tgtid_indice = torch.arange(total_gt, device=device).repeat(dn_number)
+                    group_indices = torch.arange(dn_number, device=device).repeat_interleave(total_gt) * gdn_k * total_gt
                     final_indice = k_indice * total_gt + tgtid_indice + group_indices
                     is_pos[final_indice] = True
 
         # transform noised items to desired inputs
-        m = known_labels_expaned.long().to("cuda")
+        m = known_labels_expaned.long().to(device)
         input_label_embed = label_enc(m)
         input_bbox_embed = inverse_sigmoid(known_bbox_expand)
 
         # init input_query_label and input_query_bbox
-        input_query_label = torch.zeros(pad_size, hidden_dim).cuda().repeat(batch_size, 1, 1)
-        input_query_bbox = torch.zeros(pad_size, 4).cuda().repeat(batch_size, 1, 1)
+        input_query_label = torch.zeros(pad_size, hidden_dim, device=device).repeat(batch_size, 1, 1)
+        input_query_bbox = torch.zeros(pad_size, 4, device=device).repeat(batch_size, 1, 1)
         if self.dn_select_min_noise_as_pos:
-            dn_is_pos = torch.zeros(pad_size).bool().cuda().repeat(batch_size, 1)
+            dn_is_pos = torch.zeros(pad_size, device=device).bool().repeat(batch_size, 1)
 
         # build map from indices of catted gts to indices of input_query_label (each item in bs.)
-        map_known_indice = torch.tensor([]).to("cuda")
+        map_known_indice = torch.tensor([], device=device)
         if len(known_num):
             map_known_indice = torch.cat(
                 [torch.tensor(range(num)) for num in known_num]
@@ -653,7 +654,7 @@ class DINO(nn.Module):
             
         # build attention masks
         tgt_size = pad_size + num_queries
-        attn_mask = torch.ones(tgt_size, tgt_size).to("cuda") < 0
+        attn_mask = torch.ones(tgt_size, tgt_size, device=device) < 0
         # match query cannot see the reconstruct
         attn_mask[pad_size:, :pad_size] = True
         if self.dn_to_matching_block:
@@ -682,7 +683,7 @@ class DINO(nn.Module):
         # build gradient detach mask
         if self.dn_detach_dn2matching:
             # detach dn to matching
-            dn2matching_detach_mask = torch.zeros(tgt_size, tgt_size).to("cuda").bool()
+            dn2matching_detach_mask = torch.zeros(tgt_size, tgt_size, device=device).bool()
             dn2matching_detach_mask[:pad_size, pad_size:] = True
 
         # build dn meta
