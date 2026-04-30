@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-gpus", type=int, default=0, help="How many CUDA GPUs to use when --device is auto/cuda. 0 = all available.")
     parser.add_argument("--batch", type=int, default=1, help="Ultralytics predict batch size for folder/video-style sources.")
     parser.add_argument("--save", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True, help="Stream prediction results to reduce peak memory for large sources.")
     parser.add_argument("--project", default="object_detection/yolo/inference")
     parser.add_argument("--name", default="predict")
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
@@ -82,11 +83,12 @@ def main(argv: list[str] | None = None) -> int:
         batch=int(args.batch),
         device=resolved_device,
         save=bool(args.save),
+        stream=bool(args.stream),
         project=str(args.project),
         name=str(args.name),
     )
 
-    serialized = [_result_to_dict(item) for item in list(results)]
+    serialized = [_result_to_dict(item) for item in results]
     payload = {
         "status": "ok",
         "model": str(model_path),

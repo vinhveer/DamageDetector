@@ -129,7 +129,15 @@ def main(argv: list[str] | None = None) -> int:
     resolved_device = select_device_str(args.device)
     launch_num_gpus = _resolve_launch_num_gpus(resolved_device, int(args.num_gpus))
     args.num_gpus = int(launch_num_gpus)
-    from detectron2.engine import launch
+    try:
+        from detectron2.engine import launch
+    except Exception as exc:
+        raise RuntimeError(
+            "StableDINO training requires Detectron2. Install a Detectron2 wheel matching "
+            "your Torch/CUDA/Python environment, then rerun this command. The base "
+            "requirements_dino.txt no longer installs Detectron2 from source because that "
+            "often fails on Colab."
+        ) from exc
 
     launch(
         _worker_main,

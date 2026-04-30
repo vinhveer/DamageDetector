@@ -18,25 +18,36 @@ def _build_categories(names: list[str]) -> list[dict[str, Any]]:
     return [{"id": index + 1, "name": name, "supercategory": "damage"} for index, name in enumerate(names)]
 
 
-def _convert_yolo_label_line(parts: list[str], width: int, height: int, names: list[str], annotation_id: int, image_id: int) -> dict[str, Any]:
+def _convert_yolo_label_line(
+    parts: list[str],
+    width: int,
+    height: int,
+    names: list[str],
+    annotation_id: int,
+    image_id: int,
+) -> dict[str, Any] | None:
     class_index = int(parts[0])
     if class_index < 0 or class_index >= len(names):
         raise ValueError(f"Class index {class_index} is out of range for {len(names)} classes")
 
     x_center = float(parts[1]) * width
     y_center = float(parts[2]) * height
-    box_width = float(parts[3]) * width
-    box_height = float(parts[4]) * height
-    x = max(0.0, x_center - (box_width / 2.0))
-    y = max(0.0, y_center - (box_height / 2.0))
-    box_width = max(0.0, min(box_width, width - x))
-    box_height = max(0.0, min(box_height, height - y))
+    raw_width = float(parts[3]) * width
+    raw_height = float(parts[4]) * height
+    x1 = max(0.0, x_center - (raw_width / 2.0))
+    y1 = max(0.0, y_center - (raw_height / 2.0))
+    x2 = min(float(width), x_center + (raw_width / 2.0))
+    y2 = min(float(height), y_center + (raw_height / 2.0))
+    box_width = max(0.0, x2 - x1)
+    box_height = max(0.0, y2 - y1)
+    if box_width <= 0.0 or box_height <= 0.0:
+        return None
 
     return {
         "id": annotation_id,
         "image_id": image_id,
         "category_id": class_index + 1,
-        "bbox": [x, y, box_width, box_height],
+        "bbox": [x1, y1, box_width, box_height],
         "area": box_width * box_height,
         "iscrowd": 0,
     }
@@ -54,19 +65,70 @@ def _split_cache_file(cache_root: Path, split_name: str) -> Path:
     return cache_root / f"{split_name}_coco.json"
 
 
+def _split_cache_meta_file(cache_root: Path, split_name: str) -> Path:
+    return cache_root / f"{split_name}_coco.meta.json"
+
+
+def _path_fingerprint(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {"path": str(path.resolve()), "mtime_ns": int(stat.st_mtime_ns), "size": int(stat.st_size)}
+
+
+def _label_path_for_image(split: DetectionSplit, image_path: Path) -> Path | None:
+    for image_dir, label_dir in zip(split.image_dirs, split.label_dirs):
+        try:
+            rel_path = image_path.relative_to(image_dir)
+        except ValueError:
+            continue
+        if label_dir is None:
+            return None
+        return (label_dir / rel_path).with_suffix(".txt")
+    raise ValueError(f"Image path is outside split image dirs: {image_path}")
+
+
+def _split_fingerprint(split: DetectionSplit, image_paths: list[Path]) -> dict[str, Any]:
+    labels: list[dict[str, Any]] = []
+    for image_path in image_paths:
+        label_path = _label_path_for_image(split, image_path)
+        if label_path is not None and label_path.exists():
+            labels.append(_path_fingerprint(label_path))
+    return {
+        "image_dirs": [str(path.resolve()) for path in split.image_dirs],
+        "label_dirs": [str(path.resolve()) if path is not None else None for path in split.label_dirs],
+        "images": [_path_fingerprint(path) for path in image_paths],
+        "labels": labels,
+    }
+
+
+def _load_cache_meta(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _export_split_to_coco(split: DetectionSplit, manifest: DetectionDatasetManifest, cache_root: Path) -> Path:
     if split.annotation_file is not None:
         return split.annotation_file
-    if split.label_dir is None:
+    if not any(label_dir is not None for label_dir in split.label_dirs):
         raise ValueError(f"Split '{split.name}' does not define labels or COCO annotations")
 
     cache_root.mkdir(parents=True, exist_ok=True)
     output_path = _split_cache_file(cache_root, split.name)
+    meta_path = _split_cache_meta_file(cache_root, split.name)
+    image_paths = iter_split_images(split)
+    fingerprint = _split_fingerprint(split, image_paths)
+    if output_path.exists() and _load_cache_meta(meta_path) == fingerprint:
+        return output_path
+
     images: list[dict[str, Any]] = []
     annotations: list[dict[str, Any]] = []
     annotation_id = 1
 
-    for image_id, image_path in enumerate(iter_split_images(split), start=1):
+    for image_id, image_path in enumerate(image_paths, start=1):
         width, height = _load_image_size(image_path)
         images.append(
             {
@@ -76,8 +138,8 @@ def _export_split_to_coco(split: DetectionSplit, manifest: DetectionDatasetManif
                 "height": height,
             }
         )
-        label_path = (split.label_dir / image_path.relative_to(split.image_dir)).with_suffix(".txt")
-        if not label_path.exists():
+        label_path = _label_path_for_image(split, image_path)
+        if label_path is None or not label_path.exists():
             continue
         for raw_line in label_path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
@@ -86,9 +148,10 @@ def _export_split_to_coco(split: DetectionSplit, manifest: DetectionDatasetManif
             parts = line.split()
             if len(parts) < 5:
                 raise ValueError(f"Invalid YOLO label line in {label_path}: {raw_line}")
-            annotations.append(
-                _convert_yolo_label_line(parts, width, height, manifest.names, annotation_id, image_id)
-            )
+            annotation = _convert_yolo_label_line(parts, width, height, manifest.names, annotation_id, image_id)
+            if annotation is None:
+                continue
+            annotations.append(annotation)
             annotation_id += 1
 
     payload = {
@@ -96,7 +159,8 @@ def _export_split_to_coco(split: DetectionSplit, manifest: DetectionDatasetManif
         "annotations": annotations,
         "categories": _build_categories(manifest.names),
     }
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    output_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    meta_path.write_text(json.dumps(fingerprint, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     return output_path
 
 

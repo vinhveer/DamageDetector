@@ -1,12 +1,11 @@
-# Object detection extra dependencies (YOLO + StableDINO).
+# Object detection extra dependencies (YOLO + DINO helpers).
 #
 # Install from repo root (recommended):
-#   DamageDetector/.venv/bin/python -m pip install -e DamageDetector
-#   DamageDetector/.venv/bin/python -m pip install -r DamageDetector/object_detection/requirements.txt
+#   python -m pip install -e DamageDetector
+#   python -m pip install -r DamageDetector/object_detection/requirements.txt
 #
-# Or install individually:
-#   DamageDetector/.venv/bin/python -m pip install -r DamageDetector/object_detection/requirements_yolo.txt
-#   DamageDetector/.venv/bin/python -m pip install -r DamageDetector/object_detection/requirements_dino.txt
+# Detectron2 is optional and environment-specific. Install it separately only
+# when running StableDINO training/evaluation. See requirements_dino.txt.
 
 -r requirements_yolo.txt
 -r requirements_dino.txt

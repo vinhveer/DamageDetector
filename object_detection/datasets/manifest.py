@@ -13,9 +13,17 @@ _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 @dataclass(frozen=True)
 class DetectionSplit:
     name: str
-    image_dir: Path
-    label_dir: Path | None
+    image_dirs: tuple[Path, ...]
+    label_dirs: tuple[Path | None, ...]
     annotation_file: Path | None
+
+    @property
+    def image_dir(self) -> Path:
+        return self.image_dirs[0]
+
+    @property
+    def label_dir(self) -> Path | None:
+        return self.label_dirs[0] if self.label_dirs else None
 
 
 @dataclass(frozen=True)
@@ -60,14 +68,20 @@ def _resolve_root(yaml_path: Path, data: dict[str, Any]) -> Path:
 def _resolve_path(root: Path, value: Any) -> Path | None:
     if value is None:
         return None
-    if isinstance(value, list):
-        if not value:
-            return None
-        value = value[0]
     path = Path(str(value)).expanduser()
     if not path.is_absolute():
         path = (root / path).resolve()
     return path
+
+
+def _resolve_paths(root: Path, value: Any) -> tuple[Path, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, list):
+        values = value
+    else:
+        values = [value]
+    return tuple(path for item in values if (path := _resolve_path(root, item)) is not None)
 
 
 def _guess_label_dir(image_dir: Path) -> Path | None:
@@ -81,16 +95,18 @@ def _guess_label_dir(image_dir: Path) -> Path | None:
 
 
 def _build_split(name: str, root: Path, data: dict[str, Any]) -> DetectionSplit | None:
-    split_path = _resolve_path(root, data.get(name))
-    if split_path is None:
+    split_paths = _resolve_paths(root, data.get(name))
+    if not split_paths:
         return None
-    annotation_file = None
-    label_dir = None
-    if split_path.suffix.lower() == ".json":
-        annotation_file = split_path
-    else:
-        label_dir = _guess_label_dir(split_path)
-    return DetectionSplit(name=name, image_dir=split_path, label_dir=label_dir, annotation_file=annotation_file)
+    if len(split_paths) == 1 and split_paths[0].suffix.lower() == ".json":
+        annotation_file = split_paths[0]
+        return DetectionSplit(name=name, image_dirs=(root,), label_dirs=(None,), annotation_file=annotation_file)
+
+    annotation_files = [path for path in split_paths if path.suffix.lower() == ".json"]
+    if annotation_files:
+        raise ValueError(f"Split '{name}' cannot mix COCO JSON annotations with image directories")
+    label_dirs = tuple(_guess_label_dir(path) for path in split_paths)
+    return DetectionSplit(name=name, image_dirs=tuple(split_paths), label_dirs=label_dirs, annotation_file=None)
 
 
 def load_detection_dataset(path: str | Path) -> DetectionDatasetManifest:
@@ -125,6 +141,9 @@ def load_detection_dataset(path: str | Path) -> DetectionDatasetManifest:
 def iter_split_images(split: DetectionSplit) -> list[Path]:
     if split.annotation_file is not None:
         return []
-    if not split.image_dir.exists():
-        raise FileNotFoundError(f"Split image directory not found: {split.image_dir}")
-    return sorted(path for path in split.image_dir.rglob("*") if path.is_file() and path.suffix.lower() in _IMAGE_EXTENSIONS)
+    images: list[Path] = []
+    for image_dir in split.image_dirs:
+        if not image_dir.exists():
+            raise FileNotFoundError(f"Split image directory not found: {image_dir}")
+        images.extend(path for path in image_dir.rglob("*") if path.is_file() and path.suffix.lower() in _IMAGE_EXTENSIONS)
+    return sorted(images)

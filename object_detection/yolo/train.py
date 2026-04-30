@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     YOLO = load_yolo_class()
     model = YOLO(args.model)
 
+    project_dir = Path(args.project).expanduser().resolve()
     train_kwargs: dict[str, Any] = {
         "epochs": int(args.epochs),
         "imgsz": int(args.imgsz),
@@ -76,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
         "device": resolved_device,
         "workers": int(args.workers),
         "patience": int(args.patience),
-        "project": str(args.project),
+        "project": str(project_dir),
         "name": str(args.name),
         "optimizer": str(args.optimizer),
         "seed": int(args.seed),

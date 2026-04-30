@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -122,22 +122,37 @@ class DamageScanPipeline:
                 )
             return run_id
 
+        max_in_flight = max(image_workers, image_workers * 2)
+        pending = iter(enumerate(images, start=1))
+        in_flight = set()
+
+        def submit_next() -> bool:
+            try:
+                index, image_path = next(pending)
+            except StopIteration:
+                return False
+            future = executor.submit(
+                self._run_one_image,
+                run_id=run_id,
+                input_dir=input_dir,
+                image_path=image_path,
+                index=index,
+                total=len(images),
+                log_fn=log_fn,
+                detector_log_fn=detector_log_fn,
+            )
+            in_flight.add(future)
+            return True
+
         with ThreadPoolExecutor(max_workers=image_workers, thread_name_prefix="damage-scan") as executor:
-            futures = [
-                executor.submit(
-                    self._run_one_image,
-                    run_id=run_id,
-                    input_dir=input_dir,
-                    image_path=image_path,
-                    index=index,
-                    total=len(images),
-                    log_fn=log_fn,
-                    detector_log_fn=detector_log_fn,
-                )
-                for index, image_path in enumerate(images, start=1)
-            ]
-            for future in as_completed(futures):
-                future.result()
+            while len(in_flight) < max_in_flight and submit_next():
+                pass
+            while in_flight:
+                done, in_flight = wait(in_flight, return_when=FIRST_COMPLETED)
+                for future in done:
+                    future.result()
+                while len(in_flight) < max_in_flight and submit_next():
+                    pass
         return run_id
 
     def _run_one_image(
@@ -232,8 +247,14 @@ class DamageScanPipeline:
             roi_box=None,
             log_fn=log_fn,
         )
-        # Keep all detections as-is (no max-size filter, no NMS).
-        final = list(raw_detections)
+        image_area = max(1, int(image.width) * int(image.height))
+        max_area = float(self.config.max_box_fraction_of_image) * float(image_area)
+        final_candidates = [det for det in raw_detections if float(det.box.area) <= max_area]
+        final_candidates = nms_detections(
+            final_candidates,
+            iou_threshold=float(spec.nms_iou),
+            max_dets=int(self.config.final_max_dets_per_class),
+        )
         final = [
             Detection(
                 box=det.box,
@@ -247,6 +268,6 @@ class DamageScanPipeline:
                 parent_detection_id=None,
                 raw={**dict(det.raw or {}), "final_prompt_key": spec.key, "mode": "full_image"},
             )
-            for det in final
+            for det in final_candidates
         ]
         return raw_detections, final
