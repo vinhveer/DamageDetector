@@ -35,9 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Train StableDINO with shared dataset helpers.",
     )
     parser.add_argument("--dataset", required=True, help="Path to shared detection dataset manifest")
+    default_config = Path(__file__).resolve().parent / "projects" / "stabledino" / "configs" / "damage_detector_stabledino_r50_4scale_12ep.py"
     parser.add_argument(
         "--config-file",
-        default="object_detection/stable_dino/projects/stabledino/configs/damage_detector_stabledino_r50_4scale_12ep.py",
+        default=str(default_config),
         help="StableDINO LazyConfig file",
     )
     parser.add_argument("--output-dir", default="object_detection/stable_dino/train")
