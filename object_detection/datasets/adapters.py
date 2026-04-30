@@ -14,8 +14,17 @@ def build_yolo_training_kwargs(manifest: DetectionDatasetManifest, augmentation_
     return kwargs
 
 
+_COCO_EXPORT_VERSION = 2
+
+
 def _build_categories(names: list[str]) -> list[dict[str, Any]]:
     return [{"id": index + 1, "name": name, "supercategory": "damage"} for index, name in enumerate(names)]
+
+
+def _bbox_polygon(x1: float, y1: float, box_width: float, box_height: float) -> list[list[float]]:
+    x2 = x1 + box_width
+    y2 = y1 + box_height
+    return [[x1, y1, x2, y1, x2, y2, x1, y2]]
 
 
 def _convert_yolo_label_line(
@@ -49,6 +58,7 @@ def _convert_yolo_label_line(
         "category_id": class_index + 1,
         "bbox": [x1, y1, box_width, box_height],
         "area": box_width * box_height,
+        "segmentation": _bbox_polygon(x1, y1, box_width, box_height),
         "iscrowd": 0,
     }
 
@@ -93,6 +103,7 @@ def _split_fingerprint(split: DetectionSplit, image_paths: list[Path]) -> dict[s
         if label_path is not None and label_path.exists():
             labels.append(_path_fingerprint(label_path))
     return {
+        "export_version": _COCO_EXPORT_VERSION,
         "image_dirs": [str(path.resolve()) for path in split.image_dirs],
         "label_dirs": [str(path.resolve()) if path is not None else None for path in split.label_dirs],
         "images": [_path_fingerprint(path) for path in image_paths],
