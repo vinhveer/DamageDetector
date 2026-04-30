@@ -8,7 +8,7 @@ optimizer = get_detrex_config("common/optim.py").AdamW
 lr_multiplier = get_detrex_config("common/coco_schedule.py").lr_multiplier_12ep
 train = get_detrex_config("common/train.py").train
 
-# Defaults (overridden by object_detection.datasets adapter via LazyConfig opts).
+# Defaults (overridden by object_detection.stable_dino.dataset_config via LazyConfig opts).
 train.init_checkpoint = "detectron2://ImageNetPretrained/torchvision/R-50.pkl"
 train.output_dir = "./output/damage_detector_stabledino_r50_4scale_12ep"
 train.max_iter = 90000

@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from inference_api.cli_support import print_json
-from object_detection.datasets import build_yolo_training_kwargs, load_detection_dataset
 
+from .dataset_config import build_yolo_augmentation_overrides, load_yolo_dataset_config
 from .lib import configure_yolo_dataloader, load_yolo_class, resolve_device
 
 
@@ -26,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m object_detection.yolo.train",
         description="Train YOLOv26 model with Ultralytics.",
     )
-    parser.add_argument("--data", required=True, help="Path to shared detection dataset manifest")
+    parser.add_argument("--data", required=True, help="Path to YOLO data config")
     parser.add_argument("--model", default="yolo26n.pt", help="Pretrained checkpoint or model yaml")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=1024)
@@ -57,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    manifest = load_detection_dataset(args.data)
+    data_config = load_yolo_dataset_config(args.data)
 
     resolved_device = resolve_device(args.device, num_gpus=int(args.num_gpus or 0))
     configure_yolo_dataloader(
@@ -86,7 +87,8 @@ def main(argv: list[str] | None = None) -> int:
         "pretrained": bool(args.pretrained),
         "verbose": bool(args.verbose),
     }
-    train_kwargs.update(build_yolo_training_kwargs(manifest, args.augmentation_profile))
+    train_kwargs["data"] = str(data_config.yaml_path)
+    train_kwargs.update(build_yolo_augmentation_overrides(args.augmentation_profile))
     if args.lr0 is not None:
         train_kwargs["lr0"] = float(args.lr0)
     if args.weight_decay is not None:
@@ -94,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Ultralytics resolves relative paths in the YAML from the current working directory,
     # not from the YAML file location. Train from the manifest directory so `path: .` works.
-    with _pushd(str(manifest.yaml_path.parent)):
+    with _pushd(str(data_config.yaml_path.parent)):
         results = model.train(**train_kwargs)
     save_dir = getattr(results, "save_dir", None)
     if save_dir is None:
@@ -104,9 +106,9 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "status": "ok",
         "model": str(args.model),
-        "data": str(manifest.yaml_path),
-        "dataset_root": str(manifest.dataset_root),
-        "classes": list(manifest.names),
+        "data": str(data_config.yaml_path),
+        "dataset_root": str(data_config.dataset_root),
+        "classes": list(data_config.names),
         "augmentation_profile": str(args.augmentation_profile),
         "device": resolved_device,
         "save_dir": str(save_dir) if save_dir is not None else None,

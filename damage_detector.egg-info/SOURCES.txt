@@ -30,10 +30,6 @@ object_detection/damage_scan/models.py
 object_detection/damage_scan/pipeline.py
 object_detection/damage_scan/prompts.py
 object_detection/damage_scan/sqlite_store.py
-object_detection/datasets/__init__.py
-object_detection/datasets/adapters.py
-object_detection/datasets/augment.py
-object_detection/datasets/manifest.py
 object_detection/dino/__init__.py
 object_detection/dino/__main__.py
 object_detection/dino/cli.py
@@ -51,6 +47,7 @@ object_detection/grounding_dino/folder.py
 object_detection/grounding_dino/image.py
 object_detection/stable_dino/Inference.py
 object_detection/stable_dino/__init__.py
+object_detection/stable_dino/dataset_config.py
 object_detection/stable_dino/train.py
 object_detection/stable_dino/projects/__init__.py
 object_detection/stable_dino/projects/stabledino/__init__.py
@@ -93,6 +90,7 @@ object_detection/stable_dino/tools/train_net.py
 object_detection/yolo/Inference.py
 object_detection/yolo/__init__.py
 object_detection/yolo/__main__.py
+object_detection/yolo/dataset_config.py
 object_detection/yolo/train.py
 object_detection/yolo/lib/__init__.py
 object_detection/yolo/lib/runtime.py

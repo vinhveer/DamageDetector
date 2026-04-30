@@ -5,7 +5,7 @@ import pkgutil
 from importlib.machinery import FileFinder
 from pathlib import Path
 
-from object_detection.datasets import build_stable_dino_overrides, load_detection_dataset
+from object_detection.stable_dino.dataset_config import build_stable_dino_overrides, load_stable_dino_dataset_config
 from torch_runtime import get_torch, select_device_str
 
 
@@ -32,9 +32,9 @@ def _ensure_python312_pkg_resources_compat() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m object_detection.stable_dino.train",
-        description="Train StableDINO with shared dataset helpers.",
+        description="Train StableDINO with its own dataset config.",
     )
-    parser.add_argument("--dataset", required=True, help="Path to shared detection dataset manifest")
+    parser.add_argument("--dataset", required=True, help="Path to Stable-DINO dataset config")
     default_config = Path(__file__).resolve().parent / "projects" / "stabledino" / "configs" / "damage_detector_stabledino_r50_4scale_12ep.py"
     parser.add_argument(
         "--config-file",
@@ -87,12 +87,12 @@ def _worker_main(args: argparse.Namespace) -> None:
     _ensure_python312_pkg_resources_compat()
     from object_detection.stable_dino.tools import train_net
 
-    manifest = load_detection_dataset(args.dataset)
+    dataset = load_stable_dino_dataset_config(args.dataset)
     resolved_device = select_device_str(args.device)
-    dataset_prefix = f"damage_detector_{manifest.yaml_path.stem}"
+    dataset_prefix = f"stable_dino_{dataset.yaml_path.stem}"
     cache_root = Path(args.output_dir).expanduser().resolve() / "dataset_cache"
     overrides = build_stable_dino_overrides(
-        manifest,
+        dataset,
         dataset_name_prefix=dataset_prefix,
         cache_root=cache_root,
         augmentation_profile=args.augmentation_profile,
