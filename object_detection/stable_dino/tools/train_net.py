@@ -14,6 +14,7 @@ in the config file and implement a new train_net.py to handle them.
 """
 from collections import OrderedDict
 import logging
+import pickle
 import os
 import sys
 import time
@@ -179,6 +180,19 @@ def _should_ignore_key(key, ignore_prefixes):
     return any(key == prefix or key.startswith(f"{prefix}.") for prefix in ignore_prefixes)
 
 
+def _torch_load_checkpoint(checkpoint_path):
+    try:
+        return torch.load(checkpoint_path, map_location="cpu")
+    except pickle.UnpicklingError as exc:
+        if "Weights only load failed" not in str(exc):
+            raise
+        logger.warning(
+            "Retrying fine-tune checkpoint load with weights_only=False for trusted checkpoint: %s",
+            checkpoint_path,
+        )
+        return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+
 def load_finetune_checkpoint(cfg, model):
     finetune_cfg = cfg.train.get("finetune_checkpoint") or {}
     checkpoint_path = str(finetune_cfg.get("path", "")).strip()
@@ -188,7 +202,7 @@ def load_finetune_checkpoint(cfg, model):
     ignore_shape_mismatch = bool(finetune_cfg.get("ignore_shape_mismatch", True))
     target_model = _remove_ddp(model)
     model_state = target_model.state_dict()
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = _torch_load_checkpoint(checkpoint_path)
     checkpoint_state = _extract_checkpoint_state(checkpoint)
     if not isinstance(checkpoint_state, dict):
         raise ValueError(f"Fine-tune checkpoint has no state dict: {checkpoint_path}")

@@ -132,16 +132,14 @@ def cluster_option_label(cluster: dict[str, Any]) -> str:
     )
 
 
-def card_html(cluster: dict[str, Any], *, selected: bool) -> str:
-    border = "#ff7a1a" if selected else "#dddddd"
-    bg = "#fff7ed" if selected else "#ffffff"
+def card_html(cluster: dict[str, Any]) -> str:
     return f"""
-    <div style="border: 2px solid {border}; border-radius: 14px; padding: 12px; margin-bottom: 10px; background: {bg};">
-      <div style="font-weight: 700; font-size: 15px; margin-bottom: 6px;">{cluster['cluster_key']}</div>
-      <div style="font-size: 13px; color: #333;">size: <b>{cluster['cluster_size']}</b></div>
-      <div style="font-size: 13px; color: #333;">major: <b>{cluster['major_label']}</b></div>
-      <div style="font-size: 13px; color: #333;">purity: <b>{cluster['purity']}</b></div>
-      <div style="font-size: 12px; color: #666; margin-top: 4px;">crack {cluster['crack_count']} | mold {cluster['mold_count']} | spall {cluster['spall_count']}</div>
+    <div style="border: 1px solid #dddddd; border-radius: 16px; padding: 14px; min-height: 142px; background: #ffffff;">
+      <div style="font-weight: 800; font-size: 16px; margin-bottom: 8px;">{cluster['cluster_key']}</div>
+      <div style="font-size: 14px; color: #222;">Images: <b>{cluster['cluster_size']}</b></div>
+      <div style="font-size: 14px; color: #222;">Major: <b>{cluster['major_label']}</b></div>
+      <div style="font-size: 14px; color: #222;">Purity: <b>{cluster['purity']}</b></div>
+      <div style="font-size: 12px; color: #666; margin-top: 8px;">crack {cluster['crack_count']} | mold {cluster['mold_count']} | spall {cluster['spall_count']}</div>
     </div>
     """
 
@@ -181,6 +179,95 @@ def render_crop_grid(st: Any, rows: list[dict[str, Any]], image_root: Path | Non
                 col.image(crop, caption=caption, width=int(thumb_width))
             except Exception as exc:
                 col.error(f"{row['result_id']}: {exc}")
+
+
+def render_group_list_page(st: Any, *, output_db: Path, run: GroupRun, mode: str, cards_per_page: int) -> None:
+    st.header("Danh Sách Các Nhóm")
+    tabs = st.tabs(["crack", "mold", "spall"])
+    for tab, label_scope in zip(tabs, ["crack", "mold", "spall"]):
+        with tab:
+            clusters = list_clusters(output_db, run.grouping_run_id, label_scope, mode)
+            if not clusters:
+                st.warning(f"No {label_scope} clusters matched this filter.")
+                continue
+            total_boxes = sum(int(item["cluster_size"]) for item in clusters)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Groups", len(clusters))
+            c2.metric("Images", total_boxes)
+            c3.metric("Largest", max(int(item["cluster_size"]) for item in clusters))
+
+            page = page_picker(
+                st,
+                label="Group page",
+                total_items=len(clusters),
+                page_size=int(cards_per_page),
+                key=f"group_list_page_{label_scope}",
+            )
+            page_clusters = page_slice(clusters, page, int(cards_per_page))
+            page_start = (int(page) - 1) * int(cards_per_page)
+            st.caption(f"Page {page}/{page_count(len(clusters), int(cards_per_page))} | showing {page_start + 1}-{page_start + len(page_clusters)} of {len(clusters)}")
+
+            cols_per_row = 3
+            for start in range(0, len(page_clusters), cols_per_row):
+                columns = st.columns(cols_per_row)
+                for col, cluster in zip(columns, page_clusters[start : start + cols_per_row]):
+                    col.markdown(card_html(cluster), unsafe_allow_html=True)
+                    if col.button("Open group", key=f"open_group_{label_scope}_{cluster['cluster_key']}", use_container_width=True):
+                        st.session_state["app_page"] = "Group detail"
+                        st.session_state["detail_label_scope"] = label_scope
+                        st.session_state["detail_cluster_key"] = cluster["cluster_key"]
+                        st.rerun()
+
+
+def render_group_detail_page(
+    st: Any,
+    *,
+    output_db: Path,
+    source_db: Path,
+    run: GroupRun,
+    mode: str,
+    image_root: Path | None,
+    padding_ratio: float,
+    thumb_width: int,
+    images_per_page: int,
+) -> None:
+    label_scope = st.session_state.get("detail_label_scope", "crack")
+    cluster_key = st.session_state.get("detail_cluster_key", "")
+    clusters = list_clusters(output_db, run.grouping_run_id, label_scope, mode)
+    cluster = next((item for item in clusters if item["cluster_key"] == cluster_key), None)
+    if cluster is None:
+        st.warning("Selected group is not available with the current filters.")
+        if st.button("Back to group list"):
+            st.session_state["app_page"] = "Group list"
+            st.rerun()
+        return
+
+    if st.button("Back to group list"):
+        st.session_state["app_page"] = "Group list"
+        st.rerun()
+    st.header(f"Group {cluster['cluster_key']}")
+    st.dataframe([cluster], use_container_width=True, hide_index=True)
+
+    rows = list_assignments(output_db, source_db, run.grouping_run_id, str(cluster["cluster_key"]))
+    image_page = page_picker(
+        st,
+        label="Image page",
+        total_items=len(rows),
+        page_size=int(images_per_page),
+        key=f"detail_image_page_{cluster['cluster_key']}",
+    )
+    visible_rows = page_slice(rows, image_page, int(images_per_page))
+    st.subheader(f"Images ({len(rows)})")
+    st.caption(f"Page {image_page}/{page_count(len(rows), int(images_per_page))} | showing {len(visible_rows)} images")
+    render_crop_grid(
+        st,
+        visible_rows,
+        image_root,
+        padding_ratio=float(padding_ratio),
+        thumb_width=int(thumb_width),
+    )
+    st.subheader("Box List")
+    st.dataframe(rows_for_table(rows), use_container_width=True, hide_index=True)
 
 
 def resolve_image_path(row: dict[str, Any], image_root: Path | None) -> Path:
@@ -253,10 +340,25 @@ def main() -> None:
     output_db = Path(st.sidebar.text_input("Step4 output DB", value=str(default_output_db()))).expanduser().resolve()
     image_root_input = st.sidebar.text_input("Image root", value=str(default_image_root()))
     image_root = Path(image_root_input).expanduser().resolve() if image_root_input.strip() else None
-    padding_ratio = st.sidebar.slider("Crop padding", 0.0, 0.30, 0.05, 0.01)
-    thumb_width = st.sidebar.slider("Crop width", 120, 600, 220, 20)
-    cards_per_page = st.sidebar.slider("Cluster cards per page", 6, 60, 18, 3)
-    images_per_page = st.sidebar.slider("Images per page", 8, 120, 32, 4)
+    if "app_page" not in st.session_state:
+        st.session_state["app_page"] = "Group list"
+    st.sidebar.caption(f"Page: {st.session_state['app_page']}")
+    if st.sidebar.button("Group list", use_container_width=True):
+        st.session_state["app_page"] = "Group list"
+        st.rerun()
+    if st.sidebar.button("Group detail", use_container_width=True):
+        st.session_state["app_page"] = "Group detail"
+        st.rerun()
+    page = st.session_state["app_page"]
+    cards_per_page = st.sidebar.slider("Group cards per page", 6, 60, 18, 3)
+    padding_ratio = 0.05
+    thumb_width = 220
+    images_per_page = 32
+    if page == "Group detail":
+        st.sidebar.subheader("Image Controls")
+        padding_ratio = st.sidebar.slider("Crop padding", 0.0, 0.30, 0.05, 0.01)
+        thumb_width = st.sidebar.slider("Image size", 120, 700, 240, 20)
+        images_per_page = st.sidebar.slider("Images per page", 8, 160, 32, 4)
 
     if not output_db.is_file():
         st.error(f"feature_groups.sqlite3 not found: {output_db}")
@@ -282,65 +384,20 @@ def main() -> None:
     col_d.metric("Label suspect", run.label_suspect_boxes)
 
     mode = st.sidebar.radio("View mode", ["All clusters", "Non-outlier clusters", "Outliers only", "Label suspect only"])
-    tabs = st.tabs(["crack", "mold", "spall"])
-    for tab, label_scope in zip(tabs, ["crack", "mold", "spall"]):
-        with tab:
-            clusters = list_clusters(output_db, run.grouping_run_id, label_scope, mode)
-            if not clusters:
-                st.warning(f"No {label_scope} clusters matched this filter.")
-                continue
-            total_boxes = sum(int(item["cluster_size"]) for item in clusters)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Clusters", len(clusters))
-            c2.metric("Boxes", total_boxes)
-            c3.metric("Largest", max(int(item["cluster_size"]) for item in clusters))
-
-            left, right = st.columns([1, 3])
-            with left:
-                st.subheader("Cluster Cards")
-                st.caption("Sorted by cluster size. Open one cluster per page.")
-                cluster_page = page_picker(
-                    st,
-                    label="Cluster page",
-                    total_items=len(clusters),
-                    page_size=int(cards_per_page),
-                    key=f"cluster_page_{label_scope}",
-                )
-                page_clusters = page_slice(clusters, cluster_page, int(cards_per_page))
-                selected_key_state = f"selected_cluster_key_{label_scope}"
-                if selected_key_state not in st.session_state:
-                    st.session_state[selected_key_state] = clusters[0]["cluster_key"]
-                page_start = (int(cluster_page) - 1) * int(cards_per_page)
-                st.caption(f"Page {cluster_page}/{page_count(len(clusters), int(cards_per_page))} | showing {page_start + 1}-{page_start + len(page_clusters)} of {len(clusters)}")
-                for cluster in page_clusters:
-                    selected = st.session_state[selected_key_state] == cluster["cluster_key"]
-                    st.markdown(card_html(cluster, selected=selected), unsafe_allow_html=True)
-                    if st.button("Open", key=f"open_{label_scope}_{cluster['cluster_key']}", use_container_width=True):
-                        st.session_state[selected_key_state] = cluster["cluster_key"]
-                selected_cluster = next((item for item in clusters if item["cluster_key"] == st.session_state[selected_key_state]), clusters[0])
-            with right:
-                st.subheader(f"{selected_cluster['cluster_key']}")
-                st.dataframe([selected_cluster], use_container_width=True, hide_index=True)
-                rows = list_assignments(output_db, source_db, run.grouping_run_id, str(selected_cluster["cluster_key"]))
-                st.subheader(f"Images ({len(rows)})")
-                image_page = page_picker(
-                    st,
-                    label="Image page",
-                    total_items=len(rows),
-                    page_size=int(images_per_page),
-                    key=f"image_page_{label_scope}_{selected_cluster['cluster_key']}",
-                )
-                visible_rows = page_slice(rows, image_page, int(images_per_page))
-                st.caption(f"Page {image_page}/{page_count(len(rows), int(images_per_page))} | showing {len(visible_rows)} images")
-                render_crop_grid(
-                    st,
-                    visible_rows,
-                    image_root,
-                    padding_ratio=float(padding_ratio),
-                    thumb_width=int(thumb_width),
-                )
-                st.subheader("Box List")
-                st.dataframe(rows_for_table(rows), use_container_width=True, hide_index=True)
+    if page == "Group list":
+        render_group_list_page(st, output_db=output_db, run=run, mode=mode, cards_per_page=int(cards_per_page))
+    else:
+        render_group_detail_page(
+            st,
+            output_db=output_db,
+            source_db=source_db,
+            run=run,
+            mode=mode,
+            image_root=image_root,
+            padding_ratio=float(padding_ratio),
+            thumb_width=int(thumb_width),
+            images_per_page=int(images_per_page),
+        )
 
 
 if __name__ == "__main__":
