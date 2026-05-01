@@ -125,6 +125,64 @@ def list_assignments(output_db: Path, source_db: Path, grouping_run_id: str, clu
     return [dict(row) for row in rows]
 
 
+def cluster_option_label(cluster: dict[str, Any]) -> str:
+    return (
+        f"{cluster['cluster_key']} | size={cluster['cluster_size']} | "
+        f"major={cluster['major_label']} | purity={cluster['purity']}"
+    )
+
+
+def card_html(cluster: dict[str, Any], *, selected: bool) -> str:
+    border = "#ff7a1a" if selected else "#dddddd"
+    bg = "#fff7ed" if selected else "#ffffff"
+    return f"""
+    <div style="border: 2px solid {border}; border-radius: 14px; padding: 12px; margin-bottom: 10px; background: {bg};">
+      <div style="font-weight: 700; font-size: 15px; margin-bottom: 6px;">{cluster['cluster_key']}</div>
+      <div style="font-size: 13px; color: #333;">size: <b>{cluster['cluster_size']}</b></div>
+      <div style="font-size: 13px; color: #333;">major: <b>{cluster['major_label']}</b></div>
+      <div style="font-size: 13px; color: #333;">purity: <b>{cluster['purity']}</b></div>
+      <div style="font-size: 12px; color: #666; margin-top: 4px;">crack {cluster['crack_count']} | mold {cluster['mold_count']} | spall {cluster['spall_count']}</div>
+    </div>
+    """
+
+
+def page_count(total_items: int, page_size: int) -> int:
+    return max(1, math.ceil(max(0, int(total_items)) / max(1, int(page_size))))
+
+
+def page_slice(items: list[Any], page: int, page_size: int) -> list[Any]:
+    safe_page_size = max(1, int(page_size))
+    start = max(0, int(page) - 1) * safe_page_size
+    return items[start : start + safe_page_size]
+
+
+def page_picker(st: Any, *, label: str, total_items: int, page_size: int, key: str) -> int:
+    total_pages = page_count(total_items, page_size)
+    if total_pages <= 1:
+        return 1
+    return int(st.number_input(label, min_value=1, max_value=total_pages, value=1, step=1, key=key))
+
+
+def render_crop_grid(st: Any, rows: list[dict[str, Any]], image_root: Path | None, *, padding_ratio: float, thumb_width: int) -> None:
+    visible_rows = rows
+    if not visible_rows:
+        st.info("No boxes in this cluster.")
+        return
+    cols_per_row = 4
+    for start in range(0, len(visible_rows), cols_per_row):
+        columns = st.columns(cols_per_row)
+        for col, row in zip(columns, visible_rows[start : start + cols_per_row]):
+            caption = (
+                f"id={row['result_id']} | {row['predicted_label']} | "
+                f"conf={float(row['predicted_probability_pct']):.1f}% | dist={float(row['distance_to_center']):.3f}"
+            )
+            try:
+                crop = crop_row(row, image_root, padding_ratio=padding_ratio)
+                col.image(crop, caption=caption, width=int(thumb_width))
+            except Exception as exc:
+                col.error(f"{row['result_id']}: {exc}")
+
+
 def resolve_image_path(row: dict[str, Any], image_root: Path | None) -> Path:
     candidates: list[Path] = []
     rel_path = str(row.get("image_rel_path") or "").strip()
@@ -196,7 +254,9 @@ def main() -> None:
     image_root_input = st.sidebar.text_input("Image root", value=str(default_image_root()))
     image_root = Path(image_root_input).expanduser().resolve() if image_root_input.strip() else None
     padding_ratio = st.sidebar.slider("Crop padding", 0.0, 0.30, 0.05, 0.01)
-    thumb_width = st.sidebar.slider("Representative crop width", 120, 600, 260, 20)
+    thumb_width = st.sidebar.slider("Crop width", 120, 600, 220, 20)
+    cards_per_page = st.sidebar.slider("Cluster cards per page", 6, 60, 18, 3)
+    images_per_page = st.sidebar.slider("Images per page", 8, 120, 32, 4)
 
     if not output_db.is_file():
         st.error(f"feature_groups.sqlite3 not found: {output_db}")
@@ -221,43 +281,66 @@ def main() -> None:
     col_c.metric("Outliers", run.outlier_boxes)
     col_d.metric("Label suspect", run.label_suspect_boxes)
 
-    label_scope = st.sidebar.selectbox("Label scope", ["All", "crack", "mold", "spall", "all"])
     mode = st.sidebar.radio("View mode", ["All clusters", "Non-outlier clusters", "Outliers only", "Label suspect only"])
-    clusters = list_clusters(output_db, run.grouping_run_id, label_scope, mode)
-    if not clusters:
-        st.warning("No clusters matched this filter.")
-        st.stop()
+    tabs = st.tabs(["crack", "mold", "spall"])
+    for tab, label_scope in zip(tabs, ["crack", "mold", "spall"]):
+        with tab:
+            clusters = list_clusters(output_db, run.grouping_run_id, label_scope, mode)
+            if not clusters:
+                st.warning(f"No {label_scope} clusters matched this filter.")
+                continue
+            total_boxes = sum(int(item["cluster_size"]) for item in clusters)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Clusters", len(clusters))
+            c2.metric("Boxes", total_boxes)
+            c3.metric("Largest", max(int(item["cluster_size"]) for item in clusters))
 
-    cluster_idx = st.sidebar.selectbox(
-        "Cluster",
-        range(len(clusters)),
-        format_func=lambda idx: f"{clusters[idx]['cluster_key']} size={clusters[idx]['cluster_size']} purity={clusters[idx]['purity']}",
-    )
-    cluster = clusters[int(cluster_idx)]
-    st.subheader(f"Cluster {cluster['cluster_key']}")
-    st.dataframe([cluster], use_container_width=True, hide_index=True)
-
-    rows = list_assignments(output_db, source_db, run.grouping_run_id, str(cluster["cluster_key"]))
-    reps = [
-        ("nearest", cluster.get("representative_nearest_result_id")),
-        ("farthest", cluster.get("representative_farthest_result_id")),
-        ("low confidence", cluster.get("representative_low_confidence_result_id")),
-        ("label mismatch", cluster.get("representative_mismatch_result_id")),
-    ]
-    by_id = {int(row["result_id"]): row for row in rows}
-    visible_reps = [(name, by_id.get(int(result_id))) for name, result_id in reps if result_id is not None and by_id.get(int(result_id)) is not None]
-    if visible_reps:
-        st.subheader("Representatives")
-        columns = st.columns(len(visible_reps))
-        for col, (name, row) in zip(columns, visible_reps):
-            try:
-                crop = crop_row(row, image_root, padding_ratio=float(padding_ratio))
-                col.image(crop, caption=f"{name}: {row['result_id']} {row['predicted_label']} {float(row['predicted_probability_pct']):.1f}%", width=int(thumb_width))
-            except Exception as exc:
-                col.error(f"{name}: {exc}")
-
-    st.subheader(f"Boxes ({len(rows)})")
-    st.dataframe(rows_for_table(rows), use_container_width=True, hide_index=True)
+            left, right = st.columns([1, 3])
+            with left:
+                st.subheader("Cluster Cards")
+                st.caption("Sorted by cluster size. Open one cluster per page.")
+                cluster_page = page_picker(
+                    st,
+                    label="Cluster page",
+                    total_items=len(clusters),
+                    page_size=int(cards_per_page),
+                    key=f"cluster_page_{label_scope}",
+                )
+                page_clusters = page_slice(clusters, cluster_page, int(cards_per_page))
+                selected_key_state = f"selected_cluster_key_{label_scope}"
+                if selected_key_state not in st.session_state:
+                    st.session_state[selected_key_state] = clusters[0]["cluster_key"]
+                page_start = (int(cluster_page) - 1) * int(cards_per_page)
+                st.caption(f"Page {cluster_page}/{page_count(len(clusters), int(cards_per_page))} | showing {page_start + 1}-{page_start + len(page_clusters)} of {len(clusters)}")
+                for cluster in page_clusters:
+                    selected = st.session_state[selected_key_state] == cluster["cluster_key"]
+                    st.markdown(card_html(cluster, selected=selected), unsafe_allow_html=True)
+                    if st.button("Open", key=f"open_{label_scope}_{cluster['cluster_key']}", use_container_width=True):
+                        st.session_state[selected_key_state] = cluster["cluster_key"]
+                selected_cluster = next((item for item in clusters if item["cluster_key"] == st.session_state[selected_key_state]), clusters[0])
+            with right:
+                st.subheader(f"{selected_cluster['cluster_key']}")
+                st.dataframe([selected_cluster], use_container_width=True, hide_index=True)
+                rows = list_assignments(output_db, source_db, run.grouping_run_id, str(selected_cluster["cluster_key"]))
+                st.subheader(f"Images ({len(rows)})")
+                image_page = page_picker(
+                    st,
+                    label="Image page",
+                    total_items=len(rows),
+                    page_size=int(images_per_page),
+                    key=f"image_page_{label_scope}_{selected_cluster['cluster_key']}",
+                )
+                visible_rows = page_slice(rows, image_page, int(images_per_page))
+                st.caption(f"Page {image_page}/{page_count(len(rows), int(images_per_page))} | showing {len(visible_rows)} images")
+                render_crop_grid(
+                    st,
+                    visible_rows,
+                    image_root,
+                    padding_ratio=float(padding_ratio),
+                    thumb_width=int(thumb_width),
+                )
+                st.subheader("Box List")
+                st.dataframe(rows_for_table(rows), use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":

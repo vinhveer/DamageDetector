@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pkgutil
 from importlib.machinery import FileFinder
 from pathlib import Path
@@ -43,7 +44,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", default="object_detection/stable_dino/train")
     parser.add_argument("--init-checkpoint", default="")
-    parser.add_argument("--imgsz", type=int, default=1024)
+    parser.add_argument("--finetune-checkpoint", default="", help="Detector checkpoint to fine-tune with class-head mismatch filtering.")
+    parser.add_argument("--finetune-ignore-prefix", nargs="*", default=["class_embed", "label_enc"], help="Checkpoint key prefixes to skip during fine-tune loading.")
+    parser.add_argument("--finetune-strict", action="store_true", help="Do not skip checkpoint tensors with mismatched shapes.")
+    parser.add_argument("--imgsz", type=int, default=512)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=None, help="Use pinned host memory for the train dataloader.")
@@ -53,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-period", type=int, default=None, help="Override StableDINO train.eval_period. 0 disables periodic eval.")
     parser.add_argument("--log-period", type=int, default=None, help="Override StableDINO train.log_period.")
     parser.add_argument("--checkpoint-period", type=int, default=None, help="Override StableDINO train.checkpointer.period.")
+    parser.add_argument("--test-with-nms", type=float, default=0.8, help="Run validation again with this NMS threshold. Use 0 to disable.")
+    parser.add_argument("--best-checkpoint-metric", default="bbox/AP", help="Metric used to save model_best.pth.")
+    parser.add_argument("--best-checkpoint-mode", default="max", choices=["max", "min"], help="Best checkpoint comparison mode.")
+    parser.add_argument("--no-best-checkpoint", action="store_true", help="Disable saving model_best.pth during eval.")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--augmentation-profile", default="balanced", choices=["light", "balanced", "aggressive"])
     parser.add_argument("--resume", action="store_true")
@@ -115,6 +123,16 @@ def _worker_main(args: argparse.Namespace) -> None:
         overrides.append(f"train.log_period={int(args.log_period)}")
     if args.checkpoint_period is not None:
         overrides.append(f"train.checkpointer.period={int(args.checkpoint_period)}")
+    if args.test_with_nms is not None:
+        overrides.append(f"train.test_with_nms={float(args.test_with_nms)}")
+    finetune_checkpoint = str(args.finetune_checkpoint or "").strip()
+    if finetune_checkpoint:
+        overrides.append(f"train.finetune_checkpoint.path={json.dumps(finetune_checkpoint)}")
+        overrides.append(f"train.finetune_checkpoint.ignore_prefixes={json.dumps(list(args.finetune_ignore_prefix or []))}")
+        overrides.append(f"train.finetune_checkpoint.ignore_shape_mismatch={not bool(args.finetune_strict)}")
+    overrides.append(f"train.best_checkpointer.enabled={not bool(args.no_best_checkpoint)}")
+    overrides.append(f"train.best_checkpointer.metric={args.best_checkpoint_metric!r}")
+    overrides.append(f"train.best_checkpointer.mode={args.best_checkpoint_mode!r}")
     if args.opts:
         overrides.extend(list(args.opts))
     train_args = argparse.Namespace(

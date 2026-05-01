@@ -159,6 +159,70 @@ def tune_nms_threshold_and_restore(model, temp_threshold):
     model.nms_thresh = old_nms_threshold
 
 
+def _extract_checkpoint_state(checkpoint):
+    if isinstance(checkpoint, dict):
+        for key in ("model", "state_dict", "module"):
+            value = checkpoint.get(key)
+            if isinstance(value, dict):
+                return value
+    return checkpoint
+
+
+def _normalize_checkpoint_key(key):
+    for prefix in ("module.", "model."):
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return key
+
+
+def _should_ignore_key(key, ignore_prefixes):
+    return any(key == prefix or key.startswith(f"{prefix}.") for prefix in ignore_prefixes)
+
+
+def load_finetune_checkpoint(cfg, model):
+    finetune_cfg = cfg.train.get("finetune_checkpoint") or {}
+    checkpoint_path = str(finetune_cfg.get("path", "")).strip()
+    if not checkpoint_path:
+        return
+    ignore_prefixes = tuple(str(prefix) for prefix in finetune_cfg.get("ignore_prefixes", []))
+    ignore_shape_mismatch = bool(finetune_cfg.get("ignore_shape_mismatch", True))
+    target_model = _remove_ddp(model)
+    model_state = target_model.state_dict()
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint_state = _extract_checkpoint_state(checkpoint)
+    if not isinstance(checkpoint_state, dict):
+        raise ValueError(f"Fine-tune checkpoint has no state dict: {checkpoint_path}")
+
+    load_state = OrderedDict()
+    skipped = []
+    for raw_key, value in checkpoint_state.items():
+        key = _normalize_checkpoint_key(str(raw_key))
+        if _should_ignore_key(key, ignore_prefixes):
+            skipped.append((key, "ignored prefix"))
+            continue
+        if key not in model_state:
+            skipped.append((key, "missing target"))
+            continue
+        if hasattr(value, "shape") and tuple(value.shape) != tuple(model_state[key].shape):
+            if ignore_shape_mismatch:
+                skipped.append((key, f"shape {tuple(value.shape)} -> {tuple(model_state[key].shape)}"))
+                continue
+        load_state[key] = value
+
+    missing, unexpected = target_model.load_state_dict(load_state, strict=False)
+    logger.info(
+        "Loaded fine-tune checkpoint %s: %d tensors loaded, %d skipped, %d missing, %d unexpected",
+        checkpoint_path,
+        len(load_state),
+        len(skipped),
+        len(missing),
+        len(unexpected),
+    )
+    if skipped:
+        preview = ", ".join(f"{key} ({reason})" for key, reason in skipped[:20])
+        logger.info("Skipped fine-tune tensors: %s%s", preview, " ..." if len(skipped) > 20 else "")
+
+
 def do_test(cfg, model):
     if "evaluator" in cfg.dataloader:
         ret = inference_on_dataset(
@@ -178,6 +242,24 @@ def do_test(cfg, model):
             ret.update(ret_wnms)
 
         return ret
+
+
+def _build_best_checkpointer_hook(cfg, checkpointer):
+    best_cfg = cfg.train.get("best_checkpointer") or {}
+    if not best_cfg.get("enabled", True):
+        return None
+    if int(cfg.train.eval_period) <= 0:
+        return None
+    if not hasattr(hooks, "BestCheckpointer"):
+        logger.warning("BestCheckpointer is unavailable in this Detectron2 build.")
+        return None
+    return hooks.BestCheckpointer(
+        int(cfg.train.eval_period),
+        checkpointer,
+        str(best_cfg.get("metric", "bbox/AP")),
+        mode=str(best_cfg.get("mode", "max")),
+        file_prefix=str(best_cfg.get("file_prefix", "model_best")),
+    )
 
 
 def do_train(args, cfg):
@@ -233,6 +315,9 @@ def do_train(args, cfg):
             if comm.is_main_process()
             else None,
             hooks.EvalHook(cfg.train.eval_period, lambda: do_test(cfg, model)),
+            _build_best_checkpointer_hook(cfg, checkpointer)
+            if comm.is_main_process()
+            else None,
             hooks.PeriodicWriter(
                 default_writers(cfg.train.output_dir, cfg.train.max_iter),
                 period=cfg.train.log_period,
@@ -243,6 +328,8 @@ def do_train(args, cfg):
     )
 
     checkpointer.resume_or_load(cfg.train.init_checkpoint, resume=args.resume)
+    if not args.resume:
+        load_finetune_checkpoint(cfg, model)
     if args.resume and checkpointer.has_checkpoint():
         # The checkpoint stores the training iteration that just finished, thus we start
         # at the next iteration
