@@ -103,3 +103,4 @@ tzdata
 urllib3
 wcwidth
 wheel
+streamlit

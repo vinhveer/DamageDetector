@@ -13,6 +13,12 @@ def connect_ro(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def connect_rw(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path.expanduser().resolve(), timeout=60.0)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 class FeatureGroupStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path.expanduser().resolve()
@@ -41,7 +47,17 @@ class FeatureGroupStore:
         elif mode == "outlier":
             clauses.append("outlier_count > 0")
         elif mode == "label_suspect":
-            clauses.append("purity < 1.0")
+            clauses.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM feature_group_assignments a
+                    WHERE a.grouping_run_id = feature_group_clusters.grouping_run_id
+                      AND a.cluster_key = feature_group_clusters.cluster_key
+                      AND a.label_suspect != 0
+                )
+                """
+            )
         conn = connect_ro(self.db_path)
         try:
             rows = conn.execute(
@@ -79,6 +95,92 @@ class FeatureGroupStore:
         finally:
             conn.close()
         return [AssignmentRow(**dict(row)) for row in rows]
+
+    def clear_flags_for_results(self, run_id: str, result_ids: list[int]) -> int:
+        if not result_ids:
+            return 0
+        placeholders = ",".join("?" for _ in result_ids)
+        conn = connect_rw(self.db_path)
+        try:
+            before = conn.execute(
+                f"""
+                SELECT cluster_key, SUM(is_outlier) AS outliers
+                FROM feature_group_assignments
+                WHERE grouping_run_id = ? AND result_id IN ({placeholders})
+                GROUP BY cluster_key
+                """,
+                [run_id, *result_ids],
+            ).fetchall()
+            changed = conn.execute(
+                f"""
+                UPDATE feature_group_assignments
+                SET is_outlier = 0, label_suspect = 0
+                WHERE grouping_run_id = ?
+                  AND result_id IN ({placeholders})
+                  AND (is_outlier != 0 OR label_suspect != 0)
+                """,
+                [run_id, *result_ids],
+            ).rowcount
+            for row in before:
+                outliers = int(row["outliers"] or 0)
+                if outliers > 0:
+                    conn.execute(
+                        """
+                        UPDATE feature_group_clusters
+                        SET outlier_count = MAX(0, outlier_count - ?)
+                        WHERE grouping_run_id = ? AND cluster_key = ?
+                        """,
+                        (outliers, run_id, row["cluster_key"]),
+                    )
+            self._refresh_run_flag_counts(conn, run_id)
+            conn.commit()
+        finally:
+            conn.close()
+        return int(changed)
+
+    def clear_flags_for_cluster(self, run_id: str, cluster_key: str) -> int:
+        conn = connect_rw(self.db_path)
+        try:
+            changed = conn.execute(
+                """
+                UPDATE feature_group_assignments
+                SET is_outlier = 0, label_suspect = 0
+                WHERE grouping_run_id = ? AND cluster_key = ?
+                  AND (is_outlier != 0 OR label_suspect != 0)
+                """,
+                (run_id, cluster_key),
+            ).rowcount
+            conn.execute(
+                """
+                UPDATE feature_group_clusters
+                SET outlier_count = 0
+                WHERE grouping_run_id = ? AND cluster_key = ?
+                """,
+                (run_id, cluster_key),
+            )
+            self._refresh_run_flag_counts(conn, run_id)
+            conn.commit()
+        finally:
+            conn.close()
+        return int(changed)
+
+    def _refresh_run_flag_counts(self, conn: sqlite3.Connection, run_id: str) -> None:
+        totals = conn.execute(
+            """
+            SELECT SUM(is_outlier) AS outliers, SUM(label_suspect) AS suspects
+            FROM feature_group_assignments
+            WHERE grouping_run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        conn.execute(
+            """
+            UPDATE feature_group_runs
+            SET outlier_boxes = ?, label_suspect_boxes = ?
+            WHERE grouping_run_id = ?
+            """,
+            (int(totals["outliers"] or 0), int(totals["suspects"] or 0), run_id),
+        )
 
 
 class SourceStore:

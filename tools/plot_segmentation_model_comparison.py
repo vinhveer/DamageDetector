@@ -19,6 +19,10 @@ try:
 except ModuleNotFoundError as exc:  # pragma: no cover - runtime dependency check
     raise SystemExit("matplotlib is required to generate comparison plots.") from exc
 
+from plot_style import apply_science_style, save_report_figure
+
+apply_science_style()
+
 
 MODEL_COLORS = {
     "SAM": "#d97706",
@@ -62,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         required=True,
-        help="Directory where PNG charts and summary JSON will be written.",
+        help="Directory where SVG charts and summary JSON will be written.",
     )
     return parser.parse_args()
 
@@ -152,8 +156,7 @@ def _plot_best_metrics(metrics_by_dataset: dict[str, list[DatasetMetrics]], outp
     axes[0].legend(loc="upper right")
     fig.suptitle("Best Metrics by Dataset")
     fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    save_report_figure(fig, output_path)
 
 
 def _plot_threshold_curves(metrics_by_dataset: dict[str, list[DatasetMetrics]], output_path: Path) -> None:
@@ -185,8 +188,7 @@ def _plot_threshold_curves(metrics_by_dataset: dict[str, list[DatasetMetrics]], 
                 ax.legend(loc="lower left")
 
     fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    save_report_figure(fig, output_path)
 
 
 def _plot_iou_boxplots(metrics_by_dataset: dict[str, list[DatasetMetrics]], output_path: Path) -> None:
@@ -212,8 +214,7 @@ def _plot_iou_boxplots(metrics_by_dataset: dict[str, list[DatasetMetrics]], outp
             ax.text(pos, 0.03, f"median={median:.3f}", ha="center", va="bottom", fontsize=8)
 
     fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    save_report_figure(fig, output_path)
 
 
 def _write_summary(metrics_by_dataset: dict[str, list[DatasetMetrics]], output_path: Path) -> None:
@@ -255,9 +256,9 @@ def main() -> None:
     for dataset_name, items in metrics_by_dataset.items():
         metrics_by_dataset[dataset_name] = sorted(items, key=lambda item: item.model_name)
 
-    _plot_best_metrics(metrics_by_dataset, output_dir / "best_metrics_comparison.png")
-    _plot_threshold_curves(metrics_by_dataset, output_dir / "threshold_curves_comparison.png")
-    _plot_iou_boxplots(metrics_by_dataset, output_dir / "per_image_iou_boxplots.png")
+    _plot_best_metrics(metrics_by_dataset, output_dir / "best_metrics_comparison.svg")
+    _plot_threshold_curves(metrics_by_dataset, output_dir / "threshold_curves_comparison.svg")
+    _plot_iou_boxplots(metrics_by_dataset, output_dir / "per_image_iou_boxplots.svg")
     _write_summary(metrics_by_dataset, output_dir / "comparison_summary.json")
 
     print(str(output_dir))

@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
     QFileDialog,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -33,7 +33,7 @@ from widgets import DetailPage, GroupListPage
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Semi-labeling Result Viewer")
+        self.setWindowTitle("Semi-labeling Step5 Result Viewer")
         self.resize(1500, 950)
         self.feature_store: FeatureGroupStore | None = None
         self.source_store: SourceStore | None = None
@@ -55,6 +55,8 @@ class MainWindow(QMainWindow):
             self.group_tabs.addTab(page, label)
         self.detail_page = DetailPage(self.image_loader)
         self.detail_page.back_requested.connect(self.show_group_list)
+        self.detail_page.remove_group_flags_requested.connect(self.remove_current_group_flags)
+        self.detail_page.remove_image_flags_requested.connect(self.remove_image_flags)
         self.stack.addWidget(self.group_tabs)
         self.stack.addWidget(self.detail_page)
 
@@ -69,28 +71,34 @@ class MainWindow(QMainWindow):
 
         container = QWidget()
         layout = QVBoxLayout(container)
+        layout.setSpacing(6)
 
         # ── Database paths ───────────────────────────────
         db_group = QGroupBox("Database Paths")
-        db_form = QFormLayout(db_group)
-        db_form.setLabelAlignment(Qt.AlignRight)
+        db_layout = QVBoxLayout(db_group)
+        db_layout.setSpacing(4)
 
         self.feature_db_input = QLineEdit(str(default_feature_db()))
         self.source_db_input = QLineEdit(str(default_source_db()))
         self.image_root_input = QLineEdit(str(default_image_root()))
 
-        db_form.addRow("Feature DB", self._path_row(self.feature_db_input, self._pick_feature_db))
-        db_form.addRow("Source DB", self._path_row(self.source_db_input, self._pick_source_db))
-        db_form.addRow("Image root", self._path_row(self.image_root_input, self._pick_image_root))
+        db_layout.addWidget(QLabel("Feature DB"))
+        db_layout.addWidget(self._path_row(self.feature_db_input, self._pick_feature_db))
+        db_layout.addWidget(QLabel("Source DB"))
+        db_layout.addWidget(self._path_row(self.source_db_input, self._pick_source_db))
+        db_layout.addWidget(QLabel("Image root"))
+        db_layout.addWidget(self._path_row(self.image_root_input, self._pick_image_root))
 
         self.load_button = QPushButton("Load SQLite")
+        self.load_button.setFixedSize(140, 36)
         self.load_button.clicked.connect(self.load_all)
-        db_form.addRow(self.load_button)
+        db_layout.addWidget(self.load_button)
         layout.addWidget(db_group)
 
         # ── Run selection ────────────────────────────────
         run_group = QGroupBox("Run")
         run_layout = QVBoxLayout(run_group)
+        run_layout.setSpacing(4)
 
         self.run_combo = QComboBox()
         self.run_combo.currentIndexChanged.connect(self.on_run_changed)
@@ -108,36 +116,44 @@ class MainWindow(QMainWindow):
 
         # ── Display settings ─────────────────────────────
         display_group = QGroupBox("Display")
-        display_form = QFormLayout(display_group)
-        display_form.setLabelAlignment(Qt.AlignRight)
+        display_layout = QVBoxLayout(display_group)
+        display_layout.setSpacing(4)
 
+        display_layout.addWidget(QLabel("Image size"))
         self.image_size = QSpinBox()
         self.image_size.setRange(100, 900)
         self.image_size.setSingleStep(20)
         self.image_size.setValue(240)
         self.image_size.valueChanged.connect(self.update_detail_settings)
-        display_form.addRow("Image size", self.image_size)
+        display_layout.addWidget(self.image_size)
 
+        display_layout.addWidget(QLabel("Crop padding"))
         self.crop_padding = QDoubleSpinBox()
         self.crop_padding.setRange(0.0, 0.3)
         self.crop_padding.setSingleStep(0.01)
         self.crop_padding.setValue(0.05)
         self.crop_padding.valueChanged.connect(self.update_detail_settings)
-        display_form.addRow("Crop padding", self.crop_padding)
+        display_layout.addWidget(self.crop_padding)
         layout.addWidget(display_group)
 
         layout.addStretch(1)
 
-        # ── Toggle button in toolbar ─────────────────────
+        # ── Dock + toolbar ───────────────────────────────
         dock.setWidget(container)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self.dock = dock
 
         toolbar = self.addToolBar("View")
         toolbar.setMovable(False)
-        self.toggle_sidebar_action = dock.toggleViewAction()
-        self.toggle_sidebar_action.setText("Toggle Sidebar")
-        toolbar.addAction(self.toggle_sidebar_action)
+
+        toggle_sidebar = dock.toggleViewAction()
+        toggle_sidebar.setText("Toggle Sidebar")
+        toolbar.addAction(toggle_sidebar)
+
+        self.toggle_table_action = QAction("Toggle Table", self)
+        self.toggle_table_action.setEnabled(False)   # enabled only on detail page
+        self.toggle_table_action.triggered.connect(self._on_toggle_table)
+        toolbar.addAction(self.toggle_table_action)
 
     # ── Helpers ──────────────────────────────────────────
 
@@ -146,8 +162,8 @@ class MainWindow(QMainWindow):
         h = QHBoxLayout(widget)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(4)
-        button = QPushButton("…")
-        button.setFixedWidth(32)
+        button = QPushButton("...")
+        button.setFixedSize(48, 36)
         button.clicked.connect(picker)
         h.addWidget(line_edit, 1)
         h.addWidget(button)
@@ -230,6 +246,8 @@ class MainWindow(QMainWindow):
         if self.source_store is not None:
             meta = self.source_store.source_meta([int(row.result_id) for row in rows])
             rows = merge_source_meta(rows, meta)
+        self.stack.setCurrentWidget(self.detail_page)
+        self.toggle_table_action.setEnabled(True)
         self.detail_page.set_detail(
             cluster,
             rows,
@@ -237,7 +255,6 @@ class MainWindow(QMainWindow):
             image_size=int(self.image_size.value()),
             padding_ratio=float(self.crop_padding.value()),
         )
-        self.stack.setCurrentWidget(self.detail_page)
 
     def update_detail_settings(self) -> None:
         self.detail_page.update_image_settings(
@@ -245,5 +262,28 @@ class MainWindow(QMainWindow):
             padding_ratio=float(self.crop_padding.value()),
         )
 
+    def remove_current_group_flags(self) -> None:
+        if self.feature_store is None or self.current_run is None or self.detail_page.cluster is None:
+            return
+        changed = self.feature_store.clear_flags_for_cluster(
+            self.current_run.grouping_run_id,
+            self.detail_page.cluster.cluster_key,
+        )
+        self.detail_page.clear_flags_for_all_rows()
+        self.reload_clusters()
+        QMessageBox.information(self, "Flags removed", f"Removed flags from {changed} rows in this group.")
+
+    def remove_image_flags(self, result_ids: list[int]) -> None:
+        if self.feature_store is None or self.current_run is None:
+            return
+        changed = self.feature_store.clear_flags_for_results(self.current_run.grouping_run_id, result_ids)
+        self.detail_page.clear_flags_for_results({int(result_id) for result_id in result_ids})
+        self.reload_clusters()
+        QMessageBox.information(self, "Flags removed", f"Removed flags from {changed} rows for this image.")
+
     def show_group_list(self) -> None:
         self.stack.setCurrentWidget(self.group_tabs)
+        self.toggle_table_action.setEnabled(False)
+
+    def _on_toggle_table(self) -> None:
+        self.detail_page.toggle_table()

@@ -107,5 +107,6 @@ Requires-Dist: tzdata
 Requires-Dist: urllib3
 Requires-Dist: wcwidth
 Requires-Dist: wheel
+Requires-Dist: streamlit
 Dynamic: requires-dist
 Dynamic: summary

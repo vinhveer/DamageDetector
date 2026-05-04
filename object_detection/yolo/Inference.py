@@ -86,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         stream=bool(args.stream),
         project=str(args.project),
         name=str(args.name),
+        verbose=False,
     )
 
     serialized = [_result_to_dict(item) for item in results]

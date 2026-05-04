@@ -59,6 +59,8 @@ setup(
     py_modules=["torch_runtime", "device_utils"],
     packages=find_packages(
         include=[
+            "damage_detect",
+            "damage_detect.*",
             "inference_api",
             "inference_api.*",
             "object_detection",
@@ -93,6 +95,7 @@ setup(
             "damage-sam-finetune-pseudo-label=segmentation.sam.finetune.pseudo_label:main",
             "damage-editor=ui.editor_app:main",
             "damage-cropper=ui.create_data_tools.cropper_app.main:main",
+            "damage-streamlit-demo=ui.streamlit_demo:main",
             "damage-models=tools.download_models:main",
         ]
     },
