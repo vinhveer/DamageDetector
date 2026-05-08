@@ -1,0 +1,68 @@
+{
+  "id": "gdino_detect_damage",
+  "name": "Grounding DINO Damage Detection",
+  "description": "Detect crack, mold, and spall with Grounding DINO, relabel detections with OpenCLIP, then export CSV and overlays.",
+  "type": "object_detection",
+  "command": "damage_dino_clip",
+  "status": "Ready",
+  "inputs": [
+    {
+      "name": "image_path",
+      "label": "Image or image folder",
+      "type": "path",
+      "browse": "file_or_directory",
+      "required": true
+    },
+    {
+      "name": "output_dir",
+      "label": "Output folder",
+      "type": "path",
+      "browse": "directory",
+      "default": "results_workflows/gdino_detect_damage"
+    },
+    {
+      "name": "device",
+      "label": "Device",
+      "type": "choice",
+      "default": "auto",
+      "choices": ["auto", "cpu", "cuda", "mps"]
+    },
+    {
+      "name": "dino_checkpoint",
+      "label": "Grounding DINO checkpoint",
+      "type": "path",
+      "browse": "file",
+      "default": ""
+    },
+    {
+      "name": "recursive",
+      "label": "Scan image folder recursively",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "name": "limit",
+      "label": "Image limit",
+      "type": "integer",
+      "default": 0
+    },
+    {
+      "name": "clip_model_name",
+      "label": "OpenCLIP model",
+      "type": "text",
+      "default": "ViT-B-32"
+    },
+    {
+      "name": "clip_pretrained",
+      "label": "OpenCLIP pretrained weights",
+      "type": "text",
+      "default": "laion2b_s34b_b79k"
+    },
+    {
+      "name": "clip_batch_size",
+      "label": "CLIP batch size",
+      "type": "integer",
+      "default": 16
+    }
+  ]
+}

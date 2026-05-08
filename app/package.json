@@ -1,0 +1,35 @@
+{
+  "name": "damage-detector-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "dev:react": "vite --host 127.0.0.1",
+    "dev:electron": "wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "electron .",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@eslint/js": "latest",
+    "@reduxjs/toolkit": "latest",
+    "@tabler/icons-react": "^3.42.0",
+    "@tailwindcss/vite": "latest",
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "cross-env": "latest",
+    "dayjs": "^1.11.20",
+    "electron": "^42.0.0",
+    "eslint": "latest",
+    "globals": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-redux": "latest",
+    "tailwindcss": "latest",
+    "vite": "latest",
+    "wait-on": "latest"
+  }
+}

@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --docker-blue: #1d63ed;
+  --docker-blue-hover: #1754cc;
+  --docker-bg: #f7f8fa;
+  --docker-surface: #ffffff;
+  --docker-border: #d9dce1;
+  --docker-border-soft: #e7e9ee;
+  --docker-text: #1f2328;
+  --docker-muted: #59636e;
+  --docker-hover: #f3f6fb;
+  --docker-active: #edf4ff;
+}
+
+.rv-font {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+}
+
+.rv-mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.app-drag {
+  -webkit-app-region: drag;
+}
+
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+@keyframes rv-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes rv-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.rv-enter {
+  animation: rv-fade-in 180ms ease-out both;
+}
+
+.rv-font button,
+.rv-font input,
+.rv-font select,
+.rv-font textarea,
+.rv-font a,
+.rv-font tr,
+.rv-font [data-ui="panel"],
+.rv-font [data-ui="tile"],
+.rv-font [data-ui="tab"],
+.rv-font [data-ui="badge"] {
+  transition-property: background-color, border-color, color, box-shadow, opacity, transform;
+  transition-duration: 160ms;
+  transition-timing-function: ease;
+}
+
+.rv-font button:not(:disabled):active,
+.rv-font a:active {
+  transform: translateY(1px);
+}
+
+.rv-font [data-ui="panel"]:hover,
+.rv-font [data-ui="tile"]:hover {
+  border-color: #c7cbd1;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+}

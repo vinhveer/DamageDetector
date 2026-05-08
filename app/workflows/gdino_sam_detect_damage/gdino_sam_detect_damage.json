@@ -1,0 +1,58 @@
+{
+  "id": "gdino_sam_detect_damage",
+  "name": "Grounding DINO + SAM Damage Detection",
+  "description": "Detect boxes with Grounding DINO, segment them with SAM, and export masks and overlays.",
+  "type": "detection_segmentation",
+  "command": "sam_dino",
+  "status": "Ready",
+  "inputs": [
+    {
+      "name": "image_path",
+      "label": "Input image",
+      "type": "path",
+      "browse": "file",
+      "required": true
+    },
+    {
+      "name": "output_dir",
+      "label": "Output folder",
+      "type": "path",
+      "browse": "directory",
+      "default": "results_workflows/gdino_sam_detect_damage"
+    },
+    {
+      "name": "device",
+      "label": "Device",
+      "type": "choice",
+      "default": "auto",
+      "choices": ["auto", "cpu", "cuda", "mps"]
+    },
+    {
+      "name": "dino_checkpoint",
+      "label": "Grounding DINO checkpoint",
+      "type": "path",
+      "browse": "file",
+      "required": true
+    },
+    {
+      "name": "sam_checkpoint",
+      "label": "SAM checkpoint",
+      "type": "path",
+      "browse": "file",
+      "required": true
+    },
+    {
+      "name": "sam_model_type",
+      "label": "SAM model type",
+      "type": "choice",
+      "default": "auto",
+      "choices": ["auto", "vit_b", "vit_l", "vit_h"]
+    }
+  ],
+  "steps": [
+    "Select input image",
+    "Detect boxes with Grounding DINO",
+    "Segment boxes with SAM",
+    "Export masks and overlays"
+  ]
+}
