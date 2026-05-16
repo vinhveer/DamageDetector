@@ -93,7 +93,7 @@ class _LoRA_qkv(nn.Module):
 
 class LoRA_Adapter_Sam(nn.Module):
 
-    def __init__(self, sam_model: Sam, middle_dim: int, r: int):
+    def __init__(self, sam_model: Sam, middle_dim: int, r: int, lora_layer=None, lora_targets=None):
         super(LoRA_Adapter_Sam, self).__init__()
 
         assert middle_dim > 0 and r > 0
@@ -101,7 +101,7 @@ class LoRA_Adapter_Sam(nn.Module):
         # dim = base_vit_dim
         self.adapter_layer = list(
                 range(len(sam_model.image_encoder.blocks)))  # Only apply adapter to the image encoder by default
-        self.lora_layer = list(
+        self.lora_layer = list(lora_layer) if lora_layer else list(
                 range(len(sam_model.image_encoder.blocks)))  # Only apply lora to the image encoder by default
         # create for storage, then we can init them or load weights
         self.w_down_attn = []  # These are linear layers
@@ -145,6 +145,8 @@ class LoRA_Adapter_Sam(nn.Module):
                 w_down_linear_mlp,
                 w_up_linear_mlp
             )
+            if t_layer_i not in self.lora_layer:
+                continue
             w_a_linear_q = nn.Linear(self.dim, r, bias=False)
             w_b_linear_q = nn.Linear(r, self.dim, bias=False)
             w_a_linear_v = nn.Linear(self.dim, r, bias=False)

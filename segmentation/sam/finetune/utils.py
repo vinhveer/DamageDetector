@@ -163,6 +163,33 @@ class BinaryFocalWithLogitsLoss(nn.Module):
         return loss.mean()
 
 
+class BinaryBoundaryLoss(nn.Module):
+    def __init__(self, kernel_size: int = 3):
+        super().__init__()
+        self.kernel_size = int(kernel_size)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        target = target.float()
+        if target.ndim == 3:
+            target = target.unsqueeze(1)
+
+        padding = self.kernel_size // 2
+        pred_boundary = F.max_pool2d(probs, self.kernel_size, stride=1, padding=padding) - F.max_pool2d(
+            1.0 - probs,
+            self.kernel_size,
+            stride=1,
+            padding=padding,
+        ).neg().add(1.0)
+        target_boundary = F.max_pool2d(target, self.kernel_size, stride=1, padding=padding) - F.max_pool2d(
+            1.0 - target,
+            self.kernel_size,
+            stride=1,
+            padding=padding,
+        ).neg().add(1.0)
+        return F.l1_loss(torch.clamp(pred_boundary, 0.0, 1.0), torch.clamp(target_boundary, 0.0, 1.0))
+
+
 def _soft_erode(img: torch.Tensor) -> torch.Tensor:
     if img.ndim != 4:
         raise ValueError(f"Expected 4D tensor, got {tuple(img.shape)}")

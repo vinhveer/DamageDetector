@@ -26,6 +26,8 @@ def build_crack_profile_augment(profile: str):
                 ),
                 A.Perspective(scale=(0.03, 0.08), keep_size=True, fit_output=False, p=1.0),
             ], p=0.65),
+            A.ElasticTransform(alpha=80, sigma=10, interpolation=cv2.INTER_LINEAR, mask_interpolation=cv2.INTER_NEAREST, p=0.30),
+            A.GridDistortion(interpolation=cv2.INTER_LINEAR, mask_interpolation=cv2.INTER_NEAREST, p=0.30),
             A.OneOf([
                 A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=1.0),
                 A.RandomBrightnessContrast(brightness_limit=0.28, contrast_limit=0.28, p=1.0),
@@ -54,7 +56,7 @@ def build_crack_profile_augment(profile: str):
                 hole_width_range=(0.04, 0.14),
                 fill=0,
                 fill_mask=0,
-                p=0.28,
+                p=0.15,
             ),
         ], is_check_shapes=False)
 

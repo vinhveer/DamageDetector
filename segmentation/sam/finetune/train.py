@@ -44,6 +44,8 @@ parser.add_argument('--delta_type', type=str, default='adapter', help='choose fr
 parser.add_argument('--middle_dim', type=int, default=32, help='Middle dim of adapter')
 parser.add_argument('--scaling_factor', type=float, default=0.1, help='Scaling_factor of adapter')
 parser.add_argument('--rank', type=int, default=4, help='Rank for LoRA adaptation')
+parser.add_argument('--lora_layers', type=str, default='all', help="LoRA image encoder layers: 'all', 'last4', or comma-separated block indexes")
+parser.add_argument('--lora_targets', type=str, default='qv', help="LoRA targets: 'qv' or comma-separated subset of q,k,v,mlp")
 parser.add_argument('--decoder_type', type=str, default='baseline', choices=['baseline', 'hq'], help='Mask decoder type')
 parser.add_argument('--centerline_head', action='store_true', help='Enable a dedicated centerline prediction head in the decoder')
 parser.add_argument('--decoder_lr_mult', type=float, default=None, help='Learning-rate multiplier applied to trainable decoder params (default: 0.25 for HQ, 0.1 otherwise)')
@@ -63,11 +65,11 @@ parser.add_argument('--grad_accum_steps', type=int, default=1, help='Gradient ac
 parser.add_argument('--activation_checkpointing', action='store_true', help='Enable activation checkpointing for the SAM ViT image encoder blocks')
 parser.add_argument('--ddp_find_unused', type=str, default='auto', choices=['auto', 'on', 'off'], help='DDP unused-parameter detection policy')
 parser.add_argument('--run_name', type=str, default='', help='Optional suffix added to the snapshot directory name to avoid collisions between runs')
-parser.add_argument('--profile', type=str, default='custom', choices=['custom', 'speed', 'balanced', 'research'], help='High-level training preset that fills in default knobs unless you override them')
+parser.add_argument('--profile', type=str, default='custom', choices=['custom', 'speed', 'balanced', 'research', 'recipe_max_kaggle'], help='High-level training preset that fills in default knobs unless you override them')
 parser.add_argument('--train_use_boxes', type=int, default=1, help='Use box prompts during training')
 parser.add_argument('--train_full_image_box', action='store_true', help='Use a full-image box prompt for every training sample')
 parser.add_argument('--train_use_points_prob', type=float, default=0.1, help='Legacy mode only: probability of adding GT points during training')
-parser.add_argument('--prompt_policy', type=str, default='hybrid_v1', choices=['hybrid', 'hybrid_v1', 'hybrid_val_aligned', 'hybrid_val_balanced', 'hybrid_tight_heavy', 'points_heavy', 'legacy'], help='Training prompt policy preset')
+parser.add_argument('--prompt_policy', type=str, default='hybrid_v1', choices=['hybrid', 'hybrid_v1', 'hybrid_val_aligned', 'hybrid_val_balanced', 'hybrid_tight_heavy', 'points_heavy', 'recipe_max_kaggle', 'legacy'], help='Training prompt policy preset')
 parser.add_argument('--background_crop_prob', type=float, default=0.2, help='Probability of sampling a random background crop even when crack exists')
 parser.add_argument('--near_background_crop_prob', type=float, default=0.15, help='Probability of sampling a crop near but not centered on the crack')
 parser.add_argument('--hard_negative_crop_prob', type=float, default=0.10, help='Probability of sampling a hard-negative background crop')
@@ -87,6 +89,7 @@ parser.add_argument('--tversky_weight', type=float, default=0.35, help='Weight f
 parser.add_argument('--focal_weight', type=float, default=0.25, help='Weight for binary focal loss')
 parser.add_argument('--focal_alpha', type=float, default=0.25, help='Alpha for binary focal loss')
 parser.add_argument('--focal_gamma', type=float, default=2.0, help='Gamma for binary focal loss')
+parser.add_argument('--boundary_weight', type=float, default=0.0, help='Weight for boundary loss')
 parser.add_argument('--cldice_weight', type=float, default=0.0, help='Weight for clDice topology-aware loss')
 parser.add_argument('--cldice_iters', type=int, default=20, help='Soft skeleton iterations for clDice')
 parser.add_argument('--centerline_aux_weight', type=float, default=0.0, help='Weight for centerline auxiliary supervision on main logits')
@@ -169,6 +172,8 @@ def _run_manifest(args, snapshot_path: str) -> dict:
         "seed": int(getattr(args, "seed", 0)),
         "vit_name": str(getattr(args, "vit_name", "")),
         "delta_type": str(getattr(args, "delta_type", "")),
+        "lora_layers": str(getattr(args, "lora_layers", "all")),
+        "lora_targets": str(getattr(args, "lora_targets", "qv")),
         "decoder_type": str(getattr(args, "decoder_type", "")),
         "activation_checkpointing": bool(getattr(args, "activation_checkpointing", False)),
         "ddp_find_unused": str(getattr(args, "ddp_find_unused", "auto")),
@@ -203,6 +208,8 @@ def _warn_existing_snapshot(snapshot_path: str, args) -> None:
         "seed",
         "vit_name",
         "delta_type",
+        "lora_layers",
+        "lora_targets",
         "decoder_type",
         "activation_checkpointing",
         "ddp_find_unused",
@@ -283,6 +290,32 @@ def _configure_decoder_training_objective(net, *, centerline_aux_weight: float, 
     return frozen_groups
 
 
+def _resolve_lora_layers(value: str, sam) -> list[int] | None:
+    text = str(value or "all").strip().lower()
+    blocks = getattr(getattr(sam, "image_encoder", None), "blocks", [])
+    depth = len(blocks)
+    if text in {"", "all"}:
+        return None
+    if text == "last4":
+        return list(range(max(0, depth - 4), depth))
+    layers = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        layers.append(int(part))
+    return sorted(set(index for index in layers if 0 <= index < depth))
+
+
+def _resolve_lora_targets(value: str) -> set[str]:
+    text = str(value or "qv").strip().lower()
+    if text in {"all", "qkvmlp"}:
+        return {"q", "k", "v", "mlp"}
+    if text == "qv":
+        return {"q", "v"}
+    return {part.strip() for part in text.split(",") if part.strip() in {"q", "k", "v", "mlp"}}
+
+
 def _resolve_ddp_find_unused(args, net) -> bool:
     mode = str(getattr(args, "ddp_find_unused", "auto")).strip().lower()
     if mode == "on":
@@ -361,11 +394,47 @@ def _apply_profile_defaults(args) -> None:
             "save_interval": 2,
             "continuity_eval_interval": 1,
         },
+        "recipe_max_kaggle": {
+            "augment_profile": "outdomain",
+            "crop_policy": "smart",
+            "tile_batch_size": 4,
+            "refine_batch_size": 2,
+            "save_interval": 1,
+            "continuity_eval_interval": 1,
+            "num_workers": 2,
+        },
     }
     preset = presets.get(profile, {})
     for key, value in preset.items():
         if getattr(args, key) == defaults[key]:
             setattr(args, key, value)
+    if profile == "recipe_max_kaggle":
+        recipe_defaults = {
+            "prompt_policy": "recipe_max_kaggle",
+            "vit_name": "vit_b",
+            "delta_type": "lora",
+            "rank": 16,
+            "lora_layers": "last4",
+            "lora_targets": "q,k,v,mlp",
+            "use_amp": True,
+            "activation_checkpointing": True,
+            "grad_accum_steps": 4,
+            "img_size": 512,
+            "batch_size": 2,
+            "bce_weight": 0.5,
+            "tversky_weight": 0.6,
+            "boundary_weight": 0.3,
+            "dice_weight": 0.1,
+            "focal_weight": 0.0,
+            "cldice_weight": 0.0,
+            "centerline_aux_weight": 0.0,
+            "tversky_alpha": 0.25,
+            "tversky_beta": 0.75,
+            "val_thresholds": [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50],
+        }
+        for key, value in recipe_defaults.items():
+            if getattr(args, key) == parser.get_default(key):
+                setattr(args, key, value)
 
 if __name__ == "__main__":
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -437,10 +506,21 @@ if __name__ == "__main__":
         net = pkg.Adapter_Sam(sam, args.middle_dim, args.scaling_factor).cuda()
     elif args.delta_type == 'lora':
         pkg = import_module('segmentation.sam.finetune.delta.sam_lora_image_encoder') 
-        net = pkg.LoRA_Sam(sam, args.rank).cuda()
+        net = pkg.LoRA_Sam(
+            sam,
+            args.rank,
+            lora_layer=_resolve_lora_layers(getattr(args, "lora_layers", "all"), sam),
+            lora_targets=_resolve_lora_targets(getattr(args, "lora_targets", "qv")),
+        ).cuda()
     else:
         pkg = import_module('segmentation.sam.finetune.delta.sam_adapter_lora_image_encoder') 
-        net = pkg.LoRA_Adapter_Sam(sam, args.middle_dim, args.rank).cuda()    
+        net = pkg.LoRA_Adapter_Sam(
+            sam,
+            args.middle_dim,
+            args.rank,
+            lora_layer=_resolve_lora_layers(getattr(args, "lora_layers", "all"), sam),
+            lora_targets=_resolve_lora_targets(getattr(args, "lora_targets", "qv")),
+        ).cuda()    
 
     if args.delta_ckpt is not None:
         net.load_delta_parameters(args.delta_ckpt)

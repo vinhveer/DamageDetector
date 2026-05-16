@@ -346,6 +346,19 @@ def apply_delta_to_sam(
             return "lora"
         return "none"
 
+    def _resolve_lora_metadata(state: dict) -> tuple[list[int] | None, set[str]]:
+        layers = state.get("__lora_layers__")
+        if isinstance(layers, (list, tuple)):
+            layers = [int(value) for value in layers]
+        else:
+            layers = None
+        targets = state.get("__lora_targets__")
+        if isinstance(targets, (list, tuple, set)):
+            targets = {str(value) for value in targets}
+        else:
+            targets = {"q", "v"}
+        return layers, targets
+
     normalized = delta_type.lower().strip()
     inferred = _infer_delta_type_from_state(delta_state)
     if inferred in {"adapter", "lora", "both"} and inferred != normalized:
@@ -365,8 +378,9 @@ def apply_delta_to_sam(
         wrapper_module = import_module("segmentation.sam.finetune.delta.sam_adapter_image_encoder")
         wrapper = wrapper_module.Adapter_Sam(sam, int(middle_dim), float(scaling_factor))
     elif normalized == "lora":
+        lora_layers, lora_targets = _resolve_lora_metadata(delta_state)
         wrapper_module = import_module("segmentation.sam.finetune.delta.sam_lora_image_encoder")
-        wrapper = wrapper_module.LoRA_Sam(sam, int(rank))
+        wrapper = wrapper_module.LoRA_Sam(sam, int(rank), lora_layer=lora_layers, lora_targets=lora_targets)
     elif normalized == "both":
         ckpt_middle_dim = None
         for idx in range(1000):
