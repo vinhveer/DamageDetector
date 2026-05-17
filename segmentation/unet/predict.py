@@ -31,6 +31,10 @@ def _build_parser():
         help="Overlap (pixels) between tiles in tile mode. 0 means input_size//2 (recommended).",
     )
     parser.add_argument("--tile-batch-size", type=int, default=4, help="Batch size for tiles in tile mode.")
+    parser.add_argument("--tta", action="store_true", help="Enable flip/rotate test-time augmentation.")
+    parser.add_argument("--multiscale", type=str, default="1.0", help="Comma-separated scales, e.g. 0.75,1.0,1.25.")
+    parser.add_argument("--gaussian-weight", action="store_true", help="Blend overlapping tiles with Gaussian weights.")
+    parser.add_argument("--postprocess-min-size", type=int, default=50, help="Remove connected components smaller than this many pixels.")
     parser.add_argument("--recursive", action="store_true", help="Scan subfolders recursively (folder mode).")
     parser.add_argument(
         "--gt-dir",
@@ -67,6 +71,7 @@ def main():
     )
 
     overlap = (args.input_size // 2) if args.tile_overlap == 0 else args.tile_overlap
+    multiscale = tuple(float(x.strip()) for x in args.multiscale.split(",") if x.strip()) or (1.0,)
 
     if args.image:
         predict_image(
@@ -80,6 +85,10 @@ def main():
             input_size=args.input_size,
             tile_overlap=overlap,
             tile_batch_size=args.tile_batch_size,
+            tta=args.tta,
+            multiscale=multiscale,
+            gaussian_weight=args.gaussian_weight,
+            postprocess_min_size=args.postprocess_min_size,
         )
         return
 
@@ -96,6 +105,10 @@ def main():
         input_size=args.input_size,
         tile_overlap=args.tile_overlap,
         tile_batch_size=args.tile_batch_size,
+        tta=args.tta,
+        multiscale=multiscale,
+        gaussian_weight=args.gaussian_weight,
+        postprocess_min_size=args.postprocess_min_size,
     )
 
 

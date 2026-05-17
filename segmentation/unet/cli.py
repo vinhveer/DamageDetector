@@ -1,9 +1,26 @@
 from __future__ import annotations
 
 import argparse
+import os
 
 from inference_api.cli_support import parse_roi, print_json, log_to_stderr
 from .client import get_unet_service
+
+
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def _expand_image_inputs(values: list[str]) -> list[str]:
+    paths: list[str] = []
+    for value in values:
+        if os.path.isdir(value):
+            for name in sorted(os.listdir(value)):
+                path = os.path.join(value, name)
+                if os.path.isfile(path) and os.path.splitext(name)[1].lower() in IMAGE_EXTS:
+                    paths.append(path)
+            continue
+        paths.append(value)
+    return paths
 
 
 def _common_params(args: argparse.Namespace) -> dict:
@@ -16,6 +33,10 @@ def _common_params(args: argparse.Namespace) -> dict:
         "input_size": int(args.input_size),
         "tile_overlap": int(args.tile_overlap),
         "tile_batch_size": int(args.tile_batch_size),
+        "tta": bool(args.tta),
+        "multiscale": tuple(float(x.strip()) for x in str(args.multiscale).split(",") if x.strip()) or (1.0,),
+        "gaussian_weight": bool(args.gaussian_weight),
+        "postprocess_min_size": int(args.postprocess_min_size),
         "device": args.device,
     }
     roi = parse_roi(args.roi)
@@ -38,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--input-size", type=int, default=512)
         subparser.add_argument("--tile-overlap", type=int, default=0)
         subparser.add_argument("--tile-batch-size", type=int, default=4)
+        subparser.add_argument("--tta", action="store_true", help="Enable flip/rotate test-time augmentation.")
+        subparser.add_argument("--multiscale", default="1.0", help="Comma-separated scales, e.g. 0.75,1.0,1.25.")
+        subparser.add_argument("--gaussian-weight", action="store_true", help="Blend overlapping tiles with Gaussian weights.")
+        subparser.add_argument("--postprocess-min-size", type=int, default=50, help="Remove connected components smaller than this many pixels.")
         subparser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
         subparser.add_argument("--roi", nargs=4, type=int, metavar=("X1", "Y1", "X2", "Y2"))
 
@@ -71,7 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "predict":
             result = service.call("predict", {"image_path": args.image, "params": params}, log_fn=log_to_stderr)
         elif args.command == "predict-batch":
-            result = service.call("predict_batch", {"image_paths": list(args.images), "params": params}, log_fn=log_to_stderr)
+            result = service.call("predict_batch", {"image_paths": _expand_image_inputs(list(args.images)), "params": params}, log_fn=log_to_stderr)
         elif args.command == "run-rois":
             rois = [parse_roi(list(values)) for values in args.roi_box]
             result = service.call(

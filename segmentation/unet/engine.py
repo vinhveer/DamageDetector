@@ -18,6 +18,10 @@ class UnetParams:
     input_size: int = 512
     tile_overlap: int = 0
     tile_batch_size: int = 4
+    tta: bool = False
+    multiscale: tuple[float, ...] = (1.0,)
+    gaussian_weight: bool = False
+    postprocess_min_size: int = 50
     device: str = "auto"
     roi_box: tuple[int, int, int, int] | None = None
     task_group: str = "crack_only"
@@ -86,6 +90,10 @@ class UnetRunner:
             input_size=int(params.input_size),
             tile_overlap=overlap,
             tile_batch_size=int(params.tile_batch_size),
+            tta=bool(params.tta),
+            multiscale=params.multiscale,
+            gaussian_weight=bool(params.gaussian_weight),
+            postprocess_min_size=int(params.postprocess_min_size),
             roi_box=params.roi_box,
             stop_checker=stop_checker,
         )
@@ -148,10 +156,17 @@ class UnetRunner:
                 input_size=params.input_size,
                 tile_overlap=overlap,
                 tile_batch_size=params.tile_batch_size,
+                tta=bool(params.tta),
+                multiscale=params.multiscale,
+                gaussian_weight=bool(params.gaussian_weight),
                 stop_checker=stop_checker,
             )
             mask_bool = binarize_prediction(prob_map, params.threshold)
-            mask_bool = postprocess_binary_mask(mask_bool, params.apply_postprocessing)
+            mask_bool = postprocess_binary_mask(
+                mask_bool,
+                params.apply_postprocessing,
+                min_size=params.postprocess_min_size,
+            )
             roi_mask_uint8 = mask_bool.astype(np.uint8) * 255
             if roi_mask_uint8.shape != (b - t, r - l):
                 roi_mask_uint8 = cv2.resize(roi_mask_uint8, (r - l, b - t), interpolation=cv2.INTER_NEAREST)

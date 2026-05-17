@@ -65,6 +65,10 @@ def predict_folder(
     input_size=256,
     tile_overlap=0,
     tile_batch_size=4,
+    tta=False,
+    multiscale=None,
+    gaussian_weight=False,
+    postprocess_min_size=50,
 ):
     if not os.path.isdir(input_dir):
         raise FileNotFoundError(f"Input folder does not exist: {input_dir}")
@@ -101,6 +105,10 @@ def predict_folder(
             input_size=input_size,
             tile_overlap=overlap,
             tile_batch_size=tile_batch_size,
+            tta=tta,
+            multiscale=multiscale,
+            gaussian_weight=gaussian_weight,
+            postprocess_min_size=postprocess_min_size,
             return_details=True,
         )
         results.append(details)

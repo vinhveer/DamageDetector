@@ -14,6 +14,11 @@ def _unet_params_from(obj: dict[str, Any]) -> UnetParams:
     roi = data.get("roi_box")
     if isinstance(roi, list) and len(roi) == 4:
         data["roi_box"] = tuple(int(x) for x in roi)
+    multiscale = data.get("multiscale")
+    if isinstance(multiscale, str):
+        data["multiscale"] = tuple(float(x.strip()) for x in multiscale.split(",") if x.strip()) or (1.0,)
+    elif isinstance(multiscale, list):
+        data["multiscale"] = tuple(float(x) for x in multiscale) or (1.0,)
     return UnetParams(**data)
 
 

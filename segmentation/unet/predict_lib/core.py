@@ -19,8 +19,12 @@ def predict_image_result(
     roi_box=None,
     mode="tile",
     input_size=256,
-    tile_overlap=32,
+    tile_overlap=128,
     tile_batch_size=4,
+    tta=False,
+    multiscale=None,
+    gaussian_weight=False,
+    postprocess_min_size=50,
     gt_mask_path=None,
     stop_checker=None,
 ):
@@ -36,10 +40,13 @@ def predict_image_result(
         input_size=input_size,
         tile_overlap=tile_overlap,
         tile_batch_size=tile_batch_size,
+        tta=tta,
+        multiscale=multiscale,
+        gaussian_weight=gaussian_weight,
         stop_checker=stop_checker,
     )
     binary_mask = binarize_prediction(pred, threshold)
-    binary_mask = postprocess_binary_mask(binary_mask, apply_postprocessing)
+    binary_mask = postprocess_binary_mask(binary_mask, apply_postprocessing, min_size=postprocess_min_size)
 
     pred, binary_mask = restore_prediction_to_full(pred, binary_mask, roi_box, full_img.size)
     gt_mask, dice = evaluate_against_gt(binary_mask, gt_mask_path, target_size=full_img.size)
@@ -71,8 +78,12 @@ def predict_image(
     roi_box=None,
     mode="tile",
     input_size=256,
-    tile_overlap=32,
+    tile_overlap=128,
     tile_batch_size=4,
+    tta=False,
+    multiscale=None,
+    gaussian_weight=False,
+    postprocess_min_size=50,
     stop_checker=None,
 ):
     """Run crack segmentation on a single image using a trained model."""
@@ -90,6 +101,10 @@ def predict_image(
         input_size=input_size,
         tile_overlap=tile_overlap,
         tile_batch_size=tile_batch_size,
+        tta=tta,
+        multiscale=multiscale,
+        gaussian_weight=gaussian_weight,
+        postprocess_min_size=postprocess_min_size,
         gt_mask_path=gt_mask_path,
         stop_checker=stop_checker,
     )

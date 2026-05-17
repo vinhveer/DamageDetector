@@ -1,4 +1,5 @@
 import os
+import copy
 
 from torch_runtime import dist, torch
 from tqdm import tqdm
@@ -58,6 +59,32 @@ def _call_criterion(criterion, outputs, masks, *, return_components=False):
     if isinstance(loss_out, tuple) and len(loss_out) == 2:
         return loss_out[0], loss_out[1]
     return loss_out, {}
+
+
+def _mask_logits(outputs):
+    if isinstance(outputs, (tuple, list)):
+        return outputs[0]
+    return outputs
+
+
+class ModelEMA:
+    def __init__(self, model, decay=0.999):
+        source = model.module if hasattr(model, "module") else model
+        self.module = copy.deepcopy(source).eval()
+        for param in self.module.parameters():
+            param.requires_grad = False
+        self.decay = float(decay)
+
+    @torch.no_grad()
+    def update(self, model):
+        source = model.module if hasattr(model, "module") else model
+        source_state = source.state_dict()
+        for key, value in self.module.state_dict().items():
+            src = source_state[key].detach()
+            if value.dtype.is_floating_point:
+                value.copy_(self.decay * value + (1.0 - self.decay) * src)
+            else:
+                value.copy_(src)
 
 
 def _compute_reconstructed_metrics(tile_predictions, thresholds, base_threshold):
@@ -210,7 +237,7 @@ def _append_table_rows(name, rows, sqlite_store: SQLiteRunStore | None = None):
     sqlite_store.insert_rows(name, rows)
 
 
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, model_config=None, csv_paths=None, grad_accum_steps=1, use_amp=False):
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, num_epochs, device, output_dir, model_config=None, csv_paths=None, grad_accum_steps=1, use_amp=False, ema_decay=0.0):
     # Ensure the output directory exists.
     os.makedirs(output_dir, exist_ok=True)
 
@@ -221,6 +248,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     
     # Initialize AMP Scaler
     scaler = torch.amp.GradScaler('cuda', enabled=use_cuda)
+    ema = ModelEMA(model, decay=float(ema_decay)) if float(ema_decay or 0.0) > 0.0 else None
 
     disable_visuals = bool(getattr(train_model, "_disable_visuals", False))
     disable_loss_curve = bool(getattr(train_model, "_disable_loss_curve", False))
@@ -243,7 +271,18 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
     if is_main:
         _init_table(
             train_steps_csv,
-            ["epoch", "step_in_epoch", "global_step", "loss", "loss_bce", "loss_dice", "loss_focal", "lr"],
+            [
+                "epoch",
+                "step_in_epoch",
+                "global_step",
+                "loss",
+                "loss_bce",
+                "loss_dice",
+                "loss_focal",
+                "loss_cldice",
+                "loss_centerline",
+                "lr",
+            ],
             sqlite_store=sqlite_store,
         )
         _init_table(
@@ -313,6 +352,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                if ema is not None:
+                    ema.update(model)
 
             train_loss += loss.item()
             train_steps += 1
@@ -323,6 +364,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 loss_bce = float(loss_components.get("loss_bce", torch.tensor(0.0)).item())
                 loss_dice = float(loss_components.get("loss_dice", torch.tensor(0.0)).item())
                 loss_focal = float(loss_components.get("loss_focal", torch.tensor(0.0)).item())
+                loss_cldice = float(loss_components.get("loss_cldice", torch.tensor(0.0)).item())
+                loss_centerline = float(loss_components.get("loss_centerline", torch.tensor(0.0)).item())
                 train_step_buffer.append(
                     [
                         epoch + 1,
@@ -332,6 +375,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                         loss_bce,
                         loss_dice,
                         loss_focal,
+                        loss_cldice,
+                        loss_centerline,
                         float(current_lr),
                     ]
                 )
@@ -351,7 +396,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             train_step_buffer.clear()
 
         # Validation phase
-        model.eval()
+        eval_model = ema.module if ema is not None else model
+        eval_model.eval()
         val_loss = 0
         val_steps = 0
         val_dice_sum = 0.0
@@ -378,13 +424,13 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 
                 # AMp for validation too
                 with torch.amp.autocast('cuda', enabled=use_cuda):
-                    outputs = model(images)
+                    outputs = eval_model(images)
                     loss, _ = _call_criterion(criterion, outputs, masks, return_components=False)
 
                 val_loss += loss.item()
                 val_steps += 1
                 thr = getattr(train_model, "_metric_threshold", 0.5)
-                prob = torch.sigmoid(outputs)
+                prob = torch.sigmoid(_mask_logits(outputs))
                 val_dice_sum += dice_score_from_prob(prob, masks, thr=thr)
                 val_iou_sum += iou_score_from_prob(prob, masks, thr=thr)
 
@@ -561,13 +607,29 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         # Save last model
         if is_main:
             last_model_path = os.path.join(output_dir, "last_model.pth")
-            save_checkpoint(last_model_path, model, model_config, epoch=epoch + 1, metrics=metrics)
+            save_checkpoint(
+                last_model_path,
+                model,
+                model_config,
+                epoch=epoch + 1,
+                metrics=metrics,
+                ema_model=ema.module if ema is not None else None,
+                ema_decay=ema.decay if ema is not None else None,
+            )
         
         # Save epoch model (if configured)
         save_all = getattr(train_model, "_save_all_epochs", False)
         if save_all and is_main:
             epoch_model_path = os.path.join(output_dir, f"epoch_{epoch+1}.pth")
-            save_checkpoint(epoch_model_path, model, model_config, epoch=epoch + 1, metrics=metrics)
+            save_checkpoint(
+                epoch_model_path,
+                model,
+                model_config,
+                epoch=epoch + 1,
+                metrics=metrics,
+                ema_model=ema.module if ema is not None else None,
+                ema_decay=ema.decay if ema is not None else None,
+            )
 
         best_metric_name = getattr(train_model, "_best_model_metric", "best_iou")
         metric_candidates = {
@@ -594,7 +656,15 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             counter = 0 
             if is_main:
                 model_path = os.path.join(output_dir, "best_model.pth")
-                save_checkpoint(model_path, model, model_config, epoch=epoch + 1, metrics=metrics)
+                save_checkpoint(
+                    model_path,
+                    model,
+                    model_config,
+                    epoch=epoch + 1,
+                    metrics=metrics,
+                    ema_model=ema.module if ema is not None else None,
+                    ema_decay=ema.decay if ema is not None else None,
+                )
                 logging.info(
                     f"New best {monitor_label}: {monitor_value:.4f}. Saved best model to {model_path}!"
                 )
@@ -615,7 +685,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         # Visualize a few predictions.
         vis_every = int(getattr(train_model, "_visualize_every", 5))
         if is_main and not disable_visuals and _HAS_MPL and vis_every > 0 and (epoch + 1) % vis_every == 0:
-            visualize_predictions(model, val_loader, device, epoch, output_dir, thr=thr)
+            visualize_predictions(eval_model, val_loader, device, epoch, output_dir, thr=thr)
 
     # Plot the loss curves.
     if is_main and not disable_loss_curve and _HAS_MPL:

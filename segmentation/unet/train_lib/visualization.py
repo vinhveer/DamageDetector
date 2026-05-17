@@ -60,6 +60,8 @@ def visualize_predictions(model, val_loader, device, epoch, output_dir, thr=0.5)
         # but for simple inference it usually works fine in fp32. 
         # However, to be safe with model types, we just run forward.
         outputs = model(images)
+        if isinstance(outputs, (tuple, list)):
+            outputs = outputs[0]
         predictions = torch.sigmoid(outputs)
 
         batch_size = images.shape[0]

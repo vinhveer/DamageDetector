@@ -14,9 +14,9 @@ from PIL import Image
 from runtime_lib import SQLiteLogHandler, SQLiteRunStore
 
 from .collate import collate_skip_none
-from .losses import dice_loss, focal_loss_with_logits
+from .losses import centerline_target_from_mask, cl_dice_loss, dice_loss, focal_loss_with_logits
 from .training import train_model
-from ..model_io import build_model_config, save_training_config
+from ..model_io import _build_model, build_model_config, save_training_config
 
 
 def _dataset_api():
@@ -379,29 +379,18 @@ def run_training(args):
     if rank == 0 and is_distributed and val_preprocess == "patch":
         print("DDP val sampler disabled for tiled validation to avoid cross-rank tile reconstruction OOM.")
 
-    # Model: Using Segmentation Models Pytorch (SMP) for SOTA backbones
-    import segmentation_models_pytorch as smp
-
     # Default to a strong backbone if not specified
     encoder_name = getattr(args, "encoder_name", "efficientnet-b4")
     encoder_weights = getattr(args, "encoder_weights", "imagenet")
-    classes = 1
-    activation = None # We use BCEWithLogitsLoss, so no activation at output
 
     if rank == 0:
         print(f"Model: Unet (smp) | Encoder: {encoder_name} | Weights: {encoder_weights} | Attention: SCSE")
     model_config = build_model_config(args)
+    model_config["encoder_weights"] = encoder_weights
     decoder_attention_type = model_config.get("decoder_attention_type")
-    model = smp.Unet(
-        encoder_name=encoder_name, 
-        encoder_weights=encoder_weights, 
-        in_channels=3, 
-        classes=classes, 
-        activation=activation,
-        decoder_attention_type=decoder_attention_type, # <--- SOTA Attention for Cracks
-    ).to(device)
+    model = _build_model(model_config, encoder_weights=encoder_weights).to(device)
     model = _make_module_layout_contiguous(model)
-    ddp_find_unused_parameters = bool(decoder_attention_type)
+    ddp_find_unused_parameters = bool(decoder_attention_type) or bool(model_config.get("use_centerline_head", False))
     if is_distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -416,25 +405,53 @@ def run_training(args):
     bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     def criterion(pred, target, return_components=False):
-        loss = torch.zeros((), device=pred.device, dtype=pred.dtype)
+        centerline_logits = None
+        if isinstance(pred, (tuple, list)):
+            mask_logits = pred[0]
+            if len(pred) > 1:
+                centerline_logits = pred[1]
+        else:
+            mask_logits = pred
+
+        loss = torch.zeros((), device=mask_logits.device, dtype=mask_logits.dtype)
         components = {}
         bce_weight = float(args.bce_weight)
         dice_weight = float(args.dice_weight)
         focal_weight = float(getattr(args, "focal_weight", 0.0))
+        cldice_weight = float(getattr(args, "cldice_weight", 0.0))
+        centerline_weight = float(getattr(args, "centerline_weight", 0.0))
         if bce_weight > 0:
-            loss_bce = bce(pred, target)
+            loss_bce = bce(mask_logits, target)
             loss += bce_weight * loss_bce
             components["loss_bce"] = loss_bce
         if dice_weight > 0:
-            loss_dice = dice_loss(pred, target)
+            loss_dice = dice_loss(mask_logits, target)
             loss += dice_weight * loss_dice
             components["loss_dice"] = loss_dice
         if focal_weight > 0:
             alpha = float(getattr(args, "focal_alpha", 0.25))
             gamma = float(getattr(args, "focal_gamma", 2.0))
-            loss_focal = focal_loss_with_logits(pred, target, alpha=alpha, gamma=gamma)
+            loss_focal = focal_loss_with_logits(mask_logits, target, alpha=alpha, gamma=gamma)
             loss += focal_weight * loss_focal
             components["loss_focal"] = loss_focal
+        if cldice_weight > 0:
+            loss_cldice = cl_dice_loss(
+                mask_logits,
+                target,
+                num_iter=int(getattr(args, "cldice_iters", 10)),
+            )
+            loss += cldice_weight * loss_cldice
+            components["loss_cldice"] = loss_cldice
+        if centerline_weight > 0:
+            if centerline_logits is None:
+                raise RuntimeError("--centerline-weight requires --use-centerline-head or centerline_weight > 0 at model build time.")
+            cl_target = centerline_target_from_mask(
+                target,
+                num_iter=int(getattr(args, "centerline_iters", 10)),
+            )
+            loss_centerline = nn.functional.binary_cross_entropy_with_logits(centerline_logits, cl_target)
+            loss += centerline_weight * loss_centerline
+            components["loss_centerline"] = loss_centerline
         if return_components:
             return loss, components
         return loss
@@ -473,9 +490,11 @@ def run_training(args):
             "Loss: "
             f"bce_weight={args.bce_weight}, dice_weight={args.dice_weight}, "
             f"focal_weight={getattr(args, 'focal_weight', 0.0)}, "
+            f"cldice_weight={getattr(args, 'cldice_weight', 0.0)}, "
+            f"centerline_weight={getattr(args, 'centerline_weight', 0.0)}, "
             f"focal_alpha={getattr(args, 'focal_alpha', 0.25)}, "
             f"focal_gamma={getattr(args, 'focal_gamma', 2.0)}, "
-            f"pos_weight={args.pos_weight}"
+            f"pos_weight={args.pos_weight}, ema_decay={getattr(args, 'ema_decay', 0.0)}"
         )
     if rank == 0:
         print(
@@ -551,6 +570,7 @@ def run_training(args):
             use_amp=(device.type == "cuda" and not bool(getattr(args, "no_amp", False))),
             csv_paths=csv_paths,
             grad_accum_steps=getattr(args, "grad_accum_steps", 1),
+            ema_decay=float(getattr(args, "ema_decay", 0.0) or 0.0),
         )
     finally:
         if rank == 0 and sqlite_store is not None:

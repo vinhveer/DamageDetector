@@ -24,3 +24,29 @@ def focal_loss_with_logits(pred, target, alpha=0.25, gamma=2.0, reduction="mean"
     if reduction == "none":
         return loss
     return loss.mean()
+
+
+def soft_skeleton(prob, num_iter=10):
+    """Differentiable skeleton approximation for thin-structure supervision."""
+    img = prob.clamp(0.0, 1.0)
+    skel = F.relu(img - F.max_pool2d(-img, kernel_size=3, stride=1, padding=1).neg())
+    for _ in range(int(num_iter)):
+        img = F.max_pool2d(-img, kernel_size=3, stride=1, padding=1).neg()
+        delta = F.relu(img - F.max_pool2d(-img, kernel_size=3, stride=1, padding=1).neg())
+        skel = skel + F.relu(delta - skel * delta)
+    return skel.clamp(0.0, 1.0)
+
+
+def cl_dice_loss(pred_logits, target, smooth=1.0, num_iter=10):
+    prob = torch.sigmoid(pred_logits)
+    target = target.float()
+    s_pred = soft_skeleton(prob, num_iter=num_iter)
+    s_gt = soft_skeleton(target, num_iter=num_iter)
+    t_prec = (s_pred * target).sum(dim=(1, 2, 3)) / (s_pred.sum(dim=(1, 2, 3)) + smooth)
+    t_rec = (s_gt * prob).sum(dim=(1, 2, 3)) / (s_gt.sum(dim=(1, 2, 3)) + smooth)
+    cl_dice = (2.0 * t_prec * t_rec + smooth) / (t_prec + t_rec + smooth)
+    return 1.0 - cl_dice.mean()
+
+
+def centerline_target_from_mask(target, num_iter=10):
+    return soft_skeleton(target.float(), num_iter=num_iter).detach()

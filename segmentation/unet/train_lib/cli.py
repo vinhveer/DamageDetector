@@ -76,6 +76,12 @@ def build_arg_parser():
     parser.add_argument("--focal-weight", type=float, default=0.0, help="Focal loss weight")
     parser.add_argument("--focal-alpha", type=float, default=0.25, help="Focal loss alpha")
     parser.add_argument("--focal-gamma", type=float, default=2.0, help="Focal loss gamma")
+    parser.add_argument("--cldice-weight", type=float, default=0.0, help="clDice topology loss weight")
+    parser.add_argument("--cldice-iters", type=int, default=10, help="Soft skeleton iterations for clDice")
+    parser.add_argument("--centerline-weight", type=float, default=0.0, help="Auxiliary centerline BCE loss weight")
+    parser.add_argument("--centerline-iters", type=int, default=10, help="Soft skeleton iterations for centerline targets")
+    parser.add_argument("--use-centerline-head", action="store_true", help="Attach an auxiliary centerline head even if centerline weight is 0")
+    parser.add_argument("--ema-decay", type=float, default=0.0, help="EMA decay for model weights; 0 disables EMA")
     
     # Metrics and Scheduler
     parser.add_argument("--metric-threshold", type=float, default=0.5, help="Threshold for metrics")
