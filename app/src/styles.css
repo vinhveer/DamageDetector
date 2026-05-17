@@ -1,61 +1,74 @@
 @import "tailwindcss";
 
+/* ─── Design tokens ───────────────────────────────────────────── */
 :root {
-  color-scheme: light;
-  --docker-blue: #1d63ed;
-  --docker-blue-hover: #1754cc;
-  --docker-bg: #f7f8fa;
-  --docker-surface: #ffffff;
-  --docker-border: #d9dce1;
-  --docker-border-soft: #e7e9ee;
-  --docker-text: #1f2328;
-  --docker-muted: #59636e;
-  --docker-hover: #f3f6fb;
-  --docker-active: #edf4ff;
+  color-scheme: dark;
+
+  /* Backgrounds */
+  --bg:        #0d1117;
+  --surface:   #161b22;
+  --surface-2: #1c2128;
+  --surface-3: #22272e;
+
+  /* Borders */
+  --border:       #30363d;
+  --border-muted: #21262d;
+
+  /* Text */
+  --text:        #e6edf3;
+  --text-muted:  #7d8590;
+  --text-subtle: #484f58;
+
+  /* Primary (blue) */
+  --primary:       #58a6ff;
+  --primary-hover: #79c0ff;
+  --primary-bg:    rgba(88, 166, 255, 0.10);
+
+  /* Semantic */
+  --danger:     #f85149;
+  --danger-bg:  rgba(248, 81, 73, 0.10);
+  --success:    #3fb950;
+  --success-bg: rgba(63, 185, 80, 0.10);
+  --warning:    #d29922;
+  --warning-bg: rgba(210, 153, 34, 0.10);
+
+  /* State overlays */
+  --hover:  rgba(177, 186, 196, 0.08);
+  --active: rgba(88, 166, 255, 0.10);
 }
 
+/* ─── Typography ──────────────────────────────────────────────── */
 .rv-font {
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
 }
 
 .rv-mono {
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-.app-drag {
-  -webkit-app-region: drag;
-}
+/* ─── Electron drag regions ───────────────────────────────────── */
+.app-drag    { -webkit-app-region: drag; }
+.app-no-drag { -webkit-app-region: no-drag; }
 
-.app-no-drag {
-  -webkit-app-region: no-drag;
-}
-
+/* ─── Animations (opacity-only, no transforms) ───────────────── */
 @keyframes rv-fade-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 @keyframes rv-drawer-in {
-  from {
-    opacity: 0;
-    transform: translateX(18px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 .rv-enter {
-  animation: rv-fade-in 180ms ease-out both;
+  animation: rv-fade-in 140ms ease-out both;
 }
 
+/* ─── Global transitions ──────────────────────────────────────── */
 .rv-font button,
 .rv-font input,
 .rv-font select,
@@ -63,21 +76,15 @@
 .rv-font a,
 .rv-font tr,
 .rv-font [data-ui="panel"],
-.rv-font [data-ui="tile"],
-.rv-font [data-ui="tab"],
-.rv-font [data-ui="badge"] {
-  transition-property: background-color, border-color, color, box-shadow, opacity, transform;
-  transition-duration: 160ms;
+.rv-font [data-ui="badge"],
+.rv-font [data-ui="tab"] {
+  transition-property: background-color, border-color, color, opacity, box-shadow;
+  transition-duration: 120ms;
   transition-timing-function: ease;
 }
 
-.rv-font button:not(:disabled):active,
-.rv-font a:active {
-  transform: translateY(1px);
-}
-
-.rv-font [data-ui="panel"]:hover,
-.rv-font [data-ui="tile"]:hover {
-  border-color: #c7cbd1;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
-}
+/* ─── Scrollbars ──────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-subtle); }

@@ -21,18 +21,23 @@ export default function ResultsView({
 }) {
   const clusters = clustersByLabel[selectedLabel] || [];
   return (
-    <div className="rv-enter flex h-full flex-col bg-[var(--docker-bg)] rv-font">
+    <div className="rv-enter flex h-full flex-col bg-[var(--bg)] rv-font">
       <PageHeader
         title="Result Viewer"
         subtitle={selectedRun ? `${formatNumber(selectedRun.total_clusters)} clusters · ${shortId(selectedRun.grouping_run_id)}` : undefined}
         left={
-          <IconButton label="Connect" onClick={onBack}>
+          <IconButton label="Back" onClick={onBack}>
             <IconChevronLeft size={16} />
           </IconButton>
         }
         right={
           <>
-            <SelectControl value={selectedRunId} onChange={(event) => onRunChange(event.currentTarget.value)} className="w-[280px]" disabled={runs.length === 0}>
+            <SelectControl
+              value={selectedRunId}
+              onChange={(e) => onRunChange(e.currentTarget.value)}
+              className="w-[260px]"
+              disabled={runs.length === 0}
+            >
               <option value="">No run selected</option>
               {runs.map((run) => (
                 <option key={run.grouping_run_id} value={run.grouping_run_id}>
@@ -47,10 +52,13 @@ export default function ResultsView({
           </>
         }
       />
+
       <LabelTabs selectedLabel={selectedLabel} clustersByLabel={clustersByLabel} onChange={onLabelChange} />
-      {error && <div className="px-8 py-3"><ErrorMessage error={error} /></div>}
-      <main className="min-h-0 flex-1 overflow-hidden bg-white">
-        {loading ? <EmptyState title="Loading" /> : <ClusterList clusters={clusters} onOpen={onOpenCluster} />}
+
+      {error && <div className="px-6 py-3"><ErrorMessage error={error} /></div>}
+
+      <main className="min-h-0 flex-1 overflow-hidden bg-[var(--bg)]">
+        {loading ? <EmptyState title="Loading…" /> : <ClusterList clusters={clusters} onOpen={onOpenCluster} />}
       </main>
     </div>
   );

@@ -10,31 +10,35 @@ export default function WorkflowContent({ workflow, session }) {
   const dispatch = useDispatch();
 
   return (
-    <div className="rv-enter flex h-full min-w-0 flex-col bg-[var(--docker-bg)] rv-font">
-      <header className="flex h-16 shrink-0 items-center justify-between gap-4 bg-[var(--docker-bg)] px-8">
-        <div className="flex min-w-0 items-center gap-4">
+    <div className="rv-enter flex h-full min-w-0 flex-col bg-[var(--bg)] rv-font">
+
+      {/* Header */}
+      <header className="flex h-12 shrink-0 items-center justify-between gap-4 border-b border-[var(--border-muted)] px-6">
+        <div className="flex min-w-0 items-center gap-3">
           <button
             type="button"
             onClick={() => dispatch(setSelectedWorkflow(null))}
-            className="inline-flex shrink-0 items-center gap-1 text-[13px] font-medium text-[var(--docker-blue)] hover:underline"
+            className="inline-flex shrink-0 items-center gap-1 text-[13px] text-[var(--text-muted)] hover:text-[var(--text)]"
           >
-            <IconChevronLeft size={15} />
+            <IconChevronLeft size={14} />
             Back
           </button>
-          <h1 className="truncate text-[18px] font-semibold text-[var(--docker-text)]">{workflow.name}</h1>
+          <span className="text-[var(--border-muted)]">/</span>
+          <span className="truncate text-[13px] font-medium text-[var(--text)]">{workflow.name}</span>
           {session && <StatusBadge status={session.status} />}
         </div>
         <div className="flex shrink-0 gap-2">
           {session?.status === 'running' && (
             <Button variant="danger" onClick={() => window.electronAPI.stopWorkflow(session.id)}>
-              Stop / Terminate
+              Stop
             </Button>
           )}
         </div>
       </header>
 
-      <main className="min-h-0 flex-1 overflow-auto p-8">
-        <div className={cn('mx-auto grid w-full max-w-[900px] gap-8', session ? 'h-full min-h-0' : 'min-h-full')}>
+      {/* Body */}
+      <main className="min-h-0 flex-1 overflow-auto p-6">
+        <div className={cn('mx-auto w-full max-w-[860px]', session ? 'flex h-full flex-col' : '')}>
           {session ? (
             <WorkflowTerminal session={session} />
           ) : (

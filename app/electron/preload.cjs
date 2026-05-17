@@ -13,6 +13,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listResultViewerAssignments: (payload) => ipcRenderer.invoke('result-viewer:list-assignments', payload),
   clearResultViewerResultFlags: (payload) => ipcRenderer.invoke('result-viewer:clear-flags-results', payload),
   clearResultViewerClusterFlags: (payload) => ipcRenderer.invoke('result-viewer:clear-flags-cluster', payload),
+  getPrototypeReviewDefaults: () => ipcRenderer.invoke('prototype-review:defaults'),
+  listPrototypeReviewRuns: (payload) => ipcRenderer.invoke('prototype-review:list-runs', payload),
+  listPrototypeReviewScores: (payload) => ipcRenderer.invoke('prototype-review:list-scores', payload),
+  listPrototypeReviewAssignments: (payload) => ipcRenderer.invoke('prototype-review:list-assignments', payload),
   onWorkflowEvent: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('workflow:event', listener);

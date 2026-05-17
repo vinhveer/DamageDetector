@@ -1,15 +1,21 @@
 import { cn } from './cn.js';
 
+const map = {
+  running: 'bg-[var(--primary-bg)] text-[var(--primary)] border-transparent',
+  done:    'bg-[var(--success-bg)] text-[var(--success)] border-transparent',
+  error:   'bg-[var(--danger-bg)]  text-[var(--danger)]  border-transparent',
+};
+
 export default function StatusBadge({ status }) {
   if (!status) return null;
-  const map = {
-    running: 'border-blue-200 bg-blue-50 text-blue-700',
-    done: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-    error: 'border-red-200 bg-red-50 text-red-700'
-  };
-  const className = map[status] || 'border-slate-200 bg-slate-50 text-slate-700';
   return (
-    <span data-ui="badge" className={cn('inline-flex h-5 items-center rounded border px-1.5 text-[11px] font-medium', className)}>
+    <span
+      data-ui="badge"
+      className={cn(
+        'inline-flex h-5 items-center rounded-[4px] border px-1.5 text-[11px] font-medium',
+        map[status] ?? 'border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)]'
+      )}
+    >
       {status}
     </span>
   );

@@ -41,16 +41,16 @@ export default function ResultImage({ row, imageSize }) {
 
   if (!row.image_uri) {
     return (
-      <div className="flex items-center justify-center rounded bg-slate-100 text-[12px] text-[var(--docker-muted)]" style={{ width: imageSize, height: imageSize }}>
+      <div className="flex items-center justify-center rounded-[4px] bg-[var(--surface-2)] text-[12px] text-[var(--text-muted)]" style={{ width: imageSize, height: imageSize }}>
         No image
       </div>
     );
   }
 
   return (
-    <div className="relative mx-auto overflow-hidden rounded bg-slate-100" style={{ width: cropDisplaySize.width, height: cropDisplaySize.height }}>
+    <div className="relative mx-auto overflow-hidden rounded-[4px] bg-[var(--surface-2)]" style={{ width: cropDisplaySize.width, height: cropDisplaySize.height }}>
         {status !== 'ready' && (
-          <div className="absolute inset-0 flex items-center justify-center text-[12px] text-[var(--docker-muted)]">
+          <div className="absolute inset-0 flex items-center justify-center text-[12px] text-[var(--text-muted)]">
             {status === 'no-box' ? 'No box' : status === 'error' ? 'Image error' : 'Loading'}
           </div>
         )}

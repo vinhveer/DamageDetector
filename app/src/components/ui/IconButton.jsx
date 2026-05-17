@@ -7,8 +7,8 @@ export default function IconButton({ label, className = '', ...props }) {
       aria-label={label}
       title={label}
       className={cn(
-        'inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-[var(--docker-muted)]',
-        'hover:border-[var(--docker-border)] hover:bg-white hover:text-[var(--docker-text)]',
+        'inline-flex h-7 w-7 items-center justify-center rounded-[5px]',
+        'text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text)]',
         className
       )}
       {...props}

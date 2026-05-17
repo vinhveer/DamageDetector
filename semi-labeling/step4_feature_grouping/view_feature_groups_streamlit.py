@@ -30,11 +30,11 @@ def repo_root() -> Path:
 
 
 def default_source_db() -> Path:
-    return repo_root().parent / "infer_results" / "semi-labeling" / "2_sematic" / "damage_scan.sqlite3"
+    return repo_root().parent / "infer_results" / "semi-labeling" / "step2_sematic" / "damage_scan.sqlite3"
 
 
 def default_output_db() -> Path:
-    return default_source_db().parent / "step4_feature_grouping" / "feature_groups.sqlite3"
+    return default_source_db().parent.parent / "step4_feature_grouping" / "feature_groups.sqlite3"
 
 
 def default_image_root() -> Path:

@@ -6,12 +6,12 @@ export default function WorkflowField({ workflowId, input, value, onChange }) {
 
   if (input.type === 'boolean') {
     return (
-      <label className="flex items-center gap-2 text-[13px] text-[var(--docker-text)]">
+      <label className="flex items-center gap-2 text-[13px] text-[var(--text)]">
         <input
           type="checkbox"
           checked={Boolean(value)}
           onChange={(event) => update(event.currentTarget.checked)}
-          className="h-4 w-4 rounded border-[var(--docker-border)] text-[var(--docker-blue)]"
+          className="h-4 w-4 rounded-[3px] border-[var(--border)] text-[var(--primary)]"
         />
         <span>{label}</span>
       </label>

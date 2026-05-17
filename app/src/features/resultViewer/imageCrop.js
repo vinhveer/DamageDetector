@@ -75,5 +75,35 @@ export const createCropDataUrl = (row, maxSize = 1800) => new Promise((resolve) 
     }
   };
   image.onerror = () => resolve('');
+  image.decoding = 'async';
+  image.src = row.image_uri;
+});
+
+export const createCropObjectUrl = (row, maxSize = 1800, mimeType = 'image/png', quality) => new Promise((resolve) => {
+  if (!row?.image_uri) {
+    resolve('');
+    return;
+  }
+
+  const image = new Image();
+  image.onload = () => {
+    const box = normalizeBox(row, image.naturalWidth, image.naturalHeight);
+    if (!box) {
+      resolve('');
+      return;
+    }
+    const { width, height } = getCropDisplaySize(box, Math.min(maxSize, Math.max(box.width, box.height)));
+    try {
+      const canvas = document.createElement('canvas');
+      drawCropToCanvas(canvas, image, box, width, height);
+      canvas.toBlob((blob) => {
+        resolve(blob ? URL.createObjectURL(blob) : canvas.toDataURL(mimeType, quality));
+      }, mimeType, quality);
+    } catch {
+      resolve('');
+    }
+  };
+  image.onerror = () => resolve('');
+  image.decoding = 'async';
   image.src = row.image_uri;
 });

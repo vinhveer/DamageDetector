@@ -53,7 +53,7 @@ export default function Drawer({ opened, title, onClose, children }) {
   return (
     <div
       className={cn(
-        'fixed inset-0 z-50 flex justify-end bg-black/20 transition-opacity duration-150 ease-out',
+        'fixed inset-0 z-50 flex justify-end bg-black/40 transition-opacity duration-150 ease-out',
         visible ? 'opacity-100' : 'opacity-0'
       )}
       onMouseDown={(event) => {
@@ -62,14 +62,14 @@ export default function Drawer({ opened, title, onClose, children }) {
     >
       <aside
         className={cn(
-          'flex h-full w-[380px] flex-col border-l border-[var(--docker-border)] bg-white shadow-[0_2px_8px_rgba(15,23,42,0.12)]',
+          'flex h-full w-[380px] flex-col border-l border-[var(--border)] bg-[var(--surface)] shadow-[0_2px_8px_rgba(0,0,0,0.4)]',
           'transition-transform duration-150 ease-out will-change-transform',
           visible ? 'translate-x-0' : 'translate-x-full'
         )}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="flex min-h-14 items-center justify-between border-b border-[var(--docker-border-soft)] px-5">
-          <h2 className="text-[14px] font-semibold text-[var(--docker-text)]">{title}</h2>
+        <div className="flex min-h-14 items-center justify-between border-b border-[var(--border-muted)] px-5">
+          <h2 className="text-[14px] font-semibold text-[var(--text)]">{title}</h2>
           <IconButton label="Close" onClick={() => onClose?.()} className="app-no-drag">
             <IconX size={16} />
           </IconButton>

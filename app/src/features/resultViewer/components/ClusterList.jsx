@@ -54,18 +54,18 @@ export default function ClusterList({ clusters, onOpen }) {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-white">
-      <div className="flex min-h-16 items-center justify-between border-b border-[var(--docker-border-soft)] px-6 py-3">
-        <div className="text-[13px] font-medium text-[var(--docker-muted)]">{formatNumber(rows.length)} clusters</div>
+    <div className="flex h-full min-h-0 flex-col bg-[var(--bg)]">
+      <div className="flex min-h-16 items-center justify-between border-b border-[var(--border-muted)] px-6 py-3">
+        <div className="text-[13px] font-medium text-[var(--text-muted)]">{formatNumber(rows.length)} clusters</div>
         <TextInput className="h-9 w-[320px]" placeholder="Filter clusters" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
       <table className="w-full min-w-[860px] border-collapse text-left text-[13px]">
-        <thead className="sticky top-0 z-10 border-b border-[var(--docker-border-soft)] bg-white text-[12px] font-semibold text-[var(--docker-muted)]">
+        <thead className="sticky top-0 z-10 border-b border-[var(--border-muted)] bg-[var(--surface)] text-[12px] font-semibold text-[var(--text-muted)]">
           <tr>
             {columns.map((column) => (
               <th key={column.key} className={column.className}>
-                <button type="button" onClick={() => toggleSort(column.key)} className="inline-flex items-center gap-1 hover:text-[var(--docker-text)]">
+                <button type="button" onClick={() => toggleSort(column.key)} className="inline-flex items-center gap-1 hover:text-[var(--text)]">
                   {column.label}
                   {sort.key === column.key && <span className="text-[10px]">{sort.direction === 'asc' ? '↑' : '↓'}</span>}
                 </button>
@@ -76,22 +76,22 @@ export default function ClusterList({ clusters, onOpen }) {
         </thead>
         <tbody>
           {rows.map((cluster) => (
-            <tr key={cluster.cluster_key} onClick={() => onOpen(cluster)} className="cursor-pointer border-b border-[var(--docker-border-soft)] hover:bg-[var(--docker-hover)]">
-              <td className="px-6 py-4 font-medium text-[var(--docker-text)]">{cluster.cluster_key}</td>
+            <tr key={cluster.cluster_key} onClick={() => onOpen(cluster)} className="cursor-pointer border-b border-[var(--border-muted)] hover:bg-[var(--hover)]">
+              <td className="px-6 py-4 font-medium text-[var(--text)]">{cluster.cluster_key}</td>
               <td className="px-4 py-4">
-                <span className={cn('rounded border px-1.5 py-0.5 text-[11px] font-medium', LABEL_BADGE_CLASSES[cluster.major_label] || 'border-slate-200 bg-slate-50 text-slate-700')}>
+                <span className={cn('rounded border px-1.5 py-0.5 text-[11px] font-medium', LABEL_BADGE_CLASSES[cluster.major_label] || 'border-[var(--border)] bg-[var(--surface-2)] text-[var(--text-muted)]')}>
                   {cluster.major_label || '-'}
                 </span>
               </td>
-              <td className="px-4 py-4 text-right text-[var(--docker-text)]">{formatNumber(cluster.cluster_size)}</td>
-              <td className="px-4 py-4 text-right text-[var(--docker-text)]">{formatFloat(cluster.purity)}</td>
+              <td className="px-4 py-4 text-right text-[var(--text)]">{formatNumber(cluster.cluster_size)}</td>
+              <td className="px-4 py-4 text-right text-[var(--text)]">{formatFloat(cluster.purity)}</td>
               <td className="px-4 py-4 text-right">
-                {Number(cluster.outlier_count || 0) > 0 ? <Badge tone="red">{cluster.outlier_count}</Badge> : <span className="text-[var(--docker-muted)]">0</span>}
+                {Number(cluster.outlier_count || 0) > 0 ? <Badge tone="red">{cluster.outlier_count}</Badge> : <span className="text-[var(--text-muted)]">0</span>}
               </td>
-              <td className="px-4 py-4 text-right text-[12px] text-[var(--docker-muted)]">
+              <td className="px-4 py-4 text-right text-[12px] text-[var(--text-muted)]">
                 C {cluster.crack_count || 0} · M {cluster.mold_count || 0} · S {cluster.spall_count || 0}
               </td>
-              <td className="px-4 py-4 text-[var(--docker-muted)]"><IconChevronRight size={15} /></td>
+              <td className="px-4 py-4 text-[var(--text-muted)]"><IconChevronRight size={15} /></td>
             </tr>
           ))}
         </tbody>

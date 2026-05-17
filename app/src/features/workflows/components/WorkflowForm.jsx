@@ -116,7 +116,7 @@ export default function WorkflowForm({ workflow, onStarted }) {
   return (
     <div className="grid gap-6">
       <section className="grid gap-4">
-        <div className="text-[13px] font-semibold text-[var(--docker-text)]">Parameters</div>
+        <div className="text-[12px] font-medium text-[var(--text-muted)]">Parameters</div>
         {(workflow.inputs || []).map((input) => (
           <WorkflowField
             key={input.name}

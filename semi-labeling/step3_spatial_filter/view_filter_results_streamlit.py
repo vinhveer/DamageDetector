@@ -66,27 +66,12 @@ def repo_root() -> Path:
 
 
 def default_source_db() -> Path:
-    return repo_root().parent / "infer_results" / "semi-labeling" / "2_sematic" / "damage_scan.sqlite3"
+    return repo_root().parent / "infer_results" / "semi-labeling" / "step2_sematic" / "damage_scan.sqlite3"
 
 
 def default_output_dir() -> Path:
-    source_parent = default_source_db().parent
-    preferred = source_parent / "step3_spatial_filter"
-    if (preferred / "filtered.sqlite3").is_file():
-        return preferred
-    roi_dryrun = source_parent / "step3_spatial_filter_roi5_roi6"
-    if (roi_dryrun / "filtered.sqlite3").is_file():
-        return roi_dryrun
-    other_dryrun = source_parent / "step3_spatial_filter_dryrun_other"
-    if (other_dryrun / "filtered.sqlite3").is_file():
-        return other_dryrun
-    strict_dryrun = source_parent / "step3_spatial_filter_dryrun_strict"
-    if (strict_dryrun / "filtered.sqlite3").is_file():
-        return strict_dryrun
-    dryrun = source_parent / "step3_spatial_filter_dryrun"
-    if (dryrun / "filtered.sqlite3").is_file():
-        return dryrun
-    return preferred
+    result_root = default_source_db().parent.parent
+    return result_root / "step3_spatial_filter"
 
 
 def default_image_root() -> Path:

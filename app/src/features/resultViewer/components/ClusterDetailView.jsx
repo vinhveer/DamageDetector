@@ -19,7 +19,7 @@ export default function ClusterDetailView({ cluster, assignments, imageSize, loa
   }, [cluster?.cluster_key]);
 
   return (
-    <div className="rv-enter flex h-full flex-col bg-[var(--docker-bg)] rv-font">
+    <div className="rv-enter flex h-full flex-col bg-[var(--bg)] rv-font">
       <PageHeader
         title={cluster.cluster_key}
         subtitle={`${formatNumber(assignments.length)} rows · ${formatNumber(groups.length)} images`}
@@ -30,13 +30,13 @@ export default function ClusterDetailView({ cluster, assignments, imageSize, loa
         }
         right={
           <>
-            <div className="flex h-8 overflow-hidden rounded-md border border-[var(--docker-border)] bg-white">
+            <div className="flex h-8 overflow-hidden rounded-[6px] border border-[var(--border)] bg-[var(--surface)]">
               {DETAIL_VIEWS.map((item) => (
                 <button
                   key={item}
                   type="button"
                   onClick={() => setView(item)}
-                  className={cn('px-3 text-[13px] font-medium capitalize', view === item ? 'bg-[var(--docker-active)] text-[var(--docker-blue)]' : 'text-[var(--docker-muted)] hover:bg-[var(--docker-hover)]')}
+                  className={cn('px-3 text-[13px] font-medium capitalize', view === item ? 'bg-[var(--active)] text-[var(--primary)]' : 'text-[var(--text-muted)] hover:bg-[var(--hover)]')}
                 >
                   {item}
                 </button>
@@ -47,7 +47,7 @@ export default function ClusterDetailView({ cluster, assignments, imageSize, loa
         }
       />
       {error && <div className="px-8 py-3"><ErrorMessage error={error} /></div>}
-      <main className="min-h-0 flex-1 overflow-hidden bg-white">
+      <main className="min-h-0 flex-1 overflow-hidden bg-[var(--bg)]">
         {loading && <EmptyState title="Loading" />}
         {!loading && view === 'grid' && <ImageGrid groups={groups} imageSize={imageSize} onOpenImage={setLightboxIndex} onClearFlags={onClearResultFlags} />}
         {!loading && view === 'table' && <AssignmentsTable rows={assignments} />}

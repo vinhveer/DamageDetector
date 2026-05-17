@@ -12,7 +12,7 @@ It does not mutate the source step 2 SQLite DB. It writes two SQLite outputs:
 ```bash
 cd /Users/nguyenquangvinh/Desktop/Lab/DamageDetector
 python semi-labeling/step3_spatial_filter/filter_duplicates.py \
-  --db /Users/nguyenquangvinh/Desktop/Lab/infer_results/semi-labeling/2_sematic/damage_scan.sqlite3 \
+  --db /Users/nguyenquangvinh/Desktop/Lab/infer_results/semi-labeling/step2_sematic/damage_scan.sqlite3 \
   --image-root /Users/nguyenquangvinh/Desktop/Lab/HinhAnh \
   --semantic-run-id latest
 ```
@@ -21,7 +21,7 @@ Debug on selected images:
 
 ```bash
 python semi-labeling/step3_spatial_filter/filter_duplicates.py \
-  --db /Users/nguyenquangvinh/Desktop/Lab/infer_results/semi-labeling/2_sematic/damage_scan.sqlite3 \
+  --db /Users/nguyenquangvinh/Desktop/Lab/infer_results/semi-labeling/step2_sematic/damage_scan.sqlite3 \
   --image-root /Users/nguyenquangvinh/Desktop/Lab/HinhAnh \
   --image-rel-path "DSC01275__roi5.png,DSC01275__roi6.png"
 ```

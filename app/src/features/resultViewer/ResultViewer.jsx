@@ -17,7 +17,7 @@ export default function ResultViewer() {
   } = useResultViewer();
 
   return (
-    <div className="h-full min-w-0 bg-[var(--docker-bg)] text-[var(--docker-text)] rv-font">
+    <div className="h-full min-w-0 bg-[var(--bg)] text-[var(--text)] rv-font">
       {screen === 'connect' && (
         <ConnectView
           paths={paths}

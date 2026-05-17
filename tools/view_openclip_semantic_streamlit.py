@@ -68,7 +68,7 @@ def repo_root() -> Path:
 
 
 def default_db_path() -> Path:
-    return repo_root().parent / "infer_results" / "semi-labeling" / "2_sematic" / "damage_scan.sqlite3"
+    return repo_root().parent / "infer_results" / "semi-labeling" / "step2_sematic" / "damage_scan.sqlite3"
 
 
 def default_image_root() -> Path:

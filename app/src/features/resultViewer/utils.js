@@ -10,9 +10,9 @@ export const VIEW_MODES = [
 export const DETAIL_VIEWS = ['grid', 'table'];
 
 export const LABEL_BADGE_CLASSES = {
-  crack: 'border-orange-200 bg-orange-50 text-orange-700',
-  mold: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  spall: 'border-violet-200 bg-violet-50 text-violet-700'
+  crack: 'border-[var(--warning)] bg-[var(--warning-bg)] text-[var(--warning)]',
+  mold: 'border-[var(--success)] bg-[var(--success-bg)] text-[var(--success)]',
+  spall: 'border-[var(--primary)] bg-[var(--primary-bg)] text-[var(--primary)]'
 };
 
 export const initialPaths = { featureDbPath: '', sourceDbPath: '', imageRootPath: '' };

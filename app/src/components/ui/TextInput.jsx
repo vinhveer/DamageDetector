@@ -4,8 +4,10 @@ export default function TextInput({ className = '', ...props }) {
   return (
     <input
       className={cn(
-        'h-[34px] min-w-0 rounded-md border border-[var(--docker-border)] bg-white px-2.5 text-[13px] text-[var(--docker-text)] outline-none',
-        'placeholder:text-slate-400 focus:border-[var(--docker-blue)] focus:ring-2 focus:ring-blue-100',
+        'h-8 min-w-0 rounded-[6px] border border-[var(--border)] bg-[var(--surface-2)] px-2.5',
+        'text-[13px] text-[var(--text)] outline-none',
+        'placeholder:text-[var(--text-subtle)]',
+        'focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--primary-bg)]',
         className
       )}
       {...props}

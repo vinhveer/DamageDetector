@@ -22,7 +22,7 @@ export default function SettingsDrawer({
     <Drawer opened={opened} title="Settings" onClose={onClose}>
       <div className="grid gap-5">
         <section className="grid gap-3">
-          <div className="text-[13px] font-semibold text-[var(--docker-text)]">Connection</div>
+          <div className="text-[13px] font-semibold text-[var(--text)]">Connection</div>
           <PathField label="Feature DB" value={paths.featureDbPath} onChange={(value) => onPathChange('featureDbPath', value)} />
           <PathField label="Source DB" value={paths.sourceDbPath} onChange={(value) => onPathChange('sourceDbPath', value)} />
           <PathField label="Image root" browseMode="directory" value={paths.imageRootPath} onChange={(value) => onPathChange('imageRootPath', value)} />
@@ -31,8 +31,8 @@ export default function SettingsDrawer({
           </Button>
         </section>
 
-        <section className="grid gap-3 border-t border-[var(--docker-border-soft)] pt-4">
-          <div className="text-[13px] font-semibold text-[var(--docker-text)]">Results</div>
+        <section className="grid gap-3 border-t border-[var(--border-muted)] pt-4">
+          <div className="text-[13px] font-semibold text-[var(--text)]">Results</div>
           <Field label="Run">
             <SelectControl value={runId} onChange={(event) => onRunChange(event.currentTarget.value)} disabled={runs.length === 0}>
               <option value="">No run selected</option>
@@ -52,10 +52,10 @@ export default function SettingsDrawer({
           </Field>
         </section>
 
-        <section className="grid gap-4 border-t border-[var(--docker-border-soft)] pt-4">
-          <div className="text-[13px] font-semibold text-[var(--docker-text)]">Display</div>
-          <label className="grid gap-2 text-[12px] font-medium text-[var(--docker-text)]">
-            <span>Image size <span className="font-normal text-[var(--docker-muted)]">{imageSize}px</span></span>
+        <section className="grid gap-4 border-t border-[var(--border-muted)] pt-4">
+          <div className="text-[13px] font-semibold text-[var(--text)]">Display</div>
+          <label className="grid gap-2 text-[12px] font-medium text-[var(--text)]">
+            <span>Image size <span className="font-normal text-[var(--text-muted)]">{imageSize}px</span></span>
             <input type="range" min="120" max="720" step="20" value={imageSize} onChange={(event) => onImageSizeChange(Number(event.currentTarget.value))} />
           </label>
         </section>

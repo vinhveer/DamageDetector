@@ -10,14 +10,14 @@ python /Users/nguyenquangvinh/Desktop/Lab/DamageDetector/semi-labeling/result_vi
 
 ## Inputs
 
-- `Feature DB`: `feature_groups.sqlite3` from `step4_feature_grouping`.
-- `Source DB`: `damage_scan.sqlite3` from step2, used for crop coordinates and original image metadata.
+- `Feature DB`: `/Users/nguyenquangvinh/Desktop/Lab/infer_results/semi-labeling/step4_feature_grouping/feature_groups.sqlite3`.
+- `Source DB`: `/Users/nguyenquangvinh/Desktop/Lab/infer_results/semi-labeling/step2_sematic/damage_scan.sqlite3`.
 - `Image root`: usually `/Users/nguyenquangvinh/Desktop/Lab/HinhAnh`.
 
-The app defaults to the latest full DINOv2 giant output if it exists:
+The app defaults to the canonical feature grouping output:
 
 ```text
-/Users/nguyenquangvinh/Desktop/Lab/infer_results/semi-labeling/2_sematic/step4_feature_grouping_giant_agglo045_full_restart/feature_groups.sqlite3
+/Users/nguyenquangvinh/Desktop/Lab/infer_results/semi-labeling/step4_feature_grouping/feature_groups.sqlite3
 ```
 
 ## UI Flow

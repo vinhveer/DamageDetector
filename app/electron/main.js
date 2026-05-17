@@ -11,6 +11,12 @@ import {
   listRuns,
   resultViewerDefaults
 } from './result_viewer/index.js';
+import {
+  listPrototypeReviewAssignments,
+  listPrototypeReviewRuns,
+  listPrototypeReviewScores,
+  prototypeReviewDefaults
+} from './prototype_review/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -87,6 +93,11 @@ ipcMain.handle('result-viewer:list-clusters', (_event, payload) => listClusters(
 ipcMain.handle('result-viewer:list-assignments', (_event, payload) => listAssignments(payload));
 ipcMain.handle('result-viewer:clear-flags-results', (_event, payload) => clearFlagsForResults(payload));
 ipcMain.handle('result-viewer:clear-flags-cluster', (_event, payload) => clearFlagsForCluster(payload));
+
+ipcMain.handle('prototype-review:defaults', prototypeReviewDefaults);
+ipcMain.handle('prototype-review:list-runs', (_event, payload) => listPrototypeReviewRuns(payload));
+ipcMain.handle('prototype-review:list-scores', (_event, payload) => listPrototypeReviewScores(payload));
+ipcMain.handle('prototype-review:list-assignments', (_event, payload) => listPrototypeReviewAssignments(payload));
 
 
 ipcMain.handle('dialog:browse-path', async (_event, mode) => {

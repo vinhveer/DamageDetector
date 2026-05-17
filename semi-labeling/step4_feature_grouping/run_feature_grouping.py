@@ -25,7 +25,7 @@ def repo_root() -> Path:
 
 
 def default_source_db() -> Path:
-    return repo_root().parent / "infer_results" / "semi-labeling" / "2_sematic" / "damage_scan.sqlite3"
+    return repo_root().parent / "infer_results" / "semi-labeling" / "step2_sematic" / "damage_scan.sqlite3"
 
 
 def parse_labels(raw: str) -> tuple[str, ...]:
@@ -73,10 +73,10 @@ def embed_boxes(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Group kept step3 boxes by DINOv2 features and DBSCAN-style clustering.")
-    parser.add_argument("--source-db", default="", help="Source step2 damage_scan.sqlite3. Default: infer_results/semi-labeling/2_sematic/damage_scan.sqlite3, or inferred from filtered DB.")
-    parser.add_argument("--filtered-db", default="", help="Step3 filtered.sqlite3. Default: source DB folder / step3_spatial_filter / filtered.sqlite3.")
+    parser.add_argument("--source-db", default="", help="Source step2 damage_scan.sqlite3. Default: infer_results/semi-labeling/step2_sematic/damage_scan.sqlite3, or inferred from filtered DB.")
+    parser.add_argument("--filtered-db", default="", help="Step3 filtered.sqlite3. Default: infer_results/semi-labeling/step3_spatial_filter/filtered.sqlite3.")
     parser.add_argument("--image-root", default="", help="Image root override, usually /path/to/HinhAnh.")
-    parser.add_argument("--output-dir", default="", help="Output dir. Default: source DB folder / step4_feature_grouping.")
+    parser.add_argument("--output-dir", default="", help="Output dir. Default: infer_results/semi-labeling/step4_feature_grouping.")
     parser.add_argument("--output-db", default="", help="Output SQLite path. Overrides --output-dir.")
     parser.add_argument("--filter-run-id", default="latest", help="Step3 filter run id, or latest.")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME, help="DINOv2 HF model id or local model folder.")
@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
 
     source_db_arg = str(args.source_db or "").strip()
     initial_source_db = Path(source_db_arg).expanduser().resolve() if source_db_arg else default_source_db()
-    filtered_db = Path(str(args.filtered_db)).expanduser().resolve() if str(args.filtered_db or "").strip() else initial_source_db.parent / "step3_spatial_filter" / "filtered.sqlite3"
+    filtered_db = Path(str(args.filtered_db)).expanduser().resolve() if str(args.filtered_db or "").strip() else initial_source_db.parent.parent / "step3_spatial_filter" / "filtered.sqlite3"
     if not filtered_db.is_file():
         raise FileNotFoundError(f"Step3 filtered DB not found: {filtered_db}")
     filter_run_id = resolve_filter_run_id(filtered_db, str(args.filter_run_id))
@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"Source DB not found: {source_db}")
 
     image_root = Path(args.image_root).expanduser().resolve() if str(args.image_root or "").strip() else None
-    output_dir = Path(args.output_dir).expanduser().resolve() if str(args.output_dir or "").strip() else source_db.parent / "step4_feature_grouping"
+    output_dir = Path(args.output_dir).expanduser().resolve() if str(args.output_dir or "").strip() else source_db.parent.parent / "step4_feature_grouping"
     output_db = Path(args.output_db).expanduser().resolve() if str(args.output_db or "").strip() else output_dir / "feature_groups.sqlite3"
     grouping_run_id = uuid.uuid4().hex
 
