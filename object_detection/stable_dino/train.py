@@ -152,6 +152,13 @@ def main(argv: list[str] | None = None) -> int:
     _ensure_python312_pkg_resources_compat()
     parser = build_parser()
     args = parser.parse_args(argv)
+    finetune_checkpoint_arg = str(args.finetune_checkpoint or "").strip()
+    finetune_checkpoint = Path(finetune_checkpoint_arg).expanduser() if finetune_checkpoint_arg else None
+    if finetune_checkpoint is not None and not finetune_checkpoint.exists():
+        raise FileNotFoundError(
+            f"Fine-tune checkpoint not found: {finetune_checkpoint}. "
+            "Download or copy the checkpoint before launching distributed training."
+        )
     resolved_device = select_device_str(args.device)
     launch_num_gpus = _resolve_launch_num_gpus(resolved_device, int(args.num_gpus))
     args.num_gpus = int(launch_num_gpus)
