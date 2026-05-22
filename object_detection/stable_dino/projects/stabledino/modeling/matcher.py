@@ -117,12 +117,13 @@ class StableDINOHungarianMatcher(nn.Module):
             out_prob = (
                 outputs["pred_logits"].flatten(0, 1).sigmoid()
             )  # [batch_size * num_queries, num_classes]
+        out_prob = out_prob.float()
 
-        out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
+        out_bbox = outputs["pred_boxes"].flatten(0, 1).float()  # [batch_size * num_queries, 4]
 
         # Also concat the target labels and boxes
         tgt_ids = torch.cat([v["labels"] for v in targets])
-        tgt_bbox = torch.cat([v["boxes"] for v in targets])
+        tgt_bbox = torch.cat([v["boxes"] for v in targets]).float()
         if repeat_times > 1:
             tgt_ids = tgt_ids.repeat(repeat_times)
             tgt_bbox = tgt_bbox.repeat(repeat_times, 1)
