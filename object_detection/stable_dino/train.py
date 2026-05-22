@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--require-finetune-load", action="store_true", help="Fail if --finetune-checkpoint loads too few tensors.")
     parser.add_argument("--min-finetune-tensors", type=int, default=100, help="Minimum loaded tensors when --require-finetune-load is set.")
     parser.add_argument("--imgsz", type=int, default=512)
+    parser.add_argument("--eval-imgsz", type=int, default=None, help="Short-edge size for validation resize. Defaults to --imgsz so train/val share scale.")
+    parser.add_argument("--eval-max-size", type=int, default=None, help="Max long-edge for validation resize. Defaults to 2 * eval-imgsz.")
+    parser.add_argument("--dn-number", type=int, default=None, help="Override model.dn_number (denoising queries). Lower for single-class / small datasets.")
+    parser.add_argument("--dn-label-noise-ratio", type=float, default=None, help="Override model.label_noise_ratio for the DN branch.")
+    parser.add_argument("--dn-box-noise-scale", type=float, default=None, help="Override model.box_noise_scale for the DN branch.")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=None, help="Use pinned host memory for the train dataloader.")
@@ -139,6 +144,8 @@ def _worker_main(args: argparse.Namespace) -> None:
         output_dir=str(Path(args.output_dir).expanduser().resolve()),
         init_checkpoint=str(args.init_checkpoint or "").strip() or None,
         eval_split=str(args.eval_split),
+        eval_image_size=int(args.eval_imgsz) if args.eval_imgsz is not None else int(args.imgsz),
+        eval_max_size=int(args.eval_max_size) if args.eval_max_size is not None else None,
     )
     if bool(args.scale_lr_schedule) and args.max_iter is None:
         raise ValueError("--scale-lr-schedule requires --max-iter")
@@ -166,6 +173,12 @@ def _worker_main(args: argparse.Namespace) -> None:
     overrides.append(f"train.best_checkpointer.enabled={not bool(args.no_best_checkpoint)}")
     overrides.append(f"train.best_checkpointer.metric={args.best_checkpoint_metric!r}")
     overrides.append(f"train.best_checkpointer.mode={args.best_checkpoint_mode!r}")
+    if args.dn_number is not None:
+        overrides.append(f"model.dn_number={int(args.dn_number)}")
+    if args.dn_label_noise_ratio is not None:
+        overrides.append(f"model.label_noise_ratio={float(args.dn_label_noise_ratio)}")
+    if args.dn_box_noise_scale is not None:
+        overrides.append(f"model.box_noise_scale={float(args.dn_box_noise_scale)}")
     if args.opts:
         overrides.extend(list(args.opts))
     train_args = argparse.Namespace(

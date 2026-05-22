@@ -330,6 +330,8 @@ def build_stable_dino_overrides(
     output_dir: str,
     init_checkpoint: str | None,
     eval_split: str = "val",
+    eval_image_size: int | None = None,
+    eval_max_size: int | None = None,
 ) -> list[str]:
     dataset_info = prepare_stable_dino_dataset(
         dataset,
@@ -339,6 +341,11 @@ def build_stable_dino_overrides(
     aug = _build_augmentation(augmentation_profile, image_size)
     eval_key = f"{str(eval_split or 'val').strip().lower()}_name"
     eval_name = dataset_info.get(eval_key) or dataset_info.get("val_name") or dataset_info.get("train_name")
+
+    eval_short = int(eval_image_size) if eval_image_size and int(eval_image_size) > 0 else int(image_size)
+    eval_long = int(eval_max_size) if eval_max_size and int(eval_max_size) > 0 else eval_short * 2
+    if eval_long < eval_short:
+        eval_long = eval_short
 
     def string_override(key: str, value: str) -> str:
         return f"{key}={json.dumps(str(value))}"
@@ -358,6 +365,8 @@ def build_stable_dino_overrides(
         f"dataloader.train.mapper.augmentation.min_scale={float(aug['min_scale'])}",
         f"dataloader.train.mapper.augmentation.max_scale={float(aug['max_scale'])}",
         string_override("dataloader.train.mapper.augmentation.random_flip", str(aug["random_flip"])),
+        f"dataloader.test.mapper.augmentation.0.short_edge_length={eval_short}",
+        f"dataloader.test.mapper.augmentation.0.max_size={eval_long}",
     ]
     if pin_memory is not None:
         overrides.append(f"dataloader.train.pin_memory={bool(pin_memory)}")
