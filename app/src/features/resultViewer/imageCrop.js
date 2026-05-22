@@ -1,3 +1,5 @@
+import { getBitmap } from '../../utils/imageCache.js';
+
 export const normalizeBox = (row, naturalWidth, naturalHeight) => {
   let x1 = Number(row.x1);
   let y1 = Number(row.y1);
@@ -52,58 +54,46 @@ export const getCropDisplaySize = (box, maxSize) => {
     : { width: Math.max(1, Math.round(maxSize * aspectRatio)), height: maxSize };
 };
 
-export const createCropDataUrl = (row, maxSize = 1800) => new Promise((resolve) => {
+export const createCropDataUrl = async (row, maxSize = 1800) => {
   if (!row?.image_uri) {
-    resolve('');
-    return;
+    return '';
   }
 
-  const image = new Image();
-  image.onload = () => {
-    const box = normalizeBox(row, image.naturalWidth, image.naturalHeight);
+  try {
+    const image = await getBitmap(row.image_uri);
+    const box = normalizeBox(row, image.naturalWidth || image.width, image.naturalHeight || image.height);
     if (!box) {
-      resolve('');
-      return;
+      return '';
     }
     const { width, height } = getCropDisplaySize(box, Math.min(maxSize, Math.max(box.width, box.height)));
-    try {
-      const canvas = document.createElement('canvas');
-      drawCropToCanvas(canvas, image, box, width, height);
-      resolve(canvas.toDataURL('image/png'));
-    } catch {
-      resolve('');
-    }
-  };
-  image.onerror = () => resolve('');
-  image.decoding = 'async';
-  image.src = row.image_uri;
-});
+    const canvas = document.createElement('canvas');
+    drawCropToCanvas(canvas, image, box, width, height);
+    return canvas.toDataURL('image/png');
+  } catch {
+    return '';
+  }
+};
 
-export const createCropObjectUrl = (row, maxSize = 1800, mimeType = 'image/png', quality) => new Promise((resolve) => {
+export const createCropObjectUrl = async (row, maxSize = 1800, mimeType = 'image/png', quality) => {
   if (!row?.image_uri) {
-    resolve('');
-    return;
+    return '';
   }
 
-  const image = new Image();
-  image.onload = () => {
-    const box = normalizeBox(row, image.naturalWidth, image.naturalHeight);
+  try {
+    const image = await getBitmap(row.image_uri);
+    const box = normalizeBox(row, image.naturalWidth || image.width, image.naturalHeight || image.height);
     if (!box) {
-      resolve('');
-      return;
+      return '';
     }
     const { width, height } = getCropDisplaySize(box, Math.min(maxSize, Math.max(box.width, box.height)));
-    try {
-      const canvas = document.createElement('canvas');
-      drawCropToCanvas(canvas, image, box, width, height);
+    const canvas = document.createElement('canvas');
+    drawCropToCanvas(canvas, image, box, width, height);
+    return await new Promise((resolve) => {
       canvas.toBlob((blob) => {
         resolve(blob ? URL.createObjectURL(blob) : canvas.toDataURL(mimeType, quality));
       }, mimeType, quality);
-    } catch {
-      resolve('');
-    }
-  };
-  image.onerror = () => resolve('');
-  image.decoding = 'async';
-  image.src = row.image_uri;
-});
+    });
+  } catch {
+    return '';
+  }
+};

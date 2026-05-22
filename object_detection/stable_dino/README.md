@@ -70,6 +70,35 @@ python -m object_detection.stable_dino.train --dataset /path/to/dataset.yaml --o
 
 Use `model_best.pth` for comparison. `model_final.pth` can be worse if validation AP peaks before the last iteration.
 
+## A100 / Short Schedule Run
+
+When reducing a 30k config to a shorter run, also scale the LR schedule so the
+decay milestones stay inside the run. On CUDA, enable AMP to reduce memory and
+speed up the transformer forward pass.
+
+```bash
+python -m object_detection.stable_dino.train \
+  --dataset /content/crack500_object_regions/crack500_det.yaml \
+  --config-file /content/DamageDetector/object_detection/stable_dino/projects/stabledino/configs/damage_detector_stabledino_r50_4scale_30k.py \
+  --finetune-checkpoint /content/dino_r50_4scale_12ep.pth \
+  --imgsz 512 \
+  --batch-size 32 \
+  --workers 8 \
+  --pin-memory \
+  --persistent-workers \
+  --prefetch-factor 2 \
+  --device auto \
+  --num-gpus 1 \
+  --max-iter 15000 \
+  --scale-lr-schedule \
+  --amp \
+  --eval-period 3000 \
+  --checkpoint-period 3000 \
+  --augmentation-profile balanced \
+  --test-with-nms 0 \
+  --output-dir /content/DamageDetectorRuns/stable_dino/crack500_a100_b32_15k
+```
+
 ## Notes
 
 - Keep `--imgsz 512` for 512px source images unless you intentionally upsample.

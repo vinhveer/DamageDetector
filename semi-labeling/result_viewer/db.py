@@ -164,6 +164,65 @@ class FeatureGroupStore:
             conn.close()
         return int(changed)
 
+    def list_all_assignments_for_label(self, run_id: str, label_scope: str) -> dict[str, list[AssignmentRow]]:
+        """Load all assignments for a label scope, grouped by cluster_key, sorted by distance_to_center ASC."""
+        conn = connect_ro(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT a.result_id, a.image_rel_path, a.predicted_label, a.predicted_probability_pct,
+                       a.detector_score, a.cluster_key, a.is_outlier, a.distance_to_center,
+                       a.suggested_label, a.label_suspect, a.cluster_purity, a.cluster_size
+                FROM feature_group_assignments a
+                JOIN feature_group_clusters c
+                  ON c.grouping_run_id = a.grouping_run_id AND c.cluster_key = a.cluster_key
+                WHERE a.grouping_run_id = ? AND c.predicted_label_scope = ?
+                ORDER BY a.cluster_key, a.distance_to_center ASC, a.result_id
+                """,
+                (run_id, label_scope),
+            ).fetchall()
+        finally:
+            conn.close()
+        grouped: dict[str, list[AssignmentRow]] = {}
+        for row in rows:
+            d = dict(row)
+            grouped.setdefault(d["cluster_key"], []).append(AssignmentRow(**d))
+        return grouped
+
+    def set_outlier_for_results(self, run_id: str, result_ids: list[int]) -> int:
+        """Mark result_ids as is_outlier=1. Returns count of rows changed."""
+        if not result_ids:
+            return 0
+        conn = connect_rw(self.db_path)
+        try:
+            total = 0
+            for start in range(0, len(result_ids), 900):
+                chunk = result_ids[start : start + 900]
+                placeholders = ",".join("?" for _ in chunk)
+                total += conn.execute(
+                    f"UPDATE feature_group_assignments SET is_outlier = 1 "
+                    f"WHERE grouping_run_id = ? AND result_id IN ({placeholders}) AND is_outlier = 0",
+                    [run_id, *chunk],
+                ).rowcount
+            conn.execute(
+                """
+                UPDATE feature_group_clusters
+                SET outlier_count = (
+                    SELECT COUNT(*) FROM feature_group_assignments a
+                    WHERE a.grouping_run_id = feature_group_clusters.grouping_run_id
+                      AND a.cluster_key = feature_group_clusters.cluster_key
+                      AND a.is_outlier = 1
+                )
+                WHERE grouping_run_id = ?
+                """,
+                (run_id,),
+            )
+            self._refresh_run_flag_counts(conn, run_id)
+            conn.commit()
+        finally:
+            conn.close()
+        return total
+
     def _refresh_run_flag_counts(self, conn: sqlite3.Connection, run_id: str) -> None:
         totals = conn.execute(
             """

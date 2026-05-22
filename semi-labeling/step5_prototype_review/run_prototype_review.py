@@ -204,18 +204,56 @@ def load_cluster_summaries(feature_db: Path, grouping_run_id: str) -> dict[str, 
     return {str(row["cluster_key"]): dict(row) for row in rows}
 
 
-def parse_prototypes(raw_json: str) -> dict[str, list[str]]:
+def _empty_proto_entry() -> dict[str, list]:
+    """Return a fresh empty prototype entry with clusters and images lists."""
+    return {"clusters": [], "images": []}
+
+
+def parse_prototypes(raw_json: str) -> dict[str, dict[str, list]]:
+    """Parse prototype JSON supporting both legacy and v2 formats.
+
+    Legacy format: {"crack": ["c#0001"], "spall": [...], "mold": [...]}
+    V2 format:     {"crack": {"clusters": [...], "images": [...]}, ..., "excluded": {...}}
+
+    Returns normalized struct: dict[str, dict[str, list]] with keys `clusters`
+    and `images` per label, plus an `excluded` key.
+    """
+    VALID_KEYS = set(LABELS) | {"excluded"}
+
     if not str(raw_json or "").strip():
-        return {label: list(keys) for label, keys in DEFAULT_PROTOTYPES.items()}
+        out: dict[str, dict[str, list]] = {
+            label: {"clusters": list(keys), "images": []}
+            for label, keys in DEFAULT_PROTOTYPES.items()
+        }
+        out["excluded"] = _empty_proto_entry()
+        return out
+
     payload = json.loads(raw_json)
-    out: dict[str, list[str]] = {}
-    for label, keys in payload.items():
+    out = {}
+    for label, value in payload.items():
         normalized = str(label).strip().lower()
-        if normalized not in LABELS:
+        if normalized not in VALID_KEYS:
             raise ValueError(f"Unsupported prototype label: {label}")
-        out[normalized] = [str(item).strip() for item in keys if str(item).strip()]
+        if isinstance(value, dict):
+            # v2 format: value has clusters/images keys
+            clusters_raw = value.get("clusters", [])
+            images_raw = value.get("images", [])
+            out[normalized] = {
+                "clusters": [str(item).strip() for item in clusters_raw if str(item).strip()],
+                "images": [int(item) for item in images_raw],
+            }
+        else:
+            # legacy format: value is a list of cluster keys
+            out[normalized] = {
+                "clusters": [str(item).strip() for item in value if str(item).strip()],
+                "images": [],
+            }
+
+    # Ensure all required labels exist with defaults
     for label in LABELS:
-        out.setdefault(label, [])
+        out.setdefault(label, _empty_proto_entry())
+    # Ensure excluded key exists
+    out.setdefault("excluded", _empty_proto_entry())
     return out
 
 
@@ -322,7 +360,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             thresholds_json TEXT NOT NULL,
             total_clusters INTEGER NOT NULL,
             auto_accept_clusters INTEGER NOT NULL,
-            need_review_clusters INTEGER NOT NULL
+            need_review_clusters INTEGER NOT NULL,
+            parent_review_run_id TEXT,
+            display_name TEXT,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            excluded_image_ids_json TEXT
         );
         CREATE TABLE IF NOT EXISTS prototype_groups (
             review_run_id TEXT NOT NULL,
@@ -368,6 +411,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             cluster_key TEXT NOT NULL,
             vote_label TEXT NOT NULL,
             vote_score REAL NOT NULL,
+            is_excluded INTEGER DEFAULT 0,
             PRIMARY KEY (review_run_id, result_id)
         );
         CREATE INDEX IF NOT EXISTS idx_prototype_scores_bucket ON prototype_cluster_scores (review_run_id, review_bucket, top_score DESC);
@@ -375,6 +419,69 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+    _migrate_versioning(conn)
+
+
+def _migrate_votes_is_excluded(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: add is_excluded column to prototype_assignment_votes if missing."""
+    vote_cols = {row[1] for row in conn.execute("PRAGMA table_info(prototype_assignment_votes)").fetchall()}
+    if "is_excluded" not in vote_cols:
+        conn.execute("ALTER TABLE prototype_assignment_votes ADD COLUMN is_excluded INTEGER DEFAULT 0")
+        conn.commit()
+
+
+def _migrate_versioning(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: add versioning columns to prototype_review_runs if missing."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(prototype_review_runs)").fetchall()}
+    needed = {"parent_review_run_id", "display_name", "is_active", "is_archived", "excluded_image_ids_json"}
+    if needed.issubset(cols):
+        # All prototype_review_runs columns exist — migrate votes table then ensure indexes
+        _migrate_votes_is_excluded(conn)
+        conn.executescript("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_prototype_run_active
+              ON prototype_review_runs (grouping_run_id) WHERE is_active = 1 AND is_archived = 0;
+            CREATE INDEX IF NOT EXISTS idx_prototype_run_parent
+              ON prototype_review_runs (parent_review_run_id);
+        """)
+        conn.commit()
+        return
+    # Add missing columns
+    for col, ddl in [
+        ("parent_review_run_id", "TEXT"),
+        ("display_name", "TEXT"),
+        ("is_active", "INTEGER NOT NULL DEFAULT 0"),
+        ("is_archived", "INTEGER NOT NULL DEFAULT 0"),
+        ("excluded_image_ids_json", "TEXT"),
+    ]:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE prototype_review_runs ADD COLUMN {col} {ddl}")
+    conn.commit()
+    # Backfill: assign display_name and is_active for existing rows
+    rows = conn.execute(
+        "SELECT review_run_id, grouping_run_id, created_at_utc FROM prototype_review_runs ORDER BY grouping_run_id, created_at_utc"
+    ).fetchall()
+    groups: dict[str, list[str]] = {}
+    for rid, gid, _ in rows:
+        groups.setdefault(gid, []).append(rid)
+    for gid, rids in groups.items():
+        for idx, rid in enumerate(rids, 1):
+            conn.execute("UPDATE prototype_review_runs SET display_name = ? WHERE review_run_id = ?", (f"v{idx}", rid))
+        # Latest = active
+        conn.execute("UPDATE prototype_review_runs SET is_active = 1 WHERE review_run_id = ?", (rids[-1],))
+    conn.commit()
+    _migrate_votes_is_excluded(conn)
+    conn.executescript("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_prototype_run_active
+          ON prototype_review_runs (grouping_run_id) WHERE is_active = 1 AND is_archived = 0;
+        CREATE INDEX IF NOT EXISTS idx_prototype_run_parent
+          ON prototype_review_runs (parent_review_run_id);
+    """)
+    conn.commit()
+    # Checkpoint WAL so Node.js read-only connections don't hit stale SHM
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
 
 
 def load_cached_embeddings(conn: sqlite3.Connection, *, model_name: str, result_ids: list[int]) -> dict[int, np.ndarray]:
@@ -473,9 +580,12 @@ def build_prototype_centroids(
     grouped: dict[str, list[Assignment]],
     embeddings: dict[int, np.ndarray],
     prototypes: dict[str, list[str]],
-) -> tuple[dict[str, list[tuple[str, np.ndarray]]], set[str]]:
+    image_picks: dict[str, list[int]] | None = None,
+) -> tuple[dict[str, list[tuple[str, np.ndarray]]], set[str], set[int]]:
     centroids: dict[str, list[tuple[str, np.ndarray]]] = {label: [] for label in LABELS}
     prototype_keys: set[str] = set()
+    prototype_image_ids: set[int] = set()
+    # Cluster-based centroids
     for label, keys in prototypes.items():
         for key in keys:
             rows = grouped.get(key, [])
@@ -484,10 +594,19 @@ def build_prototype_centroids(
             vectors = [embeddings[int(row.result_id)] for row in rows]
             centroids[label].append((key, normalized_mean(vectors)))
             prototype_keys.add(key)
+    # Image-based centroids (single-image picks)
+    if image_picks:
+        for label, rids in image_picks.items():
+            for rid in rids:
+                if rid not in embeddings:
+                    raise RuntimeError(f"Embedding missing for image {rid}")
+                centroids[label].append((f"img#{rid}", embeddings[rid]))
+                prototype_image_ids.add(rid)
+    # Validation: each label must have at least one centroid (cluster or image)
     for label in LABELS:
         if not centroids[label]:
             raise RuntimeError(f"No prototype centroids for label={label}")
-    return centroids, prototype_keys
+    return centroids, prototype_keys, prototype_image_ids
 
 
 def label_scores(vector: np.ndarray, prototype_centroids: dict[str, list[tuple[str, np.ndarray]]]) -> dict[str, float]:
@@ -504,6 +623,8 @@ def sorted_scores(scores: dict[str, float]) -> list[tuple[str, float]]:
 
 def bucket_score(
     *,
+    cluster_key: str,
+    excluded_keys: set[str],
     recommended_label: str,
     original_label: str,
     top_score: float,
@@ -515,6 +636,8 @@ def bucket_score(
     gap_threshold: float,
     vote_threshold: float,
 ) -> tuple[str, str]:
+    if cluster_key in excluded_keys:
+        return "excluded", "manually excluded"
     if is_prototype:
         return "prototype", "selected prototype group"
     if top_score < unknown_threshold:
@@ -537,13 +660,15 @@ def score_clusters(
     embeddings: dict[int, np.ndarray],
     prototype_centroids: dict[str, list[tuple[str, np.ndarray]]],
     prototype_keys: set[str],
+    excluded_keys: set[str] = frozenset(),
+    excluded_ids: set[int] = frozenset(),
     unknown_threshold: float,
     auto_threshold: float,
     gap_threshold: float,
     vote_threshold: float,
-) -> tuple[list[ClusterScore], list[tuple[int, str, str, float]]]:
+) -> tuple[list[ClusterScore], list[tuple[int, str, str, float, int]]]:
     cluster_scores: list[ClusterScore] = []
-    assignment_votes: list[tuple[int, str, str, float]] = []
+    assignment_votes: list[tuple[int, str, str, float, int]] = []
     for cluster_key, rows in grouped.items():
         vectors = [embeddings[int(row.result_id)] for row in rows]
         centroid = normalized_mean(vectors)
@@ -557,8 +682,10 @@ def score_clusters(
         for row, vector in zip(rows, vectors):
             row_scores = label_scores(vector, prototype_centroids)
             vote_label, vote_score = sorted_scores(row_scores)[0]
-            votes[vote_label] += 1
-            assignment_votes.append((int(row.result_id), cluster_key, vote_label, float(vote_score)))
+            is_excluded = 1 if int(row.result_id) in excluded_ids else 0
+            if not is_excluded:
+                votes[vote_label] += 1
+            assignment_votes.append((int(row.result_id), cluster_key, vote_label, float(vote_score), is_excluded))
         crop_vote_label, crop_vote_count = max(votes.items(), key=lambda item: item[1])
         crop_vote_ratio = float(crop_vote_count) / max(1, len(rows))
         mixed_ratio = 1.0 - crop_vote_ratio
@@ -567,6 +694,8 @@ def score_clusters(
         original_major_label = str(summary.get("major_label") or rows[0].predicted_label or "").lower()
         is_prototype = cluster_key in prototype_keys
         review_bucket, reason = bucket_score(
+            cluster_key=cluster_key,
+            excluded_keys=excluded_keys,
             recommended_label=recommended_label,
             original_label=original_major_label,
             top_score=top_score,
@@ -614,17 +743,36 @@ def write_run(
     thresholds: dict[str, float],
     grouped: dict[str, list[Assignment]],
     scores: list[ClusterScore],
-    votes: list[tuple[int, str, str, float]],
+    votes: list[tuple[int, str, str, float, int]],
+    parent_review_run_id: str = "",
+    display_name: str = "",
+    set_active: bool = False,
+    excluded_ids: set[int] | None = None,
 ) -> None:
     auto_accept = sum(1 for item in scores if item.review_bucket == "auto_accept")
     need_review = sum(1 for item in scores if item.review_bucket not in {"auto_accept", "prototype"})
+    # Auto-name if empty
+    if not display_name:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM prototype_review_runs WHERE grouping_run_id = ? AND is_archived = 0",
+            (grouping_run_id,),
+        ).fetchone()[0]
+        display_name = f"v{n + 1}"
+    is_active = 1 if set_active else 0
+    if set_active:
+        conn.execute(
+            "UPDATE prototype_review_runs SET is_active = 0 WHERE grouping_run_id = ? AND is_active = 1",
+            (grouping_run_id,),
+        )
+    excluded_image_ids_json = json.dumps(sorted(excluded_ids)) if excluded_ids else None
     conn.execute(
         """
         INSERT INTO prototype_review_runs (
             review_run_id, created_at_utc, grouping_run_id, source_db_path, feature_db_path,
             model_name, device, prototype_config_json, thresholds_json, total_clusters,
-            auto_accept_clusters, need_review_clusters
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            auto_accept_clusters, need_review_clusters,
+            parent_review_run_id, display_name, is_active, is_archived, excluded_image_ids_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
         """,
         (
             review_run_id,
@@ -639,6 +787,10 @@ def write_run(
             len(scores),
             auto_accept,
             need_review,
+            parent_review_run_id or None,
+            display_name,
+            is_active,
+            excluded_image_ids_json,
         ),
     )
     prototype_rows = []
@@ -698,10 +850,10 @@ def write_run(
     )
     conn.executemany(
         """
-        INSERT INTO prototype_assignment_votes (review_run_id, result_id, cluster_key, vote_label, vote_score)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO prototype_assignment_votes (review_run_id, result_id, cluster_key, vote_label, vote_score, is_excluded)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        [(review_run_id, result_id, cluster_key, vote_label, vote_score) for result_id, cluster_key, vote_label, vote_score in votes],
+        [(review_run_id, result_id, cluster_key, vote_label, vote_score, is_excluded) for result_id, cluster_key, vote_label, vote_score, is_excluded in votes],
     )
     conn.commit()
 
@@ -724,11 +876,48 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gap-threshold", type=float, default=0.03)
     parser.add_argument("--vote-threshold", type=float, default=0.65)
     parser.add_argument("--log-every", type=int, default=256)
+    parser.add_argument("--display-name", default="", help="Display name for this version. Auto-generated if empty.")
+    parser.add_argument("--parent-review-run-id", default="", help="Lineage pointer to parent version.")
+    parser.add_argument("--set-active", action="store_true", help="Set this version as active after insert.")
+    parser.add_argument("--archive", action="store_true", help="Standalone mode: archive a review run (requires --target-review-run-id).")
+    parser.add_argument("--set-active-only", action="store_true", help="Standalone mode: set active without running review (requires --target-review-run-id).")
+    parser.add_argument("--target-review-run-id", default="", help="Target review_run_id for standalone modes.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # ── Standalone modes (no review run) ──────────────────────────────────────
+    if args.archive or args.set_active_only:
+        target_id = str(args.target_review_run_id or "").strip()
+        if not target_id:
+            print("ERROR: --target-review-run-id is required for standalone modes", file=sys.stderr)
+            return 1
+        output_dir = Path(args.output_dir).expanduser().resolve()
+        output_db = Path(args.output_db).expanduser().resolve() if str(args.output_db or "").strip() else output_dir / "prototype_review.sqlite3"
+        conn = connect_rw(output_db)
+        try:
+            ensure_schema(conn)
+            if args.archive:
+                conn.execute("UPDATE prototype_review_runs SET is_archived = 1, is_active = 0 WHERE review_run_id = ?", (target_id,))
+                conn.commit()
+                print(f"archived review_run_id={target_id}", flush=True)
+            else:
+                # --set-active-only
+                row = conn.execute("SELECT grouping_run_id FROM prototype_review_runs WHERE review_run_id = ?", (target_id,)).fetchone()
+                if not row:
+                    print(f"ERROR: review_run_id={target_id} not found", file=sys.stderr)
+                    return 1
+                gid = row[0]
+                conn.execute("UPDATE prototype_review_runs SET is_active = 0 WHERE grouping_run_id = ? AND is_active = 1", (gid,))
+                conn.execute("UPDATE prototype_review_runs SET is_active = 1 WHERE review_run_id = ?", (target_id,))
+                conn.commit()
+                print(f"set_active review_run_id={target_id} grouping_run_id={gid}", flush=True)
+        finally:
+            conn.close()
+        return 0
+
     require_numpy()
     source_db = Path(args.source_db).expanduser().resolve()
     feature_db = Path(args.feature_db).expanduser().resolve()
@@ -743,7 +932,12 @@ def main(argv: list[str] | None = None) -> int:
     grouping_run_id = latest_grouping_run_id(feature_db) if str(args.grouping_run_id).lower() == "latest" else str(args.grouping_run_id)
     run = load_run(feature_db, grouping_run_id)
     model_name = str(args.model_name or run["model_name"])
-    prototypes = parse_prototypes(args.prototype_json)
+    parsed = parse_prototypes(args.prototype_json)
+    # Split parsed result into cluster keys and image picks for build_prototype_centroids
+    prototype_clusters = {label: parsed[label]["clusters"] for label in LABELS}
+    image_picks = {label: parsed[label]["images"] for label in LABELS}
+    excluded_keys = set(parsed["excluded"]["clusters"])
+    excluded_ids = set(parsed["excluded"]["images"])
     thresholds = {
         "unknown_threshold": float(args.unknown_threshold),
         "auto_threshold": float(args.auto_threshold),
@@ -774,13 +968,17 @@ def main(argv: list[str] | None = None) -> int:
             padding_ratio=float(args.padding_ratio),
             log_every=int(args.log_every),
         )
-        prototype_centroids, prototype_keys = build_prototype_centroids(grouped, embeddings, prototypes)
+        prototype_centroids, prototype_keys, prototype_image_ids = build_prototype_centroids(
+            grouped, embeddings, prototype_clusters, image_picks=image_picks
+        )
         scores, votes = score_clusters(
             grouped=grouped,
             summaries=summaries,
             embeddings=embeddings,
             prototype_centroids=prototype_centroids,
             prototype_keys=prototype_keys,
+            excluded_keys=excluded_keys,
+            excluded_ids=excluded_ids,
             unknown_threshold=float(args.unknown_threshold),
             auto_threshold=float(args.auto_threshold),
             gap_threshold=float(args.gap_threshold),
@@ -795,11 +993,15 @@ def main(argv: list[str] | None = None) -> int:
             feature_db=feature_db,
             model_name=model_name,
             device=str(args.device),
-            prototypes=prototypes,
+            prototypes=prototype_clusters,
             thresholds=thresholds,
             grouped=grouped,
             scores=scores,
             votes=votes,
+            parent_review_run_id=str(args.parent_review_run_id or ""),
+            display_name=str(args.display_name or ""),
+            set_active=bool(args.set_active),
+            excluded_ids=excluded_ids,
         )
     finally:
         conn.close()

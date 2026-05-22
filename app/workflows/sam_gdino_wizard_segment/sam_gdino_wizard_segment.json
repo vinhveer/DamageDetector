@@ -1,0 +1,9 @@
+{
+  "id": "sam_gdino_wizard_segment",
+  "name": "SAM+GDino Wizard: Segmentation",
+  "description": "Runs SAM on filtered boxes from the detection step and returns mask overlays.",
+  "type": "wizard_segment",
+  "command": "wizard_segment",
+  "status": "Ready",
+  "inputs": []
+}

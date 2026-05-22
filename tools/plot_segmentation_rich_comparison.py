@@ -93,11 +93,19 @@ def _safe_float(value: object, default: float = math.nan) -> float:
 def load_run(record: RunInput) -> RunMetrics:
     conn = sqlite3.connect(str(record.sqlite_path))
     try:
-        dataset_row = _fetch_one_dict(conn, "SELECT * FROM datasets LIMIT 1")
+        # Filter by dataset_label if provided, otherwise fall back to LIMIT 1
+        if record.dataset:
+            dataset_row = _fetch_one_dict(conn, "SELECT * FROM datasets WHERE dataset_label = ?", (record.dataset,))
+        else:
+            dataset_row = _fetch_one_dict(conn, "SELECT * FROM datasets LIMIT 1")
         if not dataset_row:
-            raise ValueError(f"Missing datasets table row in {record.sqlite_path}")
+            raise ValueError(f"Missing datasets table row in {record.sqlite_path} for dataset={record.dataset}")
         best_threshold = _safe_float(dataset_row.get("best_threshold"))
-        threshold_rows = conn.execute("SELECT * FROM dataset_threshold_metrics ORDER BY threshold ASC").fetchall()
+        ds_label = dataset_row.get("dataset_label", "")
+        threshold_rows = conn.execute(
+            "SELECT * FROM dataset_threshold_metrics WHERE dataset_label = ? ORDER BY threshold ASC",
+            (ds_label,),
+        ).fetchall()
         threshold_names = [item[0] for item in conn.execute("SELECT * FROM dataset_threshold_metrics LIMIT 1").description]
         thresholds = [dict(zip(threshold_names, row)) for row in threshold_rows]
 
@@ -124,8 +132,8 @@ def load_run(record: RunInput) -> RunMetrics:
         if has_accuracy:
             select_parts.append("accuracy")
         image_rows = conn.execute(
-            f"SELECT {', '.join(select_parts)} FROM image_threshold_metrics WHERE threshold = ? ORDER BY image_rel_path ASC",
-            (best_threshold,),
+            f"SELECT {', '.join(select_parts)} FROM image_threshold_metrics WHERE threshold = ? AND dataset_label = ? ORDER BY image_rel_path ASC",
+            (best_threshold, ds_label),
         ).fetchall()
     finally:
         conn.close()
@@ -610,10 +618,16 @@ def main() -> None:
     plot_iou_dice_boxplots(grouped, output_dir / "per_image_iou_dice_boxplots.svg")
     for dataset in grouped:
         plot_iou_dice_boxplot_dataset(grouped, dataset, output_dir / f"per_image_{_slug(dataset)}_iou_dice_boxplots.svg")
-    plot_pairwise_delta(grouped, output_dir / "per_image_iou_scatter_delta.svg")
+    try:
+        plot_pairwise_delta(grouped, output_dir / "per_image_iou_scatter_delta.svg")
+    except (ValueError, StopIteration):
+        pass  # skip if no SAM/UNet pair found
     for dataset, items in grouped.items():
         if {item.model for item in items} >= {"SAM", "UNet"}:
-            plot_pairwise_delta_dataset(grouped, dataset, output_dir / f"per_image_{_slug(dataset)}_iou_scatter_delta.svg")
+            try:
+                plot_pairwise_delta_dataset(grouped, dataset, output_dir / f"per_image_{_slug(dataset)}_iou_scatter_delta.svg")
+            except (ValueError, StopIteration):
+                pass
     plot_area_bucket_performance(grouped, output_dir / "area_bucket_iou_recall.svg")
     for dataset in grouped:
         plot_area_bucket_dataset(grouped, dataset, output_dir / f"area_bucket_{_slug(dataset)}_iou_recall.svg")

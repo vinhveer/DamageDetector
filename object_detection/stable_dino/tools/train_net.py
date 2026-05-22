@@ -91,16 +91,16 @@ class Trainer(SimpleTrainer):
         data = next(self._data_loader_iter)
         data_time = time.perf_counter() - start
 
-        """
-        If you want to do something with the losses, you can wrap the model.
-        """
-        loss_dict = self.model(data)
         autocast_context = (
             autocast(device_type="cuda", enabled=True)
             if use_cuda_amp and autocast is not None
             else nullcontext()
         )
         with autocast_context:
+            """
+            If you want to do something with the losses, you can wrap the model.
+            """
+            loss_dict = self.model(data)
             if isinstance(loss_dict, torch.Tensor):
                 losses = loss_dict
                 loss_dict = {"total_loss": loss_dict}

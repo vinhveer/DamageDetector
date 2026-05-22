@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { drawCropToCanvas, getCropDisplaySize, normalizeBox } from '../imageCrop.js';
+import { getBitmap } from '../../../utils/imageCache.js';
 
 export default function ResultImage({ row, imageSize }) {
   const cropCanvasRef = useRef(null);
@@ -13,11 +14,13 @@ export default function ResultImage({ row, imageSize }) {
     }
 
     let cancelled = false;
-    const image = new Image();
-    image.onload = () => {
+    setStatus('loading');
+    setCropDisplaySize({ width: imageSize, height: imageSize });
+
+    getBitmap(row.image_uri).then((image) => {
       if (cancelled) return;
       const cropCanvas = cropCanvasRef.current;
-      const box = normalizeBox(row, image.naturalWidth, image.naturalHeight);
+      const box = normalizeBox(row, image.naturalWidth || image.width, image.naturalHeight || image.height);
       if (!cropCanvas || !box) {
         setCropDisplaySize({ width: imageSize, height: imageSize });
         setStatus('no-box');
@@ -28,13 +31,9 @@ export default function ResultImage({ row, imageSize }) {
       drawCropToCanvas(cropCanvas, image, box, nextCropSize.width, nextCropSize.height);
       setCropDisplaySize(nextCropSize);
       setStatus('ready');
-    };
-    image.onerror = () => {
+    }).catch(() => {
       if (!cancelled) setStatus('error');
-    };
-    setStatus('loading');
-    setCropDisplaySize({ width: imageSize, height: imageSize });
-    image.src = row.image_uri;
+    });
 
     return () => { cancelled = true; };
   }, [imageSize, row]);

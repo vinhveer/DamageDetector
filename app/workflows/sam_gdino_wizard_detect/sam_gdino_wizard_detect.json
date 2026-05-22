@@ -1,0 +1,9 @@
+{
+  "id": "sam_gdino_wizard_detect",
+  "name": "SAM+GDino Wizard: Detection",
+  "description": "Runs GroundingDINO + optional OpenCLIP semantic relabel + spatial filter and returns filtered boxes.",
+  "type": "wizard_detect",
+  "command": "wizard_detect",
+  "status": "Ready",
+  "inputs": []
+}

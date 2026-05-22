@@ -242,6 +242,9 @@ def _evaluate_dataset(
     tile_batch_size: int,
     apply_postprocessing: bool,
     limit: int | None,
+    tta: bool = False,
+    multiscale: tuple | None = None,
+    gaussian_weight: bool = False,
 ) -> tuple[DatasetSummary, dict[float, dict[str, float]]]:
     dataset_label = _dataset_label(dataset_root)
     case_names = _iter_cases(dataset_root)
@@ -280,6 +283,9 @@ def _evaluate_dataset(
             input_size=input_size,
             tile_overlap=tile_overlap,
             tile_batch_size=tile_batch_size,
+            tta=tta,
+            multiscale=multiscale,
+            gaussian_weight=gaussian_weight,
         )
         gt = load_binary_mask(str(mask_path), target_size=image.size).astype(np.uint8)
         width, height = image.size
@@ -434,8 +440,20 @@ def main() -> int:
     parser.add_argument("--thresholds", type=float, nargs="*", default=None)
     parser.add_argument("--no-postprocessing", action="store_true")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--tta", action="store_true",
+                        help="Test-time augmentation (flip H, V, rot180) — ~4x compute.")
+    parser.add_argument("--gaussian-weight", action="store_true",
+                        help="Gaussian tile weighting để blend mượt tile boundary.")
+    parser.add_argument("--multiscale", type=str, default=None,
+                        help="Comma-separated scales (vd '0.75,1.0,1.25') — multiplier x len(scales) compute.")
     parser.add_argument("dataset", help="Dataset root containing images/masks or split root with test/images + test/masks")
     args = parser.parse_args()
+
+    multiscale_tuple = None
+    if args.multiscale:
+        multiscale_tuple = tuple(
+            float(x.strip()) for x in args.multiscale.split(",") if x.strip()
+        ) or None
 
     model_path = Path(args.model).resolve()
     if not model_path.is_file():
@@ -495,6 +513,9 @@ def main() -> int:
             tile_batch_size=tile_batch_size,
             apply_postprocessing=not args.no_postprocessing,
             limit=args.limit,
+            tta=args.tta,
+            multiscale=multiscale_tuple,
+            gaussian_weight=args.gaussian_weight,
         )
     finally:
         conn.close()

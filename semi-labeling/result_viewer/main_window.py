@@ -27,7 +27,7 @@ from db import FeatureGroupStore, SourceStore, merge_source_meta
 from image_loader import ImageLoader
 from models import LABELS, ClusterSummary, GroupRun
 from paths import default_feature_db, default_image_root, default_source_db
-from widgets import DetailPage, GroupListPage
+from widgets import DetailPage, EditReviewPage, GroupListPage
 
 
 class MainWindow(QMainWindow):
@@ -59,6 +59,11 @@ class MainWindow(QMainWindow):
         self.detail_page.remove_image_flags_requested.connect(self.remove_image_flags)
         self.stack.addWidget(self.group_tabs)
         self.stack.addWidget(self.detail_page)
+
+        self.edit_review_page = EditReviewPage(self.image_loader)
+        self.edit_review_page.back_requested.connect(self.show_group_list)
+        self.edit_review_page.delete_requested.connect(self.on_edit_review_delete)
+        self.stack.addWidget(self.edit_review_page)
 
         # ── Sidebar as a collapsible QDockWidget ─────────
         self._build_dock_sidebar()
@@ -155,6 +160,11 @@ class MainWindow(QMainWindow):
         self.toggle_table_action.triggered.connect(self._on_toggle_table)
         toolbar.addAction(self.toggle_table_action)
 
+        self.edit_review_action = QAction("Edit Review", self)
+        self.edit_review_action.setEnabled(False)   # enabled after data is loaded
+        self.edit_review_action.triggered.connect(self.open_edit_review)
+        toolbar.addAction(self.edit_review_action)
+
     # ── Helpers ──────────────────────────────────────────
 
     def _path_row(self, line_edit: QLineEdit, picker) -> QWidget:
@@ -211,6 +221,7 @@ class MainWindow(QMainWindow):
                 self.source_db_input.setText(self.current_run.source_db_path)
         self.source_store = SourceStore(Path(self.source_db_input.text()).expanduser()) if Path(self.source_db_input.text()).expanduser().is_file() else None
         self.image_loader.clear()
+        self.edit_review_action.setEnabled(bool(self.runs))
         self.reload_clusters()
 
     def on_run_changed(self) -> None:
@@ -284,6 +295,47 @@ class MainWindow(QMainWindow):
     def show_group_list(self) -> None:
         self.stack.setCurrentWidget(self.group_tabs)
         self.toggle_table_action.setEnabled(False)
+
+    def open_edit_review(self) -> None:
+        if self.feature_store is None or self.current_run is None:
+            QMessageBox.information(self, "No data", "Load a SQLite database first.")
+            return
+        run_id = self.current_run.grouping_run_id
+        image_root = Path(self.image_root_input.text()).expanduser() if self.image_root_input.text().strip() else None
+        padding = float(self.crop_padding.value())
+
+        for label in LABELS:
+            clusters = self.clusters_by_label.get(label, [])
+            assignments_by_key = self.feature_store.list_all_assignments_for_label(run_id, label)
+
+            # Merge source meta (adds x1,y1,x2,y2 for crop)
+            all_rows_flat = [row for rows in assignments_by_key.values() for row in rows]
+            if self.source_store is not None and all_rows_flat:
+                meta = self.source_store.source_meta([int(r.result_id) for r in all_rows_flat])
+                merged = merge_source_meta(all_rows_flat, meta)
+                merged_by_key: dict[str, list] = {}
+                for row in merged:
+                    merged_by_key.setdefault(row.cluster_key, []).append(row)
+                assignments_by_key = merged_by_key
+
+            self.edit_review_page.populate(
+                label, clusters, assignments_by_key,
+                image_root=image_root,
+                padding_ratio=padding,
+            )
+
+        self.stack.setCurrentWidget(self.edit_review_page)
+        self.toggle_table_action.setEnabled(False)
+
+    def on_edit_review_delete(self, result_ids: list[int]) -> None:
+        if self.feature_store is None or self.current_run is None:
+            return
+        changed = self.feature_store.set_outlier_for_results(
+            self.current_run.grouping_run_id, result_ids
+        )
+        self.reload_clusters()
+        QMessageBox.information(self, "Đã xóa", f"Đã đánh dấu {changed} ảnh là outlier.")
+        self.open_edit_review()
 
     def _on_toggle_table(self) -> None:
         self.detail_page.toggle_table()

@@ -1,5 +1,10 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+let tempImageCacheDir = '';
 
 const expandHome = (value) => {
   if (!value || !value.startsWith('~')) return value || '';
@@ -12,6 +17,52 @@ const resolveExisting = (candidate) => {
   } catch {
     return '';
   }
+};
+
+const getTempImageCacheDir = () => {
+  if (!tempImageCacheDir) {
+    tempImageCacheDir = path.join(os.tmpdir(), 'damage-detector-app', `image-cache-${process.pid}`);
+  }
+  return tempImageCacheDir;
+};
+
+const cacheKeyForPath = (resolvedPath, stat) => crypto
+  .createHash('sha1')
+  .update(path.resolve(resolvedPath))
+  .update('\0')
+  .update(String(stat.size))
+  .update('\0')
+  .update(String(Math.trunc(stat.mtimeMs)))
+  .digest('hex');
+
+export const materializeImagePath = (resolvedPath) => {
+  if (!resolvedPath) return '';
+  try {
+    const stat = fs.statSync(resolvedPath);
+    if (!stat.isFile()) return resolvedPath;
+
+    const cacheRoot = getTempImageCacheDir();
+    const ext = path.extname(resolvedPath) || '.img';
+    const target = path.join(cacheRoot, `${cacheKeyForPath(resolvedPath, stat)}${ext}`);
+    if (!fs.existsSync(target)) {
+      fs.mkdirSync(cacheRoot, { recursive: true });
+      const tempTarget = `${target}.${process.pid}.tmp`;
+      try {
+        fs.copyFileSync(resolvedPath, tempTarget);
+        fs.renameSync(tempTarget, target);
+      } finally {
+        if (fs.existsSync(tempTarget)) fs.rmSync(tempTarget, { force: true });
+      }
+    }
+    return target;
+  } catch {
+    return resolvedPath;
+  }
+};
+
+export const imageUriForPath = (resolvedPath) => {
+  const materializedPath = materializeImagePath(resolvedPath);
+  return materializedPath ? pathToFileURL(materializedPath).href : '';
 };
 
 export const resolveImagePath = (row, imageRoot) => {
@@ -43,3 +94,7 @@ export const resolveImagePath = (row, imageRoot) => {
   if (imageRoot && relPath) return path.resolve(expandHome(imageRoot), relPath);
   return path.resolve(sourceInputDir, relPath);
 };
+
+process.once('exit', () => {
+  if (tempImageCacheDir) fs.rmSync(tempImageCacheDir, { recursive: true, force: true });
+});

@@ -10,6 +10,9 @@ from object_detection.stable_dino.dataset_config import build_stable_dino_overri
 from torch_runtime import get_torch, select_device_str
 
 
+_LR_DECAY_FRACTIONS = (0.70, 0.90)
+
+
 def _ensure_python312_pkg_resources_compat() -> None:
     """Shim removed pkgutil symbols for old pkg_resources consumers on Python 3.12+."""
     if not hasattr(pkgutil, "ImpImporter"):
@@ -57,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-period", type=int, default=None, help="Override StableDINO train.eval_period. 0 disables periodic eval.")
     parser.add_argument("--log-period", type=int, default=None, help="Override StableDINO train.log_period.")
     parser.add_argument("--checkpoint-period", type=int, default=None, help="Override StableDINO train.checkpointer.period.")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None, help="Enable CUDA automatic mixed precision training.")
+    parser.add_argument(
+        "--scale-lr-schedule",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Scale the 70%%/90%% LR decay milestones and warmup_length to --max-iter.",
+    )
     parser.add_argument("--test-with-nms", type=float, default=0.8, help="Run validation again with this NMS threshold. Use 0 to disable.")
     parser.add_argument("--best-checkpoint-metric", default="bbox/AP", help="Metric used to save model_best.pth.")
     parser.add_argument("--best-checkpoint-mode", default="max", choices=["max", "min"], help="Best checkpoint comparison mode.")
@@ -91,6 +101,19 @@ def _resolve_launch_num_gpus(device: str, requested_num_gpus: int) -> int:
     return max(1, min(requested, available))
 
 
+def _build_scaled_lr_schedule_overrides(max_iter: int) -> list[str]:
+    total = int(max_iter)
+    if total <= 0:
+        raise ValueError("--scale-lr-schedule requires --max-iter to be positive")
+    milestones = sorted({max(1, min(total, int(round(total * fraction)))) for fraction in _LR_DECAY_FRACTIONS})
+    warmup_iters = min(1000, max(1, total // 10))
+    return [
+        f"lr_multiplier.scheduler.milestones={milestones!r}",
+        f"lr_multiplier.scheduler.num_updates={total}",
+        f"lr_multiplier.warmup_length={warmup_iters / float(total)}",
+    ]
+
+
 def _worker_main(args: argparse.Namespace) -> None:
     _ensure_python312_pkg_resources_compat()
     from object_detection.stable_dino.tools import train_net
@@ -115,14 +138,20 @@ def _worker_main(args: argparse.Namespace) -> None:
         init_checkpoint=str(args.init_checkpoint or "").strip() or None,
         eval_split=str(args.eval_split),
     )
+    if bool(args.scale_lr_schedule) and args.max_iter is None:
+        raise ValueError("--scale-lr-schedule requires --max-iter")
     if args.max_iter is not None:
         overrides.append(f"train.max_iter={int(args.max_iter)}")
+        if bool(args.scale_lr_schedule):
+            overrides.extend(_build_scaled_lr_schedule_overrides(int(args.max_iter)))
     if args.eval_period is not None:
         overrides.append(f"train.eval_period={int(args.eval_period)}")
     if args.log_period is not None:
         overrides.append(f"train.log_period={int(args.log_period)}")
     if args.checkpoint_period is not None:
         overrides.append(f"train.checkpointer.period={int(args.checkpoint_period)}")
+    if args.amp is not None:
+        overrides.append(f"train.amp.enabled={bool(args.amp)}")
     if args.test_with_nms is not None:
         overrides.append(f"train.test_with_nms={float(args.test_with_nms)}")
     finetune_checkpoint = str(args.finetune_checkpoint or "").strip()

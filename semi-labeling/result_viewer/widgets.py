@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
 from PySide6.QtGui import QFont, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -788,3 +790,346 @@ class DetailPage(QWidget):
             for col_idx, value in enumerate(values):
                 self.table.setItem(row_idx, col_idx, QTableWidgetItem(str(value)))
         self.table.resizeColumnsToContents()
+
+
+# ─────────────────────────────────────────────────────────
+#  Edit Review — constants
+# ─────────────────────────────────────────────────────────
+
+THUMB_REVIEW = 120                          # thumbnail image size (px)
+_THUMB_H = THUMB_REVIEW + 26 + 4           # ThumbnailCheck total height
+_HSCROLL_H = _THUMB_H + 18                 # ClusterReviewRow scroll area height (+scrollbar)
+
+
+# ─────────────────────────────────────────────────────────
+#  ThumbnailCheck  (single crop + checkbox)
+# ─────────────────────────────────────────────────────────
+
+
+class ThumbnailCheck(QFrame):
+    """Small crop thumbnail with a checkbox for selection in the edit review view."""
+
+    toggled = Signal(int, bool)   # result_id, is_checked
+
+    def __init__(self, row: AssignmentRow, *, thumb_size: int = THUMB_REVIEW) -> None:
+        super().__init__()
+        self._row = row
+        self._thumb_size = thumb_size
+        self._checked = False
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setFixedSize(thumb_size, thumb_size + 26)
+        self.setCursor(Qt.PointingHandCursor)
+
+        vbox = QVBoxLayout(self)
+        vbox.setContentsMargins(2, 2, 2, 2)
+        vbox.setSpacing(2)
+
+        self.img_label = QLabel("...")
+        self.img_label.setAlignment(Qt.AlignCenter)
+        self.img_label.setFixedSize(thumb_size - 4, thumb_size - 4)
+        vbox.addWidget(self.img_label)
+
+        self._check = QCheckBox()
+        self._check.setFixedHeight(18)
+        self._check.stateChanged.connect(self._on_state)
+        vbox.addWidget(self._check, alignment=Qt.AlignHCenter)
+
+        self._update_style()
+
+    def set_pixmap(self, pixmap: QPixmap) -> None:
+        s = self._thumb_size - 4
+        self.img_label.setPixmap(pixmap.scaled(s, s, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.img_label.setText("")
+
+    def set_error(self) -> None:
+        self.img_label.setText("?")
+
+    @property
+    def checked(self) -> bool:
+        return self._checked
+
+    def set_checked(self, value: bool, *, emit: bool = True) -> None:
+        self._checked = value
+        self._check.blockSignals(True)
+        self._check.setChecked(value)
+        self._check.blockSignals(False)
+        self._update_style()
+        if emit:
+            self.toggled.emit(int(self._row.result_id), value)
+
+    def _on_state(self, state: int) -> None:
+        self._checked = state == 2   # Qt.Checked
+        self._update_style()
+        self.toggled.emit(int(self._row.result_id), self._checked)
+
+    def mousePressEvent(self, event) -> None:   # type: ignore[override]
+        # Clicking image area (not the checkbox child) toggles selection
+        if self.img_label.geometry().contains(event.pos()):
+            self.set_checked(not self._checked)
+        super().mousePressEvent(event)
+
+    def _update_style(self) -> None:
+        if self._checked:
+            self.setStyleSheet("ThumbnailCheck { border: 2px solid #2563eb; background-color: #1e3a5f; }")
+        else:
+            self.setStyleSheet("ThumbnailCheck { border: 1px solid #555; }")
+
+
+# ─────────────────────────────────────────────────────────
+#  ClusterReviewRow  (one group header + horizontal strip)
+# ─────────────────────────────────────────────────────────
+
+
+class ClusterReviewRow(QFrame):
+    """One row per cluster: header with select-all + horizontal scrollable thumbnail strip."""
+
+    selection_changed = Signal()
+
+    def __init__(
+        self,
+        cluster: ClusterSummary,
+        rows: list[AssignmentRow],
+        image_loader: ImageLoader,
+        image_root: Path | None,
+        *,
+        padding_ratio: float = 0.05,
+        thumb_size: int = THUMB_REVIEW,
+    ) -> None:
+        super().__init__()
+        self.setFrameShape(QFrame.Box)
+        self._cluster = cluster
+        self._rows = rows
+        self._thumb_size = thumb_size
+        self._thumbs: dict[int, ThumbnailCheck] = {}
+        self._generation = 0
+        self._thread_pool = QThreadPool.globalInstance()
+        self._signals = _CropSignals()
+        self._signals.finished.connect(self._on_crop_done)
+        self._image_loader = image_loader
+        self._image_root = image_root
+        self._padding_ratio = padding_ratio
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 4, 6, 4)
+        outer.setSpacing(4)
+
+        # ── Header ──────────────────────────────────────
+        header = QHBoxLayout()
+        header.setSpacing(8)
+
+        self._all_check = QCheckBox()
+        self._all_check.clicked.connect(self._on_select_all_clicked)
+        header.addWidget(self._all_check)
+
+        label = QLabel(
+            f"<b>{cluster.cluster_key}</b>&nbsp;&nbsp;"
+            f"{cluster.cluster_size} ảnh&nbsp;·&nbsp;"
+            f"Major: <i>{cluster.major_label}</i>&nbsp;·&nbsp;"
+            f"Purity: {cluster.purity:.3f}"
+        )
+        label.setTextFormat(Qt.RichText)
+        header.addWidget(label, 1)
+        outer.addLayout(header)
+
+        # ── Horizontal thumbnail strip ───────────────────
+        h_scroll = QScrollArea()
+        h_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        h_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        h_scroll.setWidgetResizable(False)
+        h_scroll.setFixedHeight(_HSCROLL_H)
+
+        strip = QWidget()
+        strip_layout = QHBoxLayout(strip)
+        strip_layout.setContentsMargins(2, 2, 2, 2)
+        strip_layout.setSpacing(4)
+
+        for row in rows:
+            thumb = ThumbnailCheck(row, thumb_size=thumb_size)
+            thumb.toggled.connect(self._on_thumb_toggled)
+            self._thumbs[int(row.result_id)] = thumb
+            strip_layout.addWidget(thumb)
+        strip_layout.addStretch(1)
+
+        strip.setMinimumWidth(len(rows) * (thumb_size + 8) + 8)
+        strip.setFixedHeight(_THUMB_H + 4)
+        h_scroll.setWidget(strip)
+        outer.addWidget(h_scroll)
+
+        self._load_all()
+
+    def _load_all(self) -> None:
+        self._generation += 1
+        for i, row in enumerate(self._rows):
+            task = _CropTask(
+                self._generation, i, row,
+                self._image_loader, self._image_root,
+                self._padding_ratio, self._thumb_size,
+                self._signals,
+            )
+            self._thread_pool.start(task)
+
+    @Slot(int, int, QImage, str)
+    def _on_crop_done(self, generation: int, index: int, image: QImage, error: str) -> None:
+        if generation != self._generation or not (0 <= index < len(self._rows)):
+            return
+        thumb = self._thumbs.get(int(self._rows[index].result_id))
+        if thumb is None:
+            return
+        if error:
+            thumb.set_error()
+        else:
+            thumb.set_pixmap(QPixmap.fromImage(image))
+
+    def _on_thumb_toggled(self, _result_id: int, _checked: bool) -> None:
+        self._update_all_check()
+        self.selection_changed.emit()
+
+    def _on_select_all_clicked(self) -> None:
+        n_checked = sum(1 for t in self._thumbs.values() if t.checked)
+        should_check = n_checked < len(self._thumbs)
+        for thumb in self._thumbs.values():
+            thumb.set_checked(should_check, emit=False)
+        self._update_all_check()
+        self.selection_changed.emit()
+
+    def _update_all_check(self) -> None:
+        if not self._thumbs:
+            return
+        n = sum(1 for t in self._thumbs.values() if t.checked)
+        self._all_check.blockSignals(True)
+        self._all_check.setChecked(n == len(self._thumbs))
+        self._all_check.blockSignals(False)
+
+    @property
+    def selected_result_ids(self) -> list[int]:
+        return [rid for rid, t in self._thumbs.items() if t.checked]
+
+
+# ─────────────────────────────────────────────────────────
+#  EditReviewPage  (full-page grouped review with select/delete)
+# ─────────────────────────────────────────────────────────
+
+
+class EditReviewPage(QWidget):
+    """Shows all clusters as horizontal thumbnail strips, sorted by purity DESC.
+
+    Allows selecting individual images or entire groups, then deleting them
+    (marks as is_outlier=1 in the feature groups DB).
+    """
+
+    back_requested = Signal()
+    delete_requested = Signal(list)   # list[int] result_ids
+
+    def __init__(self, image_loader: ImageLoader) -> None:
+        super().__init__()
+        self._image_loader = image_loader
+        self._cluster_rows: dict[str, list[ClusterReviewRow]] = {label: [] for label in LABELS}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 4, 8, 4)
+        root.setSpacing(6)
+
+        # ── Top action bar ───────────────────────────────
+        top = QHBoxLayout()
+        top.setSpacing(8)
+
+        back_btn = QPushButton("← Back")
+        back_btn.setFixedSize(100, 36)
+        back_btn.clicked.connect(self.back_requested.emit)
+        top.addWidget(back_btn)
+
+        self.title = QLabel("Edit Review")
+        self.title.setFont(QFont("Arial", 14, QFont.Bold))
+        top.addWidget(self.title, 1)
+
+        self._del_btn = QPushButton("Xóa đã chọn (0)")
+        self._del_btn.setFixedSize(190, 36)
+        self._del_btn.clicked.connect(self._on_delete)
+        top.addWidget(self._del_btn)
+
+        clear_btn = QPushButton("Bỏ chọn tất cả")
+        clear_btn.setFixedSize(140, 36)
+        clear_btn.clicked.connect(self._clear_selection)
+        top.addWidget(clear_btn)
+
+        root.addLayout(top)
+
+        # ── Tab per label scope ──────────────────────────
+        self._tabs = QTabWidget()
+        root.addWidget(self._tabs, 1)
+
+        self._tab_scrolls: dict[str, QScrollArea] = {}
+        for label in LABELS:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            self._tab_scrolls[label] = scroll
+            self._tabs.addTab(scroll, label)
+
+    # ── Public API ───────────────────────────────────────
+
+    def populate(
+        self,
+        label_scope: str,
+        clusters: list[ClusterSummary],
+        assignments_by_key: dict[str, list[AssignmentRow]],
+        *,
+        image_root: Path | None,
+        padding_ratio: float = 0.05,
+    ) -> None:
+        """Populate one label tab. Clusters are sorted by purity DESC."""
+        scroll = self._tab_scrolls[label_scope]
+        old = scroll.widget()
+        if old is not None:
+            old.deleteLater()
+        self._cluster_rows[label_scope] = []
+
+        content = QWidget()
+        vbox = QVBoxLayout(content)
+        vbox.setContentsMargins(4, 4, 4, 4)
+        vbox.setSpacing(8)
+
+        sorted_clusters = sorted(clusters, key=lambda c: c.purity, reverse=True)
+        for i, cluster in enumerate(sorted_clusters):
+            rows = assignments_by_key.get(cluster.cluster_key, [])
+            if not rows:
+                continue
+            row_widget = ClusterReviewRow(
+                cluster, rows, self._image_loader, image_root,
+                padding_ratio=padding_ratio, thumb_size=THUMB_REVIEW,
+            )
+            row_widget.selection_changed.connect(self._update_delete_btn)
+            self._cluster_rows[label_scope].append(row_widget)
+            vbox.addWidget(row_widget)
+
+        if not sorted_clusters:
+            vbox.addWidget(QLabel("Không có nhóm nào."))
+
+        vbox.addStretch(1)
+        scroll.setWidget(content)
+
+    # ── Internal ─────────────────────────────────────────
+
+    def _all_rows(self) -> list[ClusterReviewRow]:
+        return [row for rows in self._cluster_rows.values() for row in rows]
+
+    def _selected_result_ids(self) -> list[int]:
+        ids: list[int] = []
+        for row in self._all_rows():
+            ids.extend(row.selected_result_ids)
+        return ids
+
+    def _update_delete_btn(self) -> None:
+        n = len(self._selected_result_ids())
+        self._del_btn.setText(f"Xóa đã chọn ({n})")
+
+    def _on_delete(self) -> None:
+        ids = self._selected_result_ids()
+        if ids:
+            self.delete_requested.emit(ids)
+
+    def _clear_selection(self) -> None:
+        for row in self._all_rows():
+            for thumb in row._thumbs.values():
+                thumb.set_checked(False, emit=False)
+            row._update_all_check()
+        self._update_delete_btn()

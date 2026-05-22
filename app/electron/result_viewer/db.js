@@ -9,6 +9,8 @@ const expandHome = (value) => {
 
 const resolveDbPath = (dbPath) => path.resolve(expandHome(dbPath));
 
+const statementCache = new WeakMap();
+
 const openDatabase = (dbPath, readOnly) => {
   const resolved = resolveDbPath(dbPath);
   if (!fs.existsSync(resolved)) {
@@ -17,9 +19,38 @@ const openDatabase = (dbPath, readOnly) => {
   return new DatabaseSync(resolved, { readOnly });
 };
 
-export const connectRo = (dbPath) => openDatabase(dbPath, true);
+export const connectRo = (dbPath) => {
+  const resolved = resolveDbPath(dbPath);
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`SQLite database not found: ${resolved}`);
+  }
+  // If stale WAL/SHM exists, checkpoint first so read-only open succeeds
+  const shmPath = resolved + '-shm';
+  if (fs.existsSync(shmPath)) {
+    try {
+      const tmp = new DatabaseSync(resolved, { readOnly: false });
+      tmp.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      tmp.close();
+    } catch { /* ignore — may already be clean */ }
+  }
+  return new DatabaseSync(resolved, { readOnly: true });
+};
 
 export const connectRw = (dbPath) => openDatabase(dbPath, false);
+
+export const cachedPrepare = (db, sql) => {
+  let cache = statementCache.get(db);
+  if (!cache) {
+    cache = new Map();
+    statementCache.set(db, cache);
+  }
+  let statement = cache.get(sql);
+  if (!statement) {
+    statement = db.prepare(sql);
+    cache.set(sql, statement);
+  }
+  return statement;
+};
 
 export const runTransaction = (db, callback) => {
   db.exec('BEGIN IMMEDIATE');
@@ -34,13 +65,13 @@ export const runTransaction = (db, callback) => {
 };
 
 export const refreshRunFlagCounts = (db, runId) => {
-  const totals = db.prepare(`
+  const totals = cachedPrepare(db, `
     SELECT SUM(is_outlier) AS outliers, SUM(label_suspect) AS suspects
     FROM feature_group_assignments
     WHERE grouping_run_id = ?
   `).get(runId) || {};
 
-  db.prepare(`
+  cachedPrepare(db, `
     UPDATE feature_group_runs
     SET outlier_boxes = ?, label_suspect_boxes = ?
     WHERE grouping_run_id = ?

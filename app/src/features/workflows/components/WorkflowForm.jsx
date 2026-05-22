@@ -46,7 +46,7 @@ export default function WorkflowForm({ workflow, onStarted }) {
       storedValues[input.name] ?? inputDefaultValue(input, settingsSaveDir)
     ]);
     return Object.fromEntries(entries);
-  }, [settingsSaveDir, storedValues, workflow.id, workflow.inputs]);
+  }, [settingsSaveDir, storedValues, workflow.inputs]);
   const [values, setValues] = useState(initialValues);
   const [venvDialogOpen, setVenvDialogOpen] = useState(false);
   const [venvDir, setVenvDir] = useState('');
