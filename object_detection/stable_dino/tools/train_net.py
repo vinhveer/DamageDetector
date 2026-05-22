@@ -200,6 +200,8 @@ def load_finetune_checkpoint(cfg, model):
         return
     ignore_prefixes = tuple(str(prefix) for prefix in finetune_cfg.get("ignore_prefixes", []))
     ignore_shape_mismatch = bool(finetune_cfg.get("ignore_shape_mismatch", True))
+    require_loaded = bool(finetune_cfg.get("require_loaded", False))
+    min_loaded_tensors = int(finetune_cfg.get("min_loaded_tensors", 100))
     target_model = _remove_ddp(model)
     model_state = target_model.state_dict()
     checkpoint = _torch_load_checkpoint(checkpoint_path)
@@ -232,9 +234,21 @@ def load_finetune_checkpoint(cfg, model):
         len(missing),
         len(unexpected),
     )
+    print(
+        f"Loaded fine-tune checkpoint {checkpoint_path}: "
+        f"{len(load_state)} tensors loaded, {len(skipped)} skipped, "
+        f"{len(missing)} missing, {len(unexpected)} unexpected",
+        flush=True,
+    )
     if skipped:
         preview = ", ".join(f"{key} ({reason})" for key, reason in skipped[:20])
         logger.info("Skipped fine-tune tensors: %s%s", preview, " ..." if len(skipped) > 20 else "")
+        print(f"Skipped fine-tune tensors: {preview}{' ...' if len(skipped) > 20 else ''}", flush=True)
+    if require_loaded and len(load_state) < min_loaded_tensors:
+        raise RuntimeError(
+            f"Fine-tune checkpoint loaded only {len(load_state)} tensors from {checkpoint_path}; "
+            f"expected at least {min_loaded_tensors}. Check checkpoint format/path before training."
+        )
 
 
 def do_test(cfg, model):
