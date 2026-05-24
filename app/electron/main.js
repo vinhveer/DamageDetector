@@ -5,30 +5,52 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  clearFlagsForCluster,
-  clearFlagsForResults,
-  listAssignments,
-  listClusters,
-  listRuns,
-  resultViewerDefaults
-} from './result_viewer/index.js';
+  dedupGroupsDefaults,
+  listDedupGroupMembers,
+  listDedupGroups,
+  listDedupImageBoxes,
+  listDedupImages,
+  listDedupRuns
+} from './dedup_groups/index.js';
 import {
-  listPrototypeReviewAssignments,
-  listPrototypeReviewAssignmentsBulk,
-  listPrototypeReviewRuns,
-  listPrototypeReviewScores,
-  markAssignmentsAsOutlier,
-  prototypeReviewDefaults,
-  setAssignmentsLabel,
-  listVersions,
-  getVersionDetail,
-  getCandidates,
-  createVersion,
-  setVersionActive,
-  archiveVersion,
-  unarchiveVersion,
-  renameVersion
-} from './prototype_review/index.js';
+  clusterLabelingDefaults,
+  createSession,
+  deleteSession,
+  getBoxImage,
+  getClusterMembers,
+  listClusterRuns,
+  listClusters,
+  listSessions,
+  loadSession,
+  saveSession,
+} from './cluster_labeling/index.js';
+import {
+  classifierResultsDefaults,
+  getApplyRun,
+  getTrainingRun,
+  listClassifierRuns,
+} from './classifier_results/index.js';
+import {
+  labelReviewDefaults,
+  listSubclusterRuns,
+  listSubclustersByClass,
+  getSubclusterMembers,
+  listSuspectRuns,
+  listSuspectClusters,
+  getSuspectClusterMembers,
+  listSessions as listLabelReviewSessions,
+  loadSession as loadLabelReviewSession,
+  saveSession as saveLabelReviewSession,
+  createSession as createLabelReviewSession,
+  deleteSession as deleteLabelReviewSession,
+} from './label_review/index.js';
+import {
+  finalReviewDefaults,
+  listFinalCsvs,
+  listFinalImages,
+  getFinalImageBoxes,
+  exportFinalToCoco,
+} from './final_review/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -238,51 +260,47 @@ ipcMain.handle('files:list-images', async (_event, payload = {}) => {
   return listImagesUnder(options.rootPath, Boolean(options.recursive));
 });
 
-ipcMain.handle('result-viewer:defaults', resultViewerDefaults);
-ipcMain.handle('result-viewer:list-runs', (_event, payload) => listRuns(payload));
-ipcMain.handle('result-viewer:list-clusters', (_event, payload) => listClusters(payload));
-ipcMain.handle('result-viewer:list-assignments', (_event, payload) => listAssignments(payload));
-ipcMain.handle('result-viewer:clear-flags-results', (_event, payload) => clearFlagsForResults(payload));
-ipcMain.handle('result-viewer:clear-flags-cluster', (_event, payload) => clearFlagsForCluster(payload));
+ipcMain.handle('dedup-groups:defaults', dedupGroupsDefaults);
+ipcMain.handle('dedup-groups:list-runs', (_event, payload) => listDedupRuns(payload));
+ipcMain.handle('dedup-groups:list-groups', (_event, payload) => listDedupGroups(payload));
+ipcMain.handle('dedup-groups:list-members', (_event, payload) => listDedupGroupMembers(payload));
+ipcMain.handle('dedup-groups:list-images', (_event, payload) => listDedupImages(payload));
+ipcMain.handle('dedup-groups:list-image-boxes', (_event, payload) => listDedupImageBoxes(payload));
 
-ipcMain.handle('prototype-review:defaults', prototypeReviewDefaults);
-ipcMain.handle('prototype-review:list-runs', (_event, payload) => listPrototypeReviewRuns(payload));
-ipcMain.handle('prototype-review:list-scores', (_event, payload) => listPrototypeReviewScores(payload));
-ipcMain.handle('prototype-review:list-assignments', (_event, payload) => listPrototypeReviewAssignments(payload));
-ipcMain.handle('prototype-review:list-assignments-bulk', (_event, payload) => listPrototypeReviewAssignmentsBulk(payload));
-ipcMain.handle('prototype-review:mark-outlier', (_event, payload) => markAssignmentsAsOutlier(payload));
-ipcMain.handle('prototype-review:set-label', (_event, payload) => setAssignmentsLabel(payload));
+ipcMain.handle('cluster-labeling:defaults', clusterLabelingDefaults);
+ipcMain.handle('cluster-labeling:list-runs', (_event, payload) => listClusterRuns(payload));
+ipcMain.handle('cluster-labeling:list-clusters', (_event, payload) => listClusters(payload));
+ipcMain.handle('cluster-labeling:get-cluster-members', (_event, payload) => getClusterMembers(payload));
+ipcMain.handle('cluster-labeling:get-box-image', (_event, payload) => getBoxImage(payload));
+ipcMain.handle('cluster-labeling:list-sessions', (_event, payload) => listSessions(payload));
+ipcMain.handle('cluster-labeling:load-session', (_event, payload) => loadSession(payload));
+ipcMain.handle('cluster-labeling:save-session', (_event, payload) => saveSession(payload));
+ipcMain.handle('cluster-labeling:create-session', (_event, payload) => createSession(payload));
+ipcMain.handle('cluster-labeling:delete-session', (_event, payload) => deleteSession(payload));
 
-ipcMain.handle('prototype-review:list-versions', (_event, payload) => listVersions(payload));
-ipcMain.handle('prototype-review:get-version-detail', (_event, payload) => getVersionDetail(payload));
-ipcMain.handle('prototype-review:get-candidates', (_event, payload) => getCandidates(payload));
-ipcMain.handle('prototype-review:create-version', (_event, payload) => {
-  if (sessions.size >= MAX_SUBPROCESS_SESSIONS) {
-    return { error: `Too many subprocess sessions running (${MAX_SUBPROCESS_SESSIONS} max)` };
-  }
-  const result = createVersion(payload);
-  if (result.error) return result;
-  // Spawn Python subprocess
-  const sessionId = `pv-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const python = workflowPython(payload);
-  const scriptPath = path.join(repoRoot, 'semi-labeling', 'step5_prototype_review', 'run_prototype_review.py');
-  const child = spawn(python, [scriptPath, ...result.args], { cwd: repoRoot, env: pythonEnv() });
-  sessions.set(sessionId, child);
-  const send = (type, data) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      window.webContents.send('prototype-review:job-event', { sessionId, type, data: String(data) });
-    }
-  };
-  child.stdout.on('data', (d) => send('stdout', d));
-  child.stderr.on('data', (d) => send('stderr', d));
-  child.on('error', (error) => { sessions.delete(sessionId); send('stderr', error.message); send('closed', '1'); });
-  child.on('close', (code) => { sessions.delete(sessionId); send('closed', String(code)); });
-  return { sessionId };
-});
-ipcMain.handle('prototype-review:set-version-active', (_event, payload) => setVersionActive(payload));
-ipcMain.handle('prototype-review:archive-version', (_event, payload) => archiveVersion(payload));
-ipcMain.handle('prototype-review:unarchive-version', (_event, payload) => unarchiveVersion(payload));
-ipcMain.handle('prototype-review:rename-version', (_event, payload) => renameVersion(payload));
+ipcMain.handle('classifier-results:defaults', classifierResultsDefaults);
+ipcMain.handle('classifier-results:list-runs', (_event, payload) => listClassifierRuns(payload));
+ipcMain.handle('classifier-results:get-apply', (_event, payload) => getApplyRun(payload));
+ipcMain.handle('classifier-results:get-training', (_event, payload) => getTrainingRun(payload));
+
+ipcMain.handle('label-review:defaults', labelReviewDefaults);
+ipcMain.handle('label-review:list-runs', (_event, payload) => listSubclusterRuns(payload));
+ipcMain.handle('label-review:list-subclusters', (_event, payload) => listSubclustersByClass(payload));
+ipcMain.handle('label-review:get-subcluster-members', (_event, payload) => getSubclusterMembers(payload));
+ipcMain.handle('label-review:list-suspect-runs', (_event, payload) => listSuspectRuns(payload));
+ipcMain.handle('label-review:list-suspect-clusters', (_event, payload) => listSuspectClusters(payload));
+ipcMain.handle('label-review:get-suspect-cluster-members', (_event, payload) => getSuspectClusterMembers(payload));
+
+ipcMain.handle('final-review:defaults', finalReviewDefaults);
+ipcMain.handle('final-review:list-csvs', (_event, payload) => listFinalCsvs(payload));
+ipcMain.handle('final-review:list-images', (_event, payload) => listFinalImages(payload));
+ipcMain.handle('final-review:get-image-boxes', (_event, payload) => getFinalImageBoxes(payload));
+ipcMain.handle('final-review:export-coco', (_event, payload) => exportFinalToCoco(payload));
+ipcMain.handle('label-review:list-sessions', (_event, payload) => listLabelReviewSessions(payload));
+ipcMain.handle('label-review:load-session', (_event, payload) => loadLabelReviewSession(payload));
+ipcMain.handle('label-review:save-session', (_event, payload) => saveLabelReviewSession(payload));
+ipcMain.handle('label-review:create-session', (_event, payload) => createLabelReviewSession(payload));
+ipcMain.handle('label-review:delete-session', (_event, payload) => deleteLabelReviewSession(payload));
 
 
 ipcMain.handle('dialog:browse-path', async (_event, mode) => {

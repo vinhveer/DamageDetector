@@ -71,6 +71,16 @@ def _resolve_paths(root: Path, value: Any) -> tuple[Path, ...]:
     return tuple(path for item in values if (path := _resolve_path(root, item)) is not None)
 
 
+def _guess_coco_image_dir(root: Path, split_name: str) -> Path:
+    split_dir = root / "images" / split_name
+    if split_dir.is_dir():
+        return split_dir
+    image_dir = root / "images"
+    if image_dir.is_dir():
+        return image_dir
+    return root
+
+
 def _guess_label_dir(image_dir: Path) -> Path | None:
     if image_dir.name == "images":
         return image_dir.parent / "labels"
@@ -83,7 +93,8 @@ def _build_split(name: str, root: Path, data: dict[str, Any]) -> StableDinoSplit
         return None
     if len(split_paths) == 1 and split_paths[0].suffix.lower() == ".json":
         annotation_file = split_paths[0]
-        return StableDinoSplitConfig(name=name, image_dirs=(root,), label_dirs=(None,), annotation_file=annotation_file)
+        image_dir = _guess_coco_image_dir(root, name)
+        return StableDinoSplitConfig(name=name, image_dirs=(image_dir,), label_dirs=(None,), annotation_file=annotation_file)
 
     annotation_files = [path for path in split_paths if path.suffix.lower() == ".json"]
     if annotation_files:
@@ -357,6 +368,7 @@ def build_stable_dino_overrides(
         string_override("dataloader.evaluator.output_dir", str(output_dir)),
         f"dataloader.train.total_batch_size={int(batch_size)}",
         f"dataloader.train.num_workers={int(workers)}",
+        f"dataloader.test.num_workers={int(workers)}",
         string_override("train.output_dir", str(output_dir)),
         string_override("train.device", str(device)),
         string_override("model.device", str(device)),

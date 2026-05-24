@@ -83,6 +83,7 @@ setup(
             "damage-grounding-dino-image=object_detection.grounding_dino.image:main",
             "damage-grounding-dino-folder=object_detection.grounding_dino.folder:main",
             "damage-scan=object_detection.damage_scan.cli:main",
+            "damage-semi-train=object_detection.semi_training.cli:main",
             "damage-stable-dino-train=object_detection.stable_dino.train:main",
             "damage-stable-dino-infer=object_detection.stable_dino.Inference:main",
             "damage-unet=segmentation.unet.cli:main",

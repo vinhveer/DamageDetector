@@ -13,6 +13,7 @@ To add more complicated training logic, you can easily add other configs
 in the config file and implement a new train_net.py to handle them.
 """
 from collections import OrderedDict
+import json
 import logging
 import pickle
 import os
@@ -269,7 +270,31 @@ def do_test(cfg, model):
             print_csv_format(ret_wnms)
             ret.update(ret_wnms)
 
+        if comm.is_main_process():
+            output_dir = str(cfg.train.get("output_dir", "") or "")
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                with open(os.path.join(output_dir, "eval_metrics.json"), "w", encoding="utf-8") as handle:
+                    json.dump(_to_jsonable(ret), handle, ensure_ascii=False, indent=2)
+
         return ret
+
+
+def _to_jsonable(value):
+    if isinstance(value, OrderedDict):
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
 
 
 def _build_best_checkpointer_hook(cfg, checkpointer):

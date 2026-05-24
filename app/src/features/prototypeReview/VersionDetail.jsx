@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { IconChevronLeft, IconStar, IconPlus } from '@tabler/icons-react';
 import { Button, EmptyState, ErrorMessage, IconButton, SelectControl } from '../../components/ui/index.js';
-import PageHeader from '../resultViewer/components/PageHeader.jsx';
+import PageHeader from '../shared/PageHeader.jsx';
 import { cn } from '../../components/ui/cn.js';
-import { formatFloat, formatNumber, shortId } from '../resultViewer/utils.js';
+import { formatFloat, formatNumber, shortId } from '../shared/viewerUtils.js';
 
 const BUCKETS = [
   { value: 'all', label: 'All' },

@@ -1,14 +1,19 @@
-import { Component, Suspense, lazy, useEffect } from 'react';
+import { Component, Suspense, lazy, useEffect, useState } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import {
+  IconBrain,
+  IconChecklist,
+  IconChevronRight,
+  IconFlag,
   IconGitBranch,
+  IconCirclesRelation,
+  IconLayoutGrid,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
-  IconPhotoSearch,
   IconRoute,
   IconScissors,
   IconSettings,
-  IconTargetArrow
+  IconStack2,
 } from '@tabler/icons-react';
 import { useDispatch, useSelector } from 'react-redux';
 import {
@@ -21,23 +26,42 @@ import { IconButton } from './components/ui/index.js';
 import { cn } from './components/ui/cn.js';
 
 const WorkflowsTab = lazy(() => import('./features/workflows/components/WorkflowsTab.jsx'));
-const ResultViewer = lazy(() => import('./features/resultViewer/ResultViewer.jsx'));
-const PrototypeReview = lazy(() => import('./features/prototypeReview/PrototypeReview.jsx'));
+const DedupGroups = lazy(() => import('./features/dedupGroups/DedupGroups.jsx'));
 const SegmentTab = lazy(() => import('./features/segment/SegmentTab.jsx'));
 const InspectionWizard = lazy(() => import('./features/inspectionWizard/InspectionWizard.jsx'));
+const ClusterLabeling = lazy(() => import('./features/clusterLabeling/ClusterLabeling.jsx'));
+const ClassifierResults = lazy(() => import('./features/classifierResults/ClassifierResults.jsx'));
+const LabelReview = lazy(() => import('./features/labelReview/LabelReview.jsx'));
+const FinalReview = lazy(() => import('./features/finalReview/FinalReview.jsx'));
 const SettingsPage = lazy(() => import('./features/settings/SettingsPage.jsx'));
 
+const SEMI_LABELING_STEPS = [
+  { label: 'Step 4 · Dedup',      value: 'dedupGroups',       icon: IconCirclesRelation },
+  { label: 'Step 5 · Cluster',    value: 'clusterLabeling',   icon: IconLayoutGrid       },
+  { label: 'Step 6 · Classifier', value: 'classifierResults', icon: IconBrain            },
+  { label: 'Step 7 · Review',     value: 'labelReview',       icon: IconChecklist        },
+  { label: 'Step 8 · Final',      value: 'finalReview',       icon: IconFlag             },
+];
+
 const NAV_MAIN = [
-  { label: 'Workflows',        value: 'workflows',      icon: IconGitBranch    },
-  { label: 'Image Viewer',     value: 'resultViewer',   icon: IconPhotoSearch  },
-  { label: 'Prototype Review', value: 'prototypeReview',icon: IconTargetArrow  },
-  { label: 'Segment',          value: 'segment',        icon: IconScissors     },
-  { label: 'Inspection',       value: 'inspection',     icon: IconRoute        },
+  { type: 'group', label: 'Semi Labeling', value: 'semiLabeling', icon: IconStack2, children: SEMI_LABELING_STEPS },
+  { label: 'Workflows',  value: 'workflows',  icon: IconGitBranch },
+  { label: 'Segment',    value: 'segment',    icon: IconScissors },
+  { label: 'Inspection', value: 'inspection', icon: IconRoute    },
 ];
 
 const NAV_BOTTOM = [
   { label: 'Settings', value: 'settings', icon: IconSettings },
 ];
+
+const ALL_NAV_ITEMS = (() => {
+  const items = [];
+  for (const it of [...NAV_MAIN, ...NAV_BOTTOM]) {
+    if (it.type === 'group') items.push(...it.children);
+    else items.push(it);
+  }
+  return items;
+})();
 
 function NavItem({ item, isActive, sidebarOpen, onClick }) {
   const Icon = item.icon;
@@ -69,6 +93,84 @@ function NavItem({ item, isActive, sidebarOpen, onClick }) {
         </Tooltip.Content>
       </Tooltip.Portal>
     </Tooltip.Root>
+  );
+}
+
+function NavGroup({ item, isExpanded, sidebarOpen, selectedTab, onToggle, onSelectChild }) {
+  const Icon = item.icon;
+  const hasActiveChild = item.children.some((c) => c.value === selectedTab);
+
+  if (!sidebarOpen) {
+    const btn = (
+      <button
+        type="button"
+        onClick={onToggle}
+        className={cn(
+          'flex h-8 w-full items-center justify-center rounded-[5px] text-[13px] font-medium',
+          hasActiveChild
+            ? 'bg-[var(--active)] text-[var(--text)]'
+            : 'text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text)]'
+        )}
+      >
+        <Icon size={16} className="shrink-0" />
+      </button>
+    );
+    return (
+      <Tooltip.Root>
+        <Tooltip.Trigger asChild>{btn}</Tooltip.Trigger>
+        <Tooltip.Portal>
+          <Tooltip.Content className="rd-tooltip-content" side="right" sideOffset={8}>
+            {item.label} (mở sidebar để xem các step)
+          </Tooltip.Content>
+        </Tooltip.Portal>
+      </Tooltip.Root>
+    );
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={onToggle}
+        className={cn(
+          'flex h-8 w-full items-center gap-2.5 rounded-[5px] px-2.5 text-[13px] font-medium',
+          hasActiveChild
+            ? 'text-[var(--text)]'
+            : 'text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text)]'
+        )}
+      >
+        <Icon size={16} className="shrink-0" />
+        <span className="flex-1 truncate text-left">{item.label}</span>
+        <IconChevronRight
+          size={14}
+          className={cn('shrink-0 transition-transform duration-150', isExpanded && 'rotate-90')}
+        />
+      </button>
+      {isExpanded && (
+        <div className="mt-0.5 ml-3 flex flex-col gap-0.5 border-l border-[var(--border-muted)] pl-2">
+          {item.children.map((child) => {
+            const ChildIcon = child.icon;
+            const isActive = selectedTab === child.value;
+            return (
+              <button
+                key={child.value}
+                type="button"
+                onClick={() => onSelectChild(child.value)}
+                className={cn(
+                  'flex h-7 w-full items-center gap-2 rounded-[5px] px-2 text-[12px]',
+                  isActive
+                    ? 'bg-[var(--active)] text-[var(--text)]'
+                    : 'text-[var(--text-muted)] hover:bg-[var(--hover)] hover:text-[var(--text)]'
+                )}
+              >
+                <ChildIcon size={14} className="shrink-0" />
+                <span className="truncate">{child.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -118,7 +220,23 @@ export default function App() {
   const dispatch = useDispatch();
   const selectedTab  = useSelector((state) => state.workflows.selectedTab);
   const sidebarOpen  = useSelector((state) => state.workflows.sidebarOpen);
-  const currentTitle = [...NAV_MAIN, ...NAV_BOTTOM].find((i) => i.value === selectedTab)?.label ?? 'Damage Detector';
+  const currentTitle = ALL_NAV_ITEMS.find((i) => i.value === selectedTab)?.label ?? 'Damage Detector';
+
+  const isSemiLabelingChild = SEMI_LABELING_STEPS.some((s) => s.value === selectedTab);
+  const [semiLabelingExpanded, setSemiLabelingExpanded] = useState(() => {
+    try { return localStorage.getItem('semi-labeling-expanded') !== 'false'; }
+    catch { return true; }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem('semi-labeling-expanded', String(semiLabelingExpanded)); }
+    catch { /* ignore */ }
+  }, [semiLabelingExpanded]);
+
+  // Auto-expand the group when navigating to one of its children (e.g. via state restore)
+  useEffect(() => {
+    if (isSemiLabelingChild && !semiLabelingExpanded) setSemiLabelingExpanded(true);
+  }, [isSemiLabelingChild, semiLabelingExpanded]);
 
   useEffect(() => {
     dispatch(fetchWorkflows());
@@ -160,15 +278,30 @@ export default function App() {
             )}
           >
             <div className="flex flex-col gap-0.5 p-2">
-              {NAV_MAIN.map((item) => (
-                <NavItem
-                  key={item.value}
-                  item={item}
-                  isActive={selectedTab === item.value}
-                  sidebarOpen={sidebarOpen}
-                  onClick={() => dispatch(setSelectedTab(item.value))}
-                />
-              ))}
+              {NAV_MAIN.map((item) => {
+                if (item.type === 'group') {
+                  return (
+                    <NavGroup
+                      key={item.value}
+                      item={item}
+                      isExpanded={semiLabelingExpanded}
+                      sidebarOpen={sidebarOpen}
+                      selectedTab={selectedTab}
+                      onToggle={() => setSemiLabelingExpanded((v) => !v)}
+                      onSelectChild={(v) => dispatch(setSelectedTab(v))}
+                    />
+                  );
+                }
+                return (
+                  <NavItem
+                    key={item.value}
+                    item={item}
+                    isActive={selectedTab === item.value}
+                    sidebarOpen={sidebarOpen}
+                    onClick={() => dispatch(setSelectedTab(item.value))}
+                  />
+                );
+              })}
             </div>
 
             <div className="mt-auto flex flex-col gap-0.5 border-t border-[var(--border-muted)] p-2">
@@ -189,8 +322,11 @@ export default function App() {
             <TabErrorBoundary tabKey={selectedTab}>
               <Suspense fallback={<TabFallback />}>
                 {selectedTab === 'workflows'      && <WorkflowsTab />}
-                {selectedTab === 'resultViewer'   && <ResultViewer />}
-                {selectedTab === 'prototypeReview'&& <PrototypeReview />}
+                {selectedTab === 'dedupGroups'    && <DedupGroups />}
+                {selectedTab === 'clusterLabeling' && <ClusterLabeling />}
+                {selectedTab === 'classifierResults' && <ClassifierResults />}
+                {selectedTab === 'labelReview'    && <LabelReview />}
+                {selectedTab === 'finalReview'    && <FinalReview />}
                 {selectedTab === 'segment'        && <SegmentTab />}
                 {selectedTab === 'inspection'     && <InspectionWizard />}
                 {selectedTab === 'settings'       && <SettingsPage />}

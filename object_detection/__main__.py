@@ -10,6 +10,7 @@ def main() -> int:
         "  - python -m object_detection.grounding_dino.folder\n"
         "  - python -m object_detection.stable_dino.train\n"
         "  - python -m object_detection.stable_dino.Inference\n"
+        "  - python -m object_detection.semi_training\n"
         "  - python -m object_detection.yolo train\n"
         "  - python -m object_detection.yolo inference"
     )

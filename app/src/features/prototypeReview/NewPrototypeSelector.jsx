@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { IconChevronLeft, IconCheck, IconAlertTriangle, IconX } from '@tabler/icons-react';
 import { Button, EmptyState, ErrorMessage, IconButton, TextInput } from '../../components/ui/index.js';
-import PageHeader from '../resultViewer/components/PageHeader.jsx';
+import PageHeader from '../shared/PageHeader.jsx';
 import { cn } from '../../components/ui/cn.js';
-import { formatFloat } from '../resultViewer/utils.js';
+import { formatFloat } from '../shared/viewerUtils.js';
 import { imageLoaderPool } from '../../utils/imageLoaderPool.js';
 import FilterBar from './FilterBar.jsx';
 
@@ -516,6 +516,7 @@ export default function NewPrototypeSelector({ paths, parentReviewRunId, onBack,
         set_active: setActive
       });
       if (result.error) { setError(result.error); setSubmitting(false); return; }
+      if (result.selection_json_path) setJobLog(`selection_json=${result.selection_json_path}\n`);
       setJobSessionId(result.sessionId);
     } catch (e) {
       setError(String(e.message || e));

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { IconRefresh, IconStar, IconStarFilled, IconDots, IconArchive, IconPencil, IconCopy } from '@tabler/icons-react';
 import { Button, EmptyState, ErrorMessage, SelectControl } from '../../components/ui/index.js';
-import PageHeader from '../resultViewer/components/PageHeader.jsx';
+import PageHeader from '../shared/PageHeader.jsx';
 import { cn } from '../../components/ui/cn.js';
-import { shortId } from '../resultViewer/utils.js';
+import { shortId } from '../shared/viewerUtils.js';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime.js';
 

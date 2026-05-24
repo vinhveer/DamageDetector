@@ -195,7 +195,7 @@ class StableDINOCriterion(TwoStageCriterion):
             iou = box_iou(box_cxcywh_to_xyxy(src_boxes), box_cxcywh_to_xyxy(tgt_bbox))[0].diag() # (b*num_queries, ngt)
             _s = out_prob
             _u = torch.zeros_like(_s)
-            _u[idx[0], idx[1], tgt_labels] = iou
+            _u[idx[0], idx[1], tgt_labels] = iou.to(_u.dtype)
             _t = _s.pow(self.ta_alpha) * _u.pow(self.ta_beta) 
             # (b, num_queries, num_classes) 
             # p**alpha * u**beta if pos, 0 if neg
@@ -232,6 +232,8 @@ class StableDINOCriterion(TwoStageCriterion):
                         max_iou = all_iou[i, :, cum:cum+ngt_in_batch[i]].max()
                 # normalizer each item with the max iou in each batch
                 normalizer = max((max_iou / (_t[i].max() + 1e-8)).detach(), 1)
+                if torch.is_tensor(normalizer):
+                    normalizer = normalizer.to(_t.dtype)
                 norm_t[i] = _t[i] * normalizer
 
                 cum += ngt_in_batch[i]
