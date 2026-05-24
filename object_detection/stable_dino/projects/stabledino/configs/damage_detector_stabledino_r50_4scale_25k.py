@@ -11,7 +11,7 @@ from detectron2.solver import WarmupParamScheduler
 
 from object_detection.stable_dino.detrex_compat import get_detrex_config
 
-from .data.coco_instance_seg import dataloader
+from .data.coco_detection import dataloader
 from .models.stabledino_r50 import model
 
 optimizer = get_detrex_config("common/optim.py").AdamW

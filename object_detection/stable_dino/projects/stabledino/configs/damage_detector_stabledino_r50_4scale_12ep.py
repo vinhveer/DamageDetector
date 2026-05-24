@@ -1,6 +1,6 @@
 from object_detection.stable_dino.detrex_compat import get_detrex_config
 
-from .data.coco_instance_seg import dataloader
+from .data.coco_detection import dataloader
 from .models.stabledino_r50 import model
 
 # Optim/schedule/train boilerplate from detrex.
