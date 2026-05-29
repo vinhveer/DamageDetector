@@ -1,0 +1,230 @@
+from __future__ import annotations
+
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable
+
+
+@dataclass(frozen=True)
+class SemanticRunMetadata:
+    semantic_run_id: str
+    created_at_utc: str
+    source_run_id: str
+    source_stage: str
+    model_name: str
+    pretrained: str
+    device: str
+    prompt_config_json: str
+    options_json: str
+
+
+@dataclass(frozen=True)
+class SourceDetection:
+    result_id: int
+    source_detection_id: int
+    image_id: int
+    image_rel_path: str
+    image_path: str
+    source_input_dir: str
+    image_width: int
+    image_height: int
+    prompt_key: str
+    detector_label: str
+    detector_score: float
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    crop_path: str
+    initial_label: str
+    initial_probability: float
+    scores: dict[str, float] = field(default_factory=dict)
+
+
+def connect_readonly(db_path: Path) -> sqlite3.Connection:
+    uri = f"file:{Path(db_path).expanduser().resolve()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=60.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=60000")
+    return conn
+
+
+def resolve_semantic_run_id(conn: sqlite3.Connection, requested: str) -> str:
+    raw = str(requested or "latest").strip()
+    if raw and raw.lower() != "latest":
+        row = conn.execute(
+            "SELECT semantic_run_id FROM openclip_semantic_runs WHERE semantic_run_id = ?",
+            (raw,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Semantic run not found: {raw}")
+        return raw
+    row = conn.execute(
+        "SELECT semantic_run_id FROM openclip_semantic_runs ORDER BY created_at_utc DESC, semantic_run_id DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("No semantic run found in source DB.")
+    return str(row["semantic_run_id"])
+
+
+def read_semantic_run_metadata(conn: sqlite3.Connection, semantic_run_id: str) -> SemanticRunMetadata:
+    row = conn.execute(
+        """
+        SELECT semantic_run_id, created_at_utc, source_run_id, source_stage,
+               model_name, pretrained, device, prompt_config_json, options_json
+        FROM openclip_semantic_runs
+        WHERE semantic_run_id = ?
+        """,
+        (semantic_run_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"Semantic run metadata not found: {semantic_run_id}")
+    return SemanticRunMetadata(
+        semantic_run_id=str(row["semantic_run_id"]),
+        created_at_utc=str(row["created_at_utc"]),
+        source_run_id=str(row["source_run_id"]),
+        source_stage=str(row["source_stage"]),
+        model_name=str(row["model_name"]),
+        pretrained=str(row["pretrained"]),
+        device=str(row["device"]),
+        prompt_config_json=str(row["prompt_config_json"]),
+        options_json=str(row["options_json"]),
+    )
+
+
+def resolve_dedup_run_id(conn: sqlite3.Connection, requested: str) -> str:
+    raw = str(requested or "latest").strip()
+    if raw and raw.lower() != "latest":
+        row = conn.execute("SELECT dedup_run_id FROM dedup_runs WHERE dedup_run_id = ?", (raw,)).fetchone()
+        if row is None:
+            raise RuntimeError(f"Dedup run not found: {raw}")
+        return raw
+    row = conn.execute(
+        "SELECT dedup_run_id FROM dedup_runs ORDER BY created_at_utc DESC, dedup_run_id DESC LIMIT 1"
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("No dedup run found in dedup DB.")
+    return str(row["dedup_run_id"])
+
+
+def read_kept_result_ids(conn: sqlite3.Connection, *, dedup_run_id: str) -> set[int]:
+    rows = conn.execute(
+        "SELECT result_id FROM dedup_results WHERE dedup_run_id = ? AND keep = 1 ORDER BY result_id",
+        (dedup_run_id,),
+    ).fetchall()
+    return {int(row["result_id"]) for row in rows}
+
+
+def read_source_detections(
+    conn: sqlite3.Connection,
+    *,
+    semantic_run_id: str,
+    labels: Iterable[str] | None = None,
+    kept_result_ids: set[int] | None = None,
+    limit: int = 0,
+) -> list[SourceDetection]:
+    label_list = [str(item).strip() for item in (labels or []) if str(item).strip()]
+    clauses = ["res.semantic_run_id = ?", "res.status = 'ok'"]
+    params: list[Any] = [semantic_run_id]
+    if label_list:
+        placeholders = ", ".join("?" for _ in label_list)
+        clauses.append(f"res.predicted_label IN ({placeholders})")
+        params.extend(label_list)
+    if kept_result_ids is not None:
+        if not kept_result_ids:
+            return []
+        sorted_ids = sorted(int(item) for item in kept_result_ids)
+        placeholders = ", ".join("?" for _ in sorted_ids)
+        clauses.append(f"res.result_id IN ({placeholders})")
+        params.extend(sorted_ids)
+
+    sql = f"""
+        SELECT res.result_id, res.source_detection_id, res.image_id, res.image_rel_path, res.image_path,
+               src.input_dir AS source_input_dir, img.width AS image_width, img.height AS image_height,
+               res.prompt_key, res.detector_label, res.detector_score,
+               res.x1, res.y1, res.x2, res.y2, res.crop_path,
+               res.predicted_label AS initial_label,
+               res.predicted_probability AS initial_probability
+        FROM openclip_semantic_results res
+        JOIN images img ON img.image_id = res.image_id
+        JOIN runs src ON src.run_id = res.source_run_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY res.result_id
+    """
+    if int(limit) > 0:
+        sql = f"{sql} LIMIT {int(limit)}"
+    rows = conn.execute(sql, params).fetchall()
+    detections = [
+        SourceDetection(
+            result_id=int(row["result_id"]),
+            source_detection_id=int(row["source_detection_id"]),
+            image_id=int(row["image_id"]),
+            image_rel_path=str(row["image_rel_path"]),
+            image_path=str(row["image_path"]),
+            source_input_dir=str(row["source_input_dir"]),
+            image_width=int(row["image_width"]),
+            image_height=int(row["image_height"]),
+            prompt_key=str(row["prompt_key"]),
+            detector_label=str(row["detector_label"]),
+            detector_score=float(row["detector_score"]),
+            x1=float(row["x1"]),
+            y1=float(row["y1"]),
+            x2=float(row["x2"]),
+            y2=float(row["y2"]),
+            crop_path=str(row["crop_path"]),
+            initial_label=str(row["initial_label"]),
+            initial_probability=float(row["initial_probability"]),
+        )
+        for row in rows
+    ]
+    if not detections:
+        return []
+
+    scores_by_result = read_scores(conn, [item.result_id for item in detections])
+    return [
+        SourceDetection(
+            result_id=item.result_id,
+            source_detection_id=item.source_detection_id,
+            image_id=item.image_id,
+            image_rel_path=item.image_rel_path,
+            image_path=item.image_path,
+            source_input_dir=item.source_input_dir,
+            image_width=item.image_width,
+            image_height=item.image_height,
+            prompt_key=item.prompt_key,
+            detector_label=item.detector_label,
+            detector_score=item.detector_score,
+            x1=item.x1,
+            y1=item.y1,
+            x2=item.x2,
+            y2=item.y2,
+            crop_path=item.crop_path,
+            initial_label=item.initial_label,
+            initial_probability=item.initial_probability,
+            scores=scores_by_result.get(item.result_id, {}),
+        )
+        for item in detections
+    ]
+
+
+def read_scores(conn: sqlite3.Connection, result_ids: list[int]) -> dict[int, dict[str, float]]:
+    if not result_ids:
+        return {}
+    scores: dict[int, dict[str, float]] = {int(item): {} for item in result_ids}
+    chunk_size = 900
+    for offset in range(0, len(result_ids), chunk_size):
+        chunk = [int(item) for item in result_ids[offset : offset + chunk_size]]
+        placeholders = ", ".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT result_id, label, probability
+            FROM openclip_semantic_scores
+            WHERE result_id IN ({placeholders})
+            ORDER BY result_id, probability DESC
+            """,
+            chunk,
+        ).fetchall()
+        for row in rows:
+            scores.setdefault(int(row["result_id"]), {})[str(row["label"])] = float(row["probability"])
+    return scores

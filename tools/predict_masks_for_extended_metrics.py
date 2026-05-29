@@ -179,7 +179,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-root", required=True)
     parser.add_argument("--eval-root", required=True)
-    parser.add_argument("--dataset-root", required=True, help="BestDatasets/ root")
+    parser.add_argument("--dataset-root", required=True, help="data/datasets/ root")
     parser.add_argument("--sam-ckpt", default=None)
     parser.add_argument("--models", nargs="+", default=list(MODEL_TYPES.keys()))
     parser.add_argument("--datasets", nargs="+", default=["crack500", "volker", "deepcrack"])
@@ -190,7 +190,7 @@ def main():
     eval_root = Path(args.eval_root)
     model_root = Path(args.model_root)
     ds_root = Path(args.dataset_root)
-    sam_ckpt = args.sam_ckpt or str(ds_root.parent / "results_v2/sam-finetune-lora-hq/sam_vit_b_01ec64.pth")
+    sam_ckpt = args.sam_ckpt or str(ds_root.parent.parent / "training_runs/v2/sam-finetune-lora-hq/sam_vit_b_01ec64.pth")
 
     for model in args.models:
         mtype = MODEL_TYPES[model]

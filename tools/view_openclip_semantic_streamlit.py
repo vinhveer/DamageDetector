@@ -72,7 +72,7 @@ def default_db_path() -> Path:
 
 
 def default_image_root() -> Path:
-    return repo_root().parent / "HinhAnh"
+    return repo_root().parent / "data" / "HinhAnh"
 
 
 def connect_readonly(db_path: str | Path) -> sqlite3.Connection:

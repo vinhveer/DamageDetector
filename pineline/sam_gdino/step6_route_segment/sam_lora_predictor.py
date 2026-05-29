@@ -1,6 +1,6 @@
 """SAM-LoRA per-detection predictor.
 
-The SAM-LoRA checkpoint in results_v2/sam-finetune-lora-hq was trained with the
+The SAM-LoRA checkpoint in training_runs/v2/sam-finetune-lora-hq was trained with the
 tile-full-box pattern: each training tile is fed as the whole image and the box
 prompt is the tile's own bounds [0,0,W,H]. So at inference we must crop the
 detection box (with padding) and feed that crop as a tile via

@@ -37,7 +37,7 @@ from segmentation.sam.finetune.tiled_inference import (
 )
 
 
-DEFAULT_SAM_CKPT = "/Users/nguyenquangvinh/Desktop/Lab/results/sam_vit_b_01ec64.pth"
+DEFAULT_SAM_CKPT = "/Users/nguyenquangvinh/Desktop/Lab/training_runs/v1/sam_vit_b_01ec64.pth"
 
 
 @dataclass(frozen=True)

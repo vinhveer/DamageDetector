@@ -340,19 +340,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--src-root",
         type=Path,
-        default=Path("BestDatasets/crack500"),
+        default=Path("data/datasets/crack500"),
         help="Source Crack500 dataset root containing train/val/test with images/ and masks/.",
     )
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("BestDatasets/crack500_det"),
+        default=Path("data/datasets/crack500_det"),
         help="Output detection dataset directory.",
     )
     parser.add_argument(
         "--yaml",
         type=Path,
-        default=Path("BestDatasets/crack500_det/crack500_det.yaml"),
+        default=Path("data/datasets/crack500_det/crack500_det.yaml"),
         help="Output dataset manifest YAML path.",
     )
     parser.add_argument("--splits", nargs="*", default=["train", "val", "test"])

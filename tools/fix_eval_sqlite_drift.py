@@ -191,7 +191,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--eval-root",
-        default="/Users/nguyenquangvinh/Desktop/Lab/results/segmentation_post_kaggle/eval",
+        default="/Users/nguyenquangvinh/Desktop/Lab/training_runs/v1/segmentation_post_kaggle/eval",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()

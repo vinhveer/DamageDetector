@@ -27,7 +27,7 @@ def _pass_output_dir(root_output_dir: Path, group) -> Path:
 
 def main() -> int:
     config = SimpleNamespace(
-        input_dir="/Users/nguyenquangvinh/Desktop/Lab/HinhAnh",
+        input_dir="/Users/nguyenquangvinh/Desktop/Lab/data/HinhAnh",
         output_dir="/Users/nguyenquangvinh/Desktop/Lab/infer_results/semi-labeling",
         prompt_group=[],
         request_names="dino,groundingdino",

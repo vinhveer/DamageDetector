@@ -9,7 +9,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-EVAL_ROOT = Path("/Users/nguyenquangvinh/Desktop/Lab/results/segmentation_post_kaggle/eval")
+EVAL_ROOT = Path("/Users/nguyenquangvinh/Desktop/Lab/training_runs/v1/segmentation_post_kaggle/eval")
 THESIS_FIG = Path("/Users/nguyenquangvinh/Desktop/Lab/DoAnTotNghiep_NguyenQuangVinh_64132989/figures")
 
 MODELS = {

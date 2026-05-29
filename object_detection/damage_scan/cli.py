@@ -8,7 +8,7 @@ from .pipeline import DamageScanConfig, DamageScanPipeline
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run full-image crack/mold/spall GroundingDINO scan and store boxes in SQLite.")
-    parser.add_argument("--input-dir", type=Path, default=Path("../HinhAnh"))
+    parser.add_argument("--input-dir", type=Path, default=Path("../data/HinhAnh"))
     parser.add_argument("--db", type=Path, default=Path("semi-labeling/step1_gdino_labeling/damage_scan/damage_scan.sqlite3"))
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])

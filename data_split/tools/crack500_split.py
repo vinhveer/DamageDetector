@@ -8,8 +8,8 @@ from data_split.runner import run_split
 
 def main() -> None:
     config = SplitConfig(
-        input_root=Path("/Users/nguyenquangvinh/Desktop/Lab/RawDatasets/crack500"),
-        output_root=Path("/Users/nguyenquangvinh/Desktop/Lab/BestDatasets/crack500"),
+        input_root=Path("/Users/nguyenquangvinh/Desktop/Lab/OldWork/RawDatasets/crack500"),
+        output_root=Path("/Users/nguyenquangvinh/Desktop/Lab/data/datasets/crack500"),
         splits=(0.7, 0.15, 0.15),
         split_names=("train", "val", "test"),
         num_clusters=32,

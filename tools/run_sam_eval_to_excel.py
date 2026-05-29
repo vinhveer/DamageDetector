@@ -120,7 +120,7 @@ def _threshold_rows(dataset_label: str, payload: dict) -> list[dict]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run SAM finetune evaluation on multiple datasets and export Excel metrics.")
     parser.add_argument("--model-dir", required=True, help="Directory containing best_model.pth and inference_config.json")
-    parser.add_argument("--sam-ckpt", default="/Users/nguyenquangvinh/Desktop/Lab/results/sam_vit_b_01ec64.pth")
+    parser.add_argument("--sam-ckpt", default="/Users/nguyenquangvinh/Desktop/Lab/training_runs/v1/sam_vit_b_01ec64.pth")
     parser.add_argument("--output-root", default="/Users/nguyenquangvinh/Desktop/Lab/eval_outputs")
     parser.add_argument("--excel-path", default="/Users/nguyenquangvinh/Desktop/Lab/eval_outputs/sam_eval_metrics.xlsx")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])

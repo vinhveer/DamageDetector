@@ -65,7 +65,7 @@ def default_output_db() -> Path:
 
 
 def default_image_root() -> Path:
-    return LAB_ROOT / "HinhAnh"
+    return LAB_ROOT / "data" / "HinhAnh"
 
 
 def parse_labels(raw: str) -> list[str]:

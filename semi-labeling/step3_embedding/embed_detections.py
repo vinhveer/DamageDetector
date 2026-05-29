@@ -75,7 +75,7 @@ def default_source_db() -> Path:
 
 
 def default_image_root() -> Path:
-    return LAB_ROOT / "HinhAnh"
+    return LAB_ROOT / "data" / "HinhAnh"
 
 
 def default_output_db() -> Path:
@@ -209,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Embed Step 2 detections once with DINOv2 and persist vectors to SQLite.")
     parser.add_argument("--source-db", default=str(default_source_db()), help="Source Step 2 damage_scan.sqlite3.")
     parser.add_argument("--semantic-run-id", default="latest", help="Semantic run id, or latest.")
-    parser.add_argument("--image-root", default=str(default_image_root()), help="Image root override, usually /path/to/HinhAnh.")
+    parser.add_argument("--image-root", default=str(default_image_root()), help="Image root override, usually /path/to/data/HinhAnh.")
     parser.add_argument("--output-db", default=str(default_output_db()), help="Output embeddings SQLite path.")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME, help="DINOv2 HF model id or local model folder.")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])

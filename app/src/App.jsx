@@ -4,6 +4,7 @@ import {
   IconBrain,
   IconChecklist,
   IconChevronRight,
+  IconClipboardCheck,
   IconFlag,
   IconGitBranch,
   IconCirclesRelation,
@@ -33,6 +34,7 @@ const ClusterLabeling = lazy(() => import('./features/clusterLabeling/ClusterLab
 const ClassifierResults = lazy(() => import('./features/classifierResults/ClassifierResults.jsx'));
 const LabelReview = lazy(() => import('./features/labelReview/LabelReview.jsx'));
 const FinalReview = lazy(() => import('./features/finalReview/FinalReview.jsx'));
+const ReviewConsole = lazy(() => import('./features/reviewConsole/ReviewConsole.jsx'));
 const SettingsPage = lazy(() => import('./features/settings/SettingsPage.jsx'));
 
 const SEMI_LABELING_STEPS = [
@@ -41,6 +43,7 @@ const SEMI_LABELING_STEPS = [
   { label: 'Step 6 · Classifier', value: 'classifierResults', icon: IconBrain            },
   { label: 'Step 7 · Review',     value: 'labelReview',       icon: IconChecklist        },
   { label: 'Step 8 · Final',      value: 'finalReview',       icon: IconFlag             },
+  { label: 'Review Console',      value: 'reviewConsole',     icon: IconClipboardCheck   },
 ];
 
 const NAV_MAIN = [
@@ -327,6 +330,7 @@ export default function App() {
                 {selectedTab === 'classifierResults' && <ClassifierResults />}
                 {selectedTab === 'labelReview'    && <LabelReview />}
                 {selectedTab === 'finalReview'    && <FinalReview />}
+                {selectedTab === 'reviewConsole'  && <ReviewConsole />}
                 {selectedTab === 'segment'        && <SegmentTab />}
                 {selectedTab === 'inspection'     && <InspectionWizard />}
                 {selectedTab === 'settings'       && <SettingsPage />}

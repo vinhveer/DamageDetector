@@ -153,9 +153,9 @@ def write_v1_vs_v2(rows: list[dict], path: Path) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--eval-root",
-                    default="/Users/nguyenquangvinh/Desktop/Lab/results/segmentation_post_kaggle/eval")
+                    default="/Users/nguyenquangvinh/Desktop/Lab/training_runs/v1/segmentation_post_kaggle/eval")
     ap.add_argument("--tables-root",
-                    default="/Users/nguyenquangvinh/Desktop/Lab/results/segmentation_post_kaggle/tables")
+                    default="/Users/nguyenquangvinh/Desktop/Lab/training_runs/v1/segmentation_post_kaggle/tables")
     args = ap.parse_args()
 
     eval_root = Path(args.eval_root)

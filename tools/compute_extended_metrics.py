@@ -1,6 +1,6 @@
 """Compute extended metrics: BF@2px, HD95, Betti error, CL-F@2px, F2-score.
 
-Reads predicted masks from $EVAL_ROOT/<model>/<dataset>/masks/ and GT from BestDatasets.
+Reads predicted masks from $EVAL_ROOT/<model>/<dataset>/masks/ and GT from data/datasets/.
 Outputs image-level CSV and dataset summary CSV.
 """
 from __future__ import annotations
@@ -128,7 +128,7 @@ def _iter_gt_masks(dataset_root: Path) -> list[tuple[Path, str]]:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pred-root", required=True, help="EVAL_ROOT")
-    parser.add_argument("--gt-root", required=True, help="BestDatasets/")
+    parser.add_argument("--gt-root", required=True, help="data/datasets/")
     parser.add_argument("--models", nargs="+", required=True)
     parser.add_argument("--datasets", nargs="+", required=True)
     parser.add_argument("--metrics", nargs="+", default=["bf", "hd95", "betti", "cl_f", "f2"])

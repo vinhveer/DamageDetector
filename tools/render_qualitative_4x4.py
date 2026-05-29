@@ -21,7 +21,7 @@ import pandas as pd
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--eval-root", required=True)
-    parser.add_argument("--dataset-root", required=True, help="BestDatasets/crack500/test")
+    parser.add_argument("--dataset-root", required=True, help="data/datasets/crack500/test")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 

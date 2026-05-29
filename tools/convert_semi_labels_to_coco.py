@@ -29,8 +29,8 @@ from object_detection.dinov2.dinov2_prototypes import default_dinov2_embedding_c
 _WORKSPACE_ROOT = _REPO_ROOT.parent
 _DEFAULT_LABELS_CSV = _WORKSPACE_ROOT / "infer_results/semi-labeling/step7_label_review/final_labels_10f76adfeb234581.csv"
 _DEFAULT_SEMANTIC_DB = _WORKSPACE_ROOT / "infer_results/semi-labeling/step2_sematic/damage_scan.sqlite3"
-_DEFAULT_IMAGE_ROOT = _WORKSPACE_ROOT / "HinhAnh"
-_DEFAULT_OUTPUT_ROOT = _WORKSPACE_ROOT / "BestDatasets/semi_labeling_coco"
+_DEFAULT_IMAGE_ROOT = _WORKSPACE_ROOT / "data" / "HinhAnh"
+_DEFAULT_OUTPUT_ROOT = _WORKSPACE_ROOT / "data" / "datasets" / "semi_labeling_coco"
 
 
 @dataclass(frozen=True)

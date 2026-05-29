@@ -37,9 +37,9 @@ STEP6_MASKS_DIR = STEP6_DIR / "masks"
 STEP6_OVERLAY_DIR = STEP6_DIR / "overlays"
 STEP6_SUMMARY_CSV = STEP6_DIR / "summary.csv"
 
-DEFAULT_SAM_LORA_BASE_CHECKPOINT = LAB_ROOT / "results_v2" / "sam-finetune-lora-hq" / "sam_vit_b_01ec64.pth"
+DEFAULT_SAM_LORA_BASE_CHECKPOINT = LAB_ROOT / "training_runs" / "v2" / "sam-finetune-lora-hq" / "sam_vit_b_01ec64.pth"
 DEFAULT_SAM_LORA_DELTA = (
-    LAB_ROOT / "results_v2" / "sam-finetune-lora-hq" /
+    LAB_ROOT / "training_runs" / "v2" / "sam-finetune-lora-hq" /
     "outputs_sam_ablation_b2_lora_hq_refine_ddp" /
     "generic_768_pretrain_vit_b_30k_epo16_bs2_gbs4_lr0.0002_s3407_type_lora_stage_refine_r4_run_b2_lora_hq_refine_r4" /
     "best_model.pth"

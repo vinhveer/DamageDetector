@@ -51,6 +51,23 @@ import {
   getFinalImageBoxes,
   exportFinalToCoco,
 } from './final_review/index.js';
+import {
+  reviewConsoleDefaults,
+  listRuns as listReviewRuns,
+  getQueueCounts as getReviewQueueCounts,
+  listDisagreementItems,
+  getItemEvidence,
+  listPrototypeCandidates,
+  getCoreClusters,
+  listOutliers,
+  listRelabelBatches,
+  listSessions as listReviewSessions,
+  loadSession as loadReviewSession,
+  saveSession as saveReviewSession,
+  createSession as createReviewSession,
+  deleteSession as deleteReviewSession,
+  commitSession as commitReviewSession,
+} from './review_console/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -301,6 +318,22 @@ ipcMain.handle('label-review:load-session', (_event, payload) => loadLabelReview
 ipcMain.handle('label-review:save-session', (_event, payload) => saveLabelReviewSession(payload));
 ipcMain.handle('label-review:create-session', (_event, payload) => createLabelReviewSession(payload));
 ipcMain.handle('label-review:delete-session', (_event, payload) => deleteLabelReviewSession(payload));
+
+ipcMain.handle('review-console:defaults', reviewConsoleDefaults);
+ipcMain.handle('review-console:list-runs', (_event, payload) => listReviewRuns(payload));
+ipcMain.handle('review-console:queue-counts', (_event, payload) => getReviewQueueCounts(payload));
+ipcMain.handle('review-console:list-disagreement', (_event, payload) => listDisagreementItems(payload));
+ipcMain.handle('review-console:item-evidence', (_event, payload) => getItemEvidence(payload));
+ipcMain.handle('review-console:prototype-candidates', (_event, payload) => listPrototypeCandidates(payload));
+ipcMain.handle('review-console:core-clusters', (_event, payload) => getCoreClusters(payload));
+ipcMain.handle('review-console:outliers', (_event, payload) => listOutliers(payload));
+ipcMain.handle('review-console:relabel-batches', (_event, payload) => listRelabelBatches(payload));
+ipcMain.handle('review-console:list-sessions', (_event, payload) => listReviewSessions(payload));
+ipcMain.handle('review-console:load-session', (_event, payload) => loadReviewSession(payload));
+ipcMain.handle('review-console:save-session', (_event, payload) => saveReviewSession(payload));
+ipcMain.handle('review-console:create-session', (_event, payload) => createReviewSession(payload));
+ipcMain.handle('review-console:delete-session', (_event, payload) => deleteReviewSession(payload));
+ipcMain.handle('review-console:commit-session', (_event, payload) => commitReviewSession(payload));
 
 
 ipcMain.handle('dialog:browse-path', async (_event, mode) => {
