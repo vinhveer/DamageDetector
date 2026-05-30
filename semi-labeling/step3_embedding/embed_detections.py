@@ -31,15 +31,16 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 from embedder import DinoV2Embedder
 from output_store import (
-    bulk_insert_embeddings,
-    bulk_insert_skipped,
+    bulk_insert_view_embeddings,
+    bulk_insert_view_skipped,
     connect_output,
     connect_readonly,
-    embedded_result_ids,
-    ensure_schema,
+    embedded_view_keys,
+    encode_vector,
+    ensure_view_schema,
     insert_run_metadata,
     latest_matching_run,
-    skipped_result_ids,
+    skipped_view_keys,
     update_run_counts,
 )
 
@@ -199,6 +200,77 @@ def skip_reason(exc: Exception) -> str:
     return "decode_error"
 
 
+# --- C4: multi-view embedding (pure core) ------------------------------------
+
+VIEW_SPECS: tuple[tuple[str, float], ...] = (("tight", 0.0), ("context", 0.5))
+
+
+@dataclass(frozen=True)
+class SkipRecord:
+    result_id: int
+    view_name: str
+    reason: str
+
+
+def padded_crop_box(det: Any, img_w: int, img_h: int, padding_ratio: float) -> tuple[int, int, int, int] | None:
+    """Padded, image-clamped integer crop box. Returns None when the clamped crop has
+    width < 1 or height < 1 (Requirement 4.5)."""
+    w = max(0.0, float(det.x2) - float(det.x1))
+    h = max(0.0, float(det.y2) - float(det.y1))
+    pad_x = w * float(padding_ratio)
+    pad_y = h * float(padding_ratio)
+    x1 = max(0, int(math.floor(float(det.x1) - pad_x)))
+    y1 = max(0, int(math.floor(float(det.y1) - pad_y)))
+    x2 = min(int(img_w), int(math.ceil(float(det.x2) + pad_x)))
+    y2 = min(int(img_h), int(math.ceil(float(det.y2) + pad_y)))
+    if x2 - x1 < 1 or y2 - y1 < 1:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def embed_detection_multiview(
+    det: Any,
+    image_root: Path | None,
+    embedder: Any,
+    view_specs: tuple[tuple[str, float], ...] = VIEW_SPECS,
+) -> tuple[dict[str, np.ndarray], list[SkipRecord]]:
+    """Embed every valid configured view of one detection in a single batch.
+
+    Returns ({view_name: vector}, [SkipRecord]). Invalid crops are skipped per view; a
+    whole-image load/decode error skips every configured view with that reason.
+    """
+    try:
+        image_path = resolve_image_path(det, image_root)
+        if not image_path.is_file():
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        with Image.open(image_path) as image:
+            rgb = image.convert("RGB")
+            rgb.load()
+    except Exception as exc:  # noqa: BLE001 - per-detection isolation
+        reason = skip_reason(exc)
+        return {}, [SkipRecord(int(det.result_id), name, reason) for name, _ in view_specs]
+
+    img_w, img_h = rgb.size
+    valid_views: list[str] = []
+    crops: list[Image.Image] = []
+    skips: list[SkipRecord] = []
+    for view_name, pad in view_specs:
+        box = padded_crop_box(det, img_w, img_h, pad)
+        if box is None:
+            skips.append(SkipRecord(int(det.result_id), view_name, "invalid_bbox"))
+            continue
+        valid_views.append(view_name)
+        crops.append(rgb.crop(box))
+
+    vectors: dict[str, np.ndarray] = {}
+    if crops:
+        embeddings = embedder.embed(crops, batch_size=len(crops))
+        for view_name, emb in zip(valid_views, embeddings, strict=True):
+            vectors[view_name] = np.asarray(emb, dtype=np.float32)
+    rgb.close()
+    return vectors, skips
+
+
 def chunks(items: list[SourceDetection], size: int) -> Iterable[list[SourceDetection]]:
     effective_size = max(1, int(size))
     for start in range(0, len(items), effective_size):
@@ -266,11 +338,12 @@ def main(argv: list[str] | None = None) -> int:
         "log_every": int(args.log_every),
         "resume": bool(args.resume),
         "force": bool(args.force),
+        "view_specs": [[name, pad] for name, pad in VIEW_SPECS],
     }
 
     out_conn = connect_output(output_db)
     try:
-        ensure_schema(out_conn)
+        ensure_view_schema(out_conn)
         existing = latest_matching_run(out_conn, model_name=str(args.model_name), semantic_run_id=semantic_run_id)
         if existing is not None and not bool(args.resume) and not bool(args.force):
             print(
@@ -280,25 +353,35 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-        embedder: DinoV2Embedder
+        # Resume keys on (result_id, view_name); a new run starts empty.
+        done_keys: set[tuple[int, str]] = set()
         run_dim = 0
         if bool(args.resume) and existing is not None and not bool(args.force):
             embedding_run_id = str(existing["embedding_run_id"])
             run_dim = int(existing["dim"])
-            done_ids = embedded_result_ids(out_conn, embedding_run_id=embedding_run_id) | skipped_result_ids(
+            done_keys = embedded_view_keys(out_conn, embedding_run_id=embedding_run_id) | skipped_view_keys(
                 out_conn, embedding_run_id=embedding_run_id
             )
-            detections = [item for item in detections if int(item.result_id) not in done_ids]
-            print(f"resume embedding_run_id={embedding_run_id} remaining={len(detections)} done={len(done_ids)}", flush=True)
-            if not detections:
-                embedded, skipped = update_run_counts(out_conn, embedding_run_id=embedding_run_id)
-                print(f"Done: {embedded} embedded, {skipped} skipped db={output_db}", flush=True)
-                return 0
-            embedder = DinoV2Embedder(model_name=str(args.model_name), device=str(args.device))
+            new_run = False
+            print(f"resume embedding_run_id={embedding_run_id} detections={len(detections)} done_views={len(done_keys)}", flush=True)
         else:
-            embedder = DinoV2Embedder(model_name=str(args.model_name), device=str(args.device))
-            run_dim = int(embedder.dim)
             embedding_run_id = uuid.uuid4().hex
+            new_run = True
+
+        # Only process (result_id, view_name) pairs that are neither persisted nor skipped.
+        pending = [
+            (det, tuple((n, p) for (n, p) in VIEW_SPECS if (int(det.result_id), n) not in done_keys))
+            for det in detections
+        ]
+        pending = [(det, specs) for det, specs in pending if specs]
+        if not pending and not new_run:
+            embedded, skipped = update_run_counts(out_conn, embedding_run_id=embedding_run_id)
+            print(f"Done: {embedded} embedded, {skipped} skipped db={output_db}", flush=True)
+            return 0
+
+        embedder = DinoV2Embedder(model_name=str(args.model_name), device=str(args.device))
+        if new_run:
+            run_dim = int(embedder.dim)
             insert_run_metadata(
                 out_conn,
                 embedding_run_id=embedding_run_id,
@@ -316,62 +399,27 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
 
-        if not detections:
-            embedded, skipped = update_run_counts(out_conn, embedding_run_id=embedding_run_id)
-            print(f"Done: {embedded} embedded, {skipped} skipped db={output_db}", flush=True)
-            return 0
-
         processed_since_log = 0
-        for batch in chunks(detections, int(args.batch_size)):
-            batch_ok: list[SourceDetection] = []
-            crops: list[Image.Image] = []
-            skipped_rows: list[tuple[str, int, str]] = []
-            for detection in batch:
-                try:
-                    crop = crop_with_padding(detection, image_root, padding_ratio=float(args.padding_ratio))
-                    crops.append(crop)
-                    batch_ok.append(detection)
-                except Exception as exc:
-                    reason = skip_reason(exc)
-                    skipped_rows.append((embedding_run_id, int(detection.result_id), reason))
-                    print(f"[skip] result_id={detection.result_id} reason={reason} error={exc}", flush=True)
-
-            if skipped_rows:
-                bulk_insert_skipped(out_conn, skipped_rows)
-            if not crops:
-                update_run_counts(out_conn, embedding_run_id=embedding_run_id)
-                continue
-
-            try:
-                embeddings = embedder.embed(crops, batch_size=int(args.batch_size))
-            finally:
-                for crop in crops:
-                    crop.close()
-
-            if embeddings.shape[0] != len(batch_ok):
-                raise RuntimeError(f"Embedding row mismatch: got {embeddings.shape[0]}, expected {len(batch_ok)}")
-            if run_dim <= 0 and embeddings.ndim == 2 and embeddings.shape[1] > 0:
-                run_dim = int(embeddings.shape[1])
-                out_conn.execute("UPDATE embedding_runs SET dim = ? WHERE embedding_run_id = ?", (int(embeddings.shape[1]), embedding_run_id))
+        for detection, specs in pending:
+            vectors, skips = embed_detection_multiview(detection, image_root, embedder, specs)
+            emb_rows = [
+                (embedding_run_id, int(detection.result_id), detection.image_rel_path,
+                 detection.predicted_label, view_name, encode_vector(vec))
+                for view_name, vec in vectors.items()
+            ]
+            skip_rows = [(embedding_run_id, int(s.result_id), s.view_name, s.reason) for s in skips]
+            if run_dim <= 0 and vectors:
+                run_dim = int(next(iter(vectors.values())).shape[0])
+                out_conn.execute("UPDATE embedding_runs SET dim = ? WHERE embedding_run_id = ?", (run_dim, embedding_run_id))
                 out_conn.commit()
-
-            rows = []
-            for detection, emb in zip(batch_ok, embeddings, strict=True):
-                arr = np.asarray(emb, dtype="<f4")
-                rows.append(
-                    (
-                        embedding_run_id,
-                        int(detection.result_id),
-                        detection.image_rel_path,
-                        detection.predicted_label,
-                        arr.tobytes(),
-                    )
-                )
-            bulk_insert_embeddings(out_conn, rows)
+            if emb_rows:
+                bulk_insert_view_embeddings(out_conn, emb_rows)
+            if skip_rows:
+                bulk_insert_view_skipped(out_conn, skip_rows)
             embedded, skipped = update_run_counts(out_conn, embedding_run_id=embedding_run_id)
-            processed_since_log += len(rows) + len(skipped_rows)
+            processed_since_log += len(emb_rows) + len(skip_rows)
             if int(args.log_every) > 0 and processed_since_log >= int(args.log_every):
-                print(f"[embed] embedded={embedded} skipped={skipped} total={len(detections)}", flush=True)
+                print(f"[embed] embedded={embedded} skipped={skipped} detections={len(detections)}", flush=True)
                 processed_since_log = 0
 
         embedded, skipped = update_run_counts(out_conn, embedding_run_id=embedding_run_id)

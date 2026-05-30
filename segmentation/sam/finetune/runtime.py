@@ -68,12 +68,24 @@ def _sidecar_dir(delta_checkpoint: str | None) -> str | None:
     return directory if os.path.isdir(directory) else None
 
 
+def _stage_prefix(delta_checkpoint: str | None) -> str:
+    name = os.path.basename(str(delta_checkpoint or "")).lower()
+    if name.startswith("coarse_"):
+        return "coarse_"
+    if name.startswith("refine_"):
+        return "refine_"
+    return ""
+
+
 def load_inference_config(delta_checkpoint: str | None) -> dict:
     directory = _sidecar_dir(delta_checkpoint)
     if directory is None:
         return {}
-    path = os.path.join(directory, "inference_config.json")
-    if not os.path.isfile(path):
+    prefix = _stage_prefix(delta_checkpoint)
+    candidates = [os.path.join(directory, f"{prefix}inference_config.json")] if prefix else []
+    candidates.append(os.path.join(directory, "inference_config.json"))
+    path = next((candidate for candidate in candidates if os.path.isfile(candidate)), None)
+    if path is None:
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -123,8 +135,11 @@ def resolve_predict_threshold(delta_checkpoint: str | None, threshold: str | flo
 
     directory = _sidecar_dir(delta_checkpoint)
     if directory is not None:
-        best_threshold_path = os.path.join(directory, "best_threshold.txt")
-        if os.path.isfile(best_threshold_path):
+        prefix = _stage_prefix(delta_checkpoint)
+        threshold_candidates = [os.path.join(directory, f"{prefix}best_threshold.txt")] if prefix else []
+        threshold_candidates.append(os.path.join(directory, "best_threshold.txt"))
+        best_threshold_path = next((candidate for candidate in threshold_candidates if os.path.isfile(candidate)), None)
+        if best_threshold_path is not None:
             try:
                 with open(best_threshold_path, "r", encoding="utf-8") as f:
                     return float(f.read().strip())
@@ -186,6 +201,7 @@ def resolve_refine_settings(
     *,
     refine_tile_size: int | None = None,
     refine_tile_sizes: list[int] | tuple[int, ...] | None = None,
+    refine_batch_size: int | None = None,
     refine_max_rois: int | None = None,
     refine_roi_padding: int | None = None,
     refine_merge_mode: str | None = None,
@@ -296,7 +312,7 @@ def load_sam_model(
     kwargs = {
         "image_size": int(image_size),
         "num_classes": 1,
-        "checkpoint": None,
+        "checkpoint": checkpoint_path,
         "decoder_type": resolve_decoder_type(None, decoder_type),
         "centerline_head": bool(centerline_head),
     }
@@ -304,9 +320,8 @@ def load_sam_model(
         kwargs["pixel_mean"] = pixel_mean
     if pixel_std is not None:
         kwargs["pixel_std"] = pixel_std
-    sam_model, _ = sam_model_registry[model_type](**kwargs)
     try:
-        sam_model.load_state_dict(state_dict)
+        sam_model, _ = sam_model_registry[model_type](**kwargs)
     except RuntimeError as exc:
         raise RuntimeError(
             f"SAM checkpoint/model type mismatch. requested={requested_model_type!r}, inferred={inferred!r}.\n{exc}"

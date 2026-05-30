@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import open_clip
 from PIL import Image
 import torch
 
-from prompts import POS_PROMPTS, build_prompt_index
+import negatives
+from prompts import NEGATIVE_ALPHA, NEGATIVE_ANCHORS, POS_PROMPTS, build_prompt_index
 
 
 def auto_device() -> str:
@@ -42,12 +44,35 @@ class OpenClipSemanticClassifier:
         self.tokenizer = open_clip.get_tokenizer(self.model_name)
         self._text_features = self._encode_texts(self.prompt_texts)
 
+        # C5: cache negative-anchor text features once (per-process state; each shard
+        # process builds its own identical cache from static NEGATIVE_ANCHORS).
+        self._negative_anchors = {label: list(texts) for label, texts in NEGATIVE_ANCHORS.items()}
+        self._negative_alpha = dict(NEGATIVE_ALPHA)
+        self._negative_text_features: dict[str, np.ndarray] = {}
+        for label, texts in self._negative_anchors.items():
+            if texts:
+                self._negative_text_features[label] = (
+                    self._encode_texts(texts).detach().cpu().numpy().astype(np.float32)
+                )
+
     def _encode_texts(self, texts: list[str]) -> torch.Tensor:
         encoded = self.tokenizer(texts).to(self.device)
         with torch.inference_mode():
             features = self.model.encode_text(encoded)
             features = features / features.norm(dim=-1, keepdim=True)
         return features
+
+    def similarity_to_texts(self, image: Image.Image, texts: list[str]) -> np.ndarray:
+        """Cosine similarity in [-1, 1] between the image and each text, in input order."""
+        if not texts:
+            return np.empty((0,), dtype=np.float32)
+        text_features = self._encode_texts(list(texts))
+        tensor = self.preprocess(image.convert("RGB")).unsqueeze(0).to(self.device)
+        with torch.inference_mode():
+            image_features = self.model.encode_image(tensor)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            sims = (image_features @ text_features.T).squeeze(0)
+        return sims.detach().cpu().numpy().astype(np.float32)
 
     def classify_images(self, images: list[Image.Image]) -> list[dict[str, Any]]:
         if not images:
@@ -60,7 +85,18 @@ class OpenClipSemanticClassifier:
             logits = 100.0 * image_features @ self._text_features.T
             batch_prompt_probs = logits.softmax(dim=-1).detach().cpu().tolist()
 
-        return [self._classification_from_prompt_probs(prompt_probs) for prompt_probs in batch_prompt_probs]
+        results = [self._classification_from_prompt_probs(prompt_probs) for prompt_probs in batch_prompt_probs]
+
+        # C5: negative-anchor penalty + adjusted (renormalized) scores per image.
+        image_features_np = image_features.detach().cpu().numpy().astype(np.float32)
+        for index, classification in enumerate(results):
+            pos_scores = {item["label"]: float(item["probability"]) for item in classification["class_scores"]}
+            penalties, adjusted = negatives.adjusted_scores_for_image(
+                image_features_np[index], pos_scores, self._negative_text_features, self._negative_alpha
+            )
+            classification["neg_penalty"] = penalties
+            classification["adjusted_scores"] = adjusted
+        return results
 
     def classify_image(self, image: Image.Image) -> dict[str, Any]:
         return self.classify_images([image])[0]

@@ -10,6 +10,125 @@ from typing import Any
 from .models import Detection, ImageInfo
 
 
+# --- C1: geometry columns (additive, idempotent migration) -------------------
+
+# Ordered (column, DDL); read defaults derive from this list (counts -> 0, else 0.0).
+_GEOMETRY_DDL: tuple[tuple[str, str], ...] = (
+    ("box_width", "REAL"),
+    ("box_height", "REAL"),
+    ("box_area", "REAL"),
+    ("area_ratio_to_image", "REAL"),
+    ("aspect_ratio", "REAL"),
+    ("elongation", "REAL"),
+    ("center_x", "REAL"),
+    ("center_y", "REAL"),
+    ("contains_count", "INTEGER DEFAULT 0"),
+    ("contained_by_count", "INTEGER DEFAULT 0"),
+    ("max_iou_same_label", "REAL DEFAULT 0.0"),
+    ("max_containment", "REAL DEFAULT 0.0"),
+)
+_GEOMETRY_COLUMNS: tuple[str, ...] = tuple(name for name, _ in _GEOMETRY_DDL)
+_GEOMETRY_DEFAULTS: dict[str, Any] = {
+    name: (0 if name.endswith("_count") else 0.0) for name in _GEOMETRY_COLUMNS
+}
+
+
+def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def ensure_geometry_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent: add the 12 geometry columns to ``detections`` if absent."""
+    existing = _existing_columns(conn, "detections")
+    for name, decl in _GEOMETRY_DDL:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE detections ADD COLUMN {name} {decl}")
+    conn.commit()
+
+
+def update_geometry(conn: sqlite3.Connection, geometries: list[Any]) -> None:
+    """UPDATE detections SET <geometry cols> WHERE detection_id=? for each BoxGeometry."""
+    if not geometries:
+        return
+    assignments = ", ".join(f"{name}=?" for name in _GEOMETRY_COLUMNS)
+    rows = [
+        tuple(getattr(g, name) for name in _GEOMETRY_COLUMNS) + (int(g.detection_id),)
+        for g in geometries
+    ]
+    conn.executemany(f"UPDATE detections SET {assignments} WHERE detection_id=?", rows)
+    conn.commit()
+
+
+def read_detection_geometry(conn: sqlite3.Connection, detection_id: int) -> dict[str, Any]:
+    """Read geometry for one detection, applying defaults for missing/NULL columns so
+    pre-feature tables (no geometry columns) remain readable (Requirement 1.11)."""
+    cols = _existing_columns(conn, "detections")
+    row = conn.execute(
+        "SELECT * FROM detections WHERE detection_id = ?", (int(detection_id),)
+    ).fetchone()
+    if row is None:
+        raise KeyError(detection_id)
+    out: dict[str, Any] = {}
+    for name, default in _GEOMETRY_DEFAULTS.items():
+        value = row[name] if name in cols and row[name] is not None else default
+        out[name] = value
+    return out
+
+
+# --- C2B: reorder path (additive gdino_* columns + deterministic label fallback) ------
+
+import enum  # noqa: E402
+
+_GDINO_DDL: tuple[tuple[str, str], ...] = (
+    ("gdino_label", "TEXT"),
+    ("gdino_score", "REAL"),
+    ("gdino_prompt_key", "TEXT"),
+    ("predicted_label", "TEXT"),  # NULL until step2 commits a label (reorder path)
+)
+
+
+class PipelineOrder(enum.Enum):
+    LABEL_FIRST = "label_first"   # default: step2 labels, then step4 dedups
+    DEDUP_FIRST = "dedup_first"   # reorder: step4 dedups, then step2 labels the kept set
+
+
+def ensure_gdino_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent additive migration for the reorder path. Never drops columns."""
+    existing = _existing_columns(conn, "detections")
+    for name, decl in _GDINO_DDL:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE detections ADD COLUMN {name} {decl}")
+    conn.commit()
+
+
+def backfill_gdino_columns(conn: sqlite3.Connection) -> None:
+    """Forward migration: populate gdino_* from existing label/score/prompt_key.
+    Idempotent (only fills NULLs), non-destructive."""
+    ensure_gdino_columns(conn)
+    conn.execute(
+        """
+        UPDATE detections
+           SET gdino_label      = COALESCE(gdino_label, label),
+               gdino_score      = COALESCE(gdino_score, score),
+               gdino_prompt_key = COALESCE(gdino_prompt_key, prompt_key)
+         WHERE gdino_label IS NULL OR gdino_score IS NULL OR gdino_prompt_key IS NULL
+        """
+    )
+    conn.commit()
+
+
+def read_predicted_label(row: Any) -> str:
+    """Deterministic fallback chain; never returns NULL/empty under the reorder path:
+    committed predicted_label -> gdino_label -> legacy label column."""
+    keys = row.keys() if hasattr(row, "keys") else row
+    for name in ("predicted_label", "gdino_label", "label"):
+        if name in keys:
+            value = row[name]
+            if value:
+                return str(value)
+    return ""
+
+
 class DamageScanStore:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path).expanduser().resolve()
@@ -90,7 +209,25 @@ class DamageScanStore:
                 ON detections(parent_detection_id);
                 """
             )
+            ensure_geometry_columns(self.conn)
             self.conn.commit()
+
+    def update_geometry(self, geometries: list[Any]) -> None:
+        with self._lock:
+            update_geometry(self.conn, geometries)
+
+    def fetch_image_boxes(self, *, run_id: str, image_id: int) -> list[tuple]:
+        """Return (detection_id, x1, y1, x2, y2, label) for every detection of one image."""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT detection_id, x1, y1, x2, y2, label FROM detections"
+                " WHERE run_id = ? AND image_id = ? ORDER BY detection_id",
+                (run_id, int(image_id)),
+            ).fetchall()
+        return [
+            (int(r["detection_id"]), float(r["x1"]), float(r["y1"]), float(r["x2"]), float(r["y2"]), str(r["label"]))
+            for r in rows
+        ]
 
     def create_run(
         self,

@@ -9,7 +9,7 @@ from typing import Callable
 from PIL import Image
 
 from .detectors import DamageDetector, GroundingDinoDetector
-from .geometry import nms_detections
+from .geometry import GeoInput, compute_box_geometry, nms_detections
 from .models import Detection, ImageInfo
 from .overlay import save_overlay
 from .prompts import PROMPT_ORDER, PROMPT_SPECS, PromptSpec
@@ -212,6 +212,13 @@ class DamageScanPipeline:
                 status_log_fn(f"  {prompt_key}: raw={len(raw)} final={len(final)}")
 
         self.store.insert_detections_bulk(run_id=run_id, image_id=image_id, detections=persisted_items)
+
+        boxes = self.store.fetch_image_boxes(run_id=run_id, image_id=image_id)
+        if boxes:
+            geometries = compute_box_geometry(
+                [GeoInput(*box) for box in boxes], int(image.width), int(image.height)
+            )
+            self.store.update_geometry(geometries)
 
         if bool(self.config.save_overlays):
             overlay_path = Path(self.config.db_path).expanduser().resolve().parent / "overlays" / image.rel_path

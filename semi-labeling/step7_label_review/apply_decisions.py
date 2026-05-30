@@ -50,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", default=None, help="Output CSV path. Default: step7_dir/final_labels_<session_id>.csv")
     parser.add_argument("--step6-dir", default=str(default_step6_dir()))
     parser.add_argument("--step7-dir", default=str(default_step7_dir()))
+    parser.add_argument("--corrections-db", default=None, help="If set, emit LabelCorrection rows into this corrections.sqlite3 (C6 feedback loop).")
+    parser.add_argument("--source-run-id", default="", help="Source run id recorded on emitted corrections.")
     args = parser.parse_args(argv)
 
     step6_dir = Path(args.step6_dir).expanduser().resolve()
@@ -101,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
 
     counter: Counter = Counter()
     label_changes: Counter = Counter()
+    pending_corrections: list[tuple] = []  # (rid, image_rel_path, original_label, correction_type, corrected_label)
     rows_out: list[dict] = []
     for row in rows_in:
         rid_str = str(row.get("result_id", ""))
@@ -118,9 +121,11 @@ def main(argv: list[str] | None = None) -> int:
 
         action = str(decision.get("action", "")).strip()
         old_label = str(row.get("final_class", "")).strip()
+        image_rel_path = str(row.get("image_rel_path", ""))
         if action == "keep":
             out["source"] = "reviewed_keep"
             counter["reviewed_keep"] += 1
+            pending_corrections.append((rid, image_rel_path, old_label, "confirm", old_label))
         elif action == "change":
             target = str(decision.get("target_label", "")).strip()
             if not target:
@@ -131,8 +136,10 @@ def main(argv: list[str] | None = None) -> int:
                 out["confidence"] = "1.0"
                 if target == "reject":
                     counter["reviewed_reject"] += 1
+                    pending_corrections.append((rid, image_rel_path, old_label, "reject", "reject"))
                 else:
                     counter["reviewed_change"] += 1
+                    pending_corrections.append((rid, image_rel_path, old_label, "relabel", target))
                 if old_label and old_label != target:
                     label_changes[f"{old_label} → {target}"] += 1
         else:
@@ -161,6 +168,34 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {label:<10} {n:>6}")
 
     print(f"\n[saved] {output_path}")
+
+    if args.corrections_db and pending_corrections:
+        from datetime import datetime, timezone
+
+        from corrections.store import CorrectionStore, CorrectionWriteError, LabelCorrection
+
+        store = CorrectionStore(Path(args.corrections_db).expanduser().resolve())
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        written = 0
+        for rid, image_rel_path, original_label, ctype, corrected_label in pending_corrections:
+            try:
+                store.add_correction(
+                    LabelCorrection(
+                        correction_id=f"{session_id}:{rid}",
+                        created_at_utc=now,
+                        source_run_id=str(args.source_run_id),
+                        result_id=int(rid),
+                        image_rel_path=image_rel_path,
+                        original_label=original_label,
+                        corrected_label=corrected_label,
+                        correction_type=ctype,
+                    )
+                )
+                written += 1
+            except CorrectionWriteError as exc:
+                print(f"  [correction skipped] {exc.correction_id}: {exc}")
+        print(f"[corrections] wrote {written}/{len(pending_corrections)} into {args.corrections_db}")
+
     return 0
 
 

@@ -37,3 +37,31 @@ def build_prompt_index(prompt_groups: dict[str, list[str]]) -> tuple[list[str], 
             labels.append(str(label))
             prompts.append(text)
     return labels, prompts
+
+
+# C5: negative anchors (penalize visually similar non-damage features) and per-label
+# negative weights. Labels without a configured alpha default to 0.0 (no penalty).
+NEGATIVE_ANCHORS: dict[str, list[str]] = {
+    "crack": [
+        "a smooth undamaged concrete surface with no cracks",
+        "a dark shadow line that is not a crack",
+        "an expansion joint, tile grout line, or panel seam",
+        "a cable, wire, or pipe running along a wall",
+    ],
+    "mold": [
+        "a clean dry concrete surface",
+        "a paint stain or watermark that is not mold",
+        "a smooth shadow on the wall",
+    ],
+    "spall": [
+        "an intact smooth concrete surface with no missing material",
+        "a shallow surface stain without missing material",
+        "a dark patch or shadow on concrete",
+    ],
+}
+
+NEGATIVE_ALPHA: dict[str, float] = {
+    "crack": 1.0,
+    "mold": 1.0,
+    "spall": 1.0,
+}

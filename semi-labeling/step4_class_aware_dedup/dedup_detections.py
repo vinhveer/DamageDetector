@@ -28,6 +28,7 @@ if str(STEP_DIR) not in sys.path:
     sys.path.insert(0, str(STEP_DIR))
 
 from greedy_dedup import greedy_dedup
+from cross_class import apply_cross_class_containment
 from output_store import (
     DedupDecision,
     connect_output,
@@ -103,6 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--container-overlap-threshold", type=float, default=0.85, help="Child must be contained inside parent by at least this fraction to count.")
     parser.add_argument("--prime-geom-threshold", type=float, default=0.70, help="Drop parent only when union of children covers at least this fraction of parent area.")
     parser.add_argument("--prime-feat-threshold", type=float, default=0.85, help="Drop parent only when cos_sim(parent_emb, sum_child_emb) >= this threshold.")
+    parser.add_argument("--cross-class-containment", type=parse_bool, default=False, help="Flag (do not drop) kept cross-class boxes strongly contained in a different-label box.")
+    parser.add_argument("--cross-class-containment-threshold", type=float, default=0.85, help="Containment threshold for cross-class suspect flagging.")
+    parser.add_argument("--cross-class-cos-threshold", type=float, default=0.80, help="Cosine-similarity threshold for cross-class suspect flagging.")
     return parser
 
 
@@ -169,7 +173,7 @@ def run(args: argparse.Namespace) -> tuple[str, int, int, int]:
     }
 
     duplicate_classifier_json = json.dumps(
-        {"mode": "greedy_iou_cos", "formula": "iou * max(0, cos_sim)", "threshold": float(args.dup_score_threshold)},
+        {"mode": "greedy_containment_cos", "formula": "max(iou, containment) * max(0, cos_sim)", "threshold": float(args.dup_score_threshold)},
         sort_keys=True,
     )
     quality_classifier_json = json.dumps(
@@ -264,6 +268,18 @@ def run(args: argparse.Namespace) -> tuple[str, int, int, int]:
                 f"prime_box_dropped={after_oversized - after_prime} kept={after_prime}",
                 flush=True,
             )
+
+        if bool(args.cross_class_containment):
+            detections_by_id = {int(d.result_id): d for d in detections}
+            decisions = apply_cross_class_containment(
+                decisions,
+                detections_by_id,
+                embedding_map,
+                containment_threshold=float(args.cross_class_containment_threshold),
+                cos_sim_threshold=float(args.cross_class_cos_threshold),
+            )
+            suspects = sum(1 for item in decisions if item.drop_reason == "cross_class_containment_suspect")
+            print(f"[dedup] cross_class_suspects={suspects}", flush=True)
 
         write_decisions(out_conn, dedup_run_id=dedup_run_id, decisions=decisions)
         kept, fused, dropped = finalize_run_counts(out_conn, dedup_run_id=dedup_run_id)

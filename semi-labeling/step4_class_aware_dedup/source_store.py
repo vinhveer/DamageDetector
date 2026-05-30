@@ -168,6 +168,10 @@ def load_embedding_map(
     if not requested:
         return {}
 
+    # C4: when multi-view embeddings exist, dedup reads only the 'tight' view.
+    has_view = any(str(row[1]) == "view_name" for row in conn.execute("PRAGMA table_info(detection_embeddings)"))
+    view_clause = " AND COALESCE(view_name, 'tight') = 'tight'" if has_view else ""
+
     out: dict[int, np.ndarray] = {}
     batch_size = 900
     for start in range(0, len(requested), batch_size):
@@ -177,7 +181,7 @@ def load_embedding_map(
             f"""
             SELECT result_id, embedding_blob
             FROM detection_embeddings
-            WHERE embedding_run_id = ? AND result_id IN ({placeholders})
+            WHERE embedding_run_id = ? AND result_id IN ({placeholders}){view_clause}
             """,
             [embedding_run_id, *chunk],
         ).fetchall()

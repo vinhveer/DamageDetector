@@ -441,7 +441,7 @@ ipcMain.handle('segment:point-sam', async (_event, rawPayload = {}) => {
       sam_checkpoint: cleanPath(payload.samCheckpoint, 'samCheckpoint'),
       model_type: typeof payload.modelType === 'string' ? payload.modelType : 'auto',
       device: typeof payload.device === 'string' ? payload.device : 'auto',
-      output_dir: path.join(repoRoot, 'results_point_sam'),
+      output_dir: cleanOptionalPath(payload.outputDir, 'outputDir') || path.join(repoRoot, 'results_point_sam'),
     };
     return await runSegmentPython({ payload, inputPath, moduleName: 'segmentation.sam.point_predict', inputData });
   } catch (err) {
@@ -462,7 +462,7 @@ ipcMain.handle('segment:text-sam', async (_event, rawPayload = {}) => {
       device: typeof payload.device === 'string' ? payload.device : 'auto',
       box_threshold: payload.boxThreshold ?? 0.15,
       text_threshold: payload.textThreshold ?? 0.15,
-      output_dir: path.join(repoRoot, 'results_text_sam'),
+      output_dir: cleanOptionalPath(payload.outputDir, 'outputDir') || path.join(repoRoot, 'results_text_sam'),
     };
     return await runSegmentPython({ payload, inputPath, moduleName: 'segmentation.sam.text_predict', inputData });
   } catch (err) {

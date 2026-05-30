@@ -78,6 +78,11 @@ def _ensure_semantic_schema(conn: sqlite3.Connection) -> None:
         ON openclip_semantic_results(semantic_run_id, status);
         """
     )
+    # C5: carry additive negative-scoring columns through the shard merge.
+    existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(openclip_semantic_results)")}
+    for name in ("neg_penalty_json", "adjusted_scores_json"):
+        if name not in existing:
+            conn.execute(f"ALTER TABLE openclip_semantic_results ADD COLUMN {name} TEXT")
     conn.commit()
 
 
@@ -119,6 +124,11 @@ def _copy_run(target: sqlite3.Connection, row: sqlite3.Row) -> None:
     )
 
 
+def _opt_col(row: sqlite3.Row, name: str):
+    """Return row[name] if the source shard had the column, else None (pre-C5 shard)."""
+    return row[name] if name in row.keys() else None
+
+
 def _copy_result(target: sqlite3.Connection, row: sqlite3.Row) -> int:
     existing = target.execute(
         "SELECT result_id FROM openclip_semantic_results WHERE semantic_run_id = ? AND source_detection_id = ?",
@@ -133,8 +143,8 @@ def _copy_result(target: sqlite3.Connection, row: sqlite3.Row) -> int:
             semantic_run_id, source_detection_id, source_run_id, image_id, image_rel_path, image_path,
             prompt_key, detector_label, detector_score, x1, y1, x2, y2, crop_path, status,
             predicted_label, predicted_probability, predicted_probability_pct, top_prompt,
-            error_type, error_message, raw_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            error_type, error_message, raw_json, neg_penalty_json, adjusted_scores_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(row["semantic_run_id"]),
@@ -159,6 +169,8 @@ def _copy_result(target: sqlite3.Connection, row: sqlite3.Row) -> int:
             None if row["error_type"] is None else str(row["error_type"]),
             None if row["error_message"] is None else str(row["error_message"]),
             str(row["raw_json"]),
+            _opt_col(row, "neg_penalty_json"),
+            _opt_col(row, "adjusted_scores_json"),
         ),
     )
     return int(cur.lastrowid)

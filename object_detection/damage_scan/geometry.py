@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from .models import Box, Detection, Tile
 
@@ -154,3 +154,132 @@ def build_adaptive_tile_plan(width: int, height: int, *, tile_bias: str) -> list
         seen.add(actual_size)
         plan.append((actual_size, max(64, int(round(actual_size * 0.25)))))
     return plan
+
+
+# --- C1: Box geometry features (pure core, self-contained) -------------------
+
+_CONTAINS_THRESHOLD = 0.90
+
+
+@dataclass(frozen=True)
+class GeoInput:
+    detection_id: int
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    label: str
+
+
+@dataclass(frozen=True)
+class BoxGeometry:
+    detection_id: int
+    box_width: float
+    box_height: float
+    box_area: float
+    area_ratio_to_image: float
+    aspect_ratio: float
+    elongation: float
+    center_x: float
+    center_y: float
+    contains_count: int = 0
+    contained_by_count: int = 0
+    max_iou_same_label: float = 0.0
+    max_containment: float = 0.0
+
+
+def _width(g: GeoInput) -> float:
+    return max(0.0, float(g.x2) - float(g.x1))
+
+
+def _height(g: GeoInput) -> float:
+    return max(0.0, float(g.y2) - float(g.y1))
+
+
+def _area(g: GeoInput) -> float:
+    return _width(g) * _height(g)
+
+
+def elongation(width: float, height: float) -> float:
+    aspect = float(width) / max(float(height), 1e-6)
+    return max(aspect, 1.0 / max(aspect, 1e-6))
+
+
+def intersection_area(a: GeoInput, b: GeoInput) -> float:
+    iw = max(0.0, min(float(a.x2), float(b.x2)) - max(float(a.x1), float(b.x1)))
+    ih = max(0.0, min(float(a.y2), float(b.y2)) - max(float(a.y1), float(b.y1)))
+    return iw * ih
+
+
+def iou(a: GeoInput, b: GeoInput) -> float:
+    inter = intersection_area(a, b)
+    union = _area(a) + _area(b) - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def containment(a: GeoInput, b: GeoInput) -> float:
+    inter = intersection_area(a, b)
+    return inter / max(min(_area(a), _area(b)), 1e-6)
+
+
+def compute_box_geometry(
+    detections: list[GeoInput],
+    image_width: int,
+    image_height: int,
+) -> list[BoxGeometry]:
+    """Per-detection scalar features + O(n^2) per-image spatial pass.
+
+    Returns one BoxGeometry per input, order-preserving.
+    """
+    image_area = int(image_width) * int(image_height)
+    valid_image = int(image_width) > 0 and int(image_height) > 0
+
+    contains = [0] * len(detections)
+    contained_by = [0] * len(detections)
+    max_iou_same = [0.0] * len(detections)
+    max_cont = [0.0] * len(detections)
+
+    for i in range(len(detections)):
+        for j in range(i + 1, len(detections)):
+            a, b = detections[i], detections[j]
+            cont = containment(a, b)
+            if cont > max_cont[i]:
+                max_cont[i] = cont
+            if cont > max_cont[j]:
+                max_cont[j] = cont
+            if a.label == b.label:
+                ov = iou(a, b)
+                if ov > max_iou_same[i]:
+                    max_iou_same[i] = ov
+                if ov > max_iou_same[j]:
+                    max_iou_same[j] = ov
+            if cont >= _CONTAINS_THRESHOLD:
+                # containing detection ranks first by descending area then ascending id
+                key_i = (-_area(a), int(a.detection_id))
+                key_j = (-_area(b), int(b.detection_id))
+                container, contained = (i, j) if key_i <= key_j else (j, i)
+                contains[container] += 1
+                contained_by[contained] += 1
+
+    out: list[BoxGeometry] = []
+    for idx, g in enumerate(detections):
+        w, h = _width(g), _height(g)
+        area = w * h
+        out.append(
+            BoxGeometry(
+                detection_id=int(g.detection_id),
+                box_width=w,
+                box_height=h,
+                box_area=area,
+                area_ratio_to_image=(area / max(1, image_area)) if valid_image else 0.0,
+                aspect_ratio=w / max(h, 1e-6),
+                elongation=elongation(w, h),
+                center_x=(float(g.x1) + float(g.x2)) / 2.0,
+                center_y=(float(g.y1) + float(g.y2)) / 2.0,
+                contains_count=contains[idx],
+                contained_by_count=contained_by[idx],
+                max_iou_same_label=max_iou_same[idx],
+                max_containment=max_cont[idx],
+            )
+        )
+    return out

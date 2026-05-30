@@ -103,6 +103,11 @@ class Step2SemanticStore:
             ON openclip_semantic_results(semantic_run_id, status);
             """
         )
+        # C5: additive negative-scoring columns (preserve raw_json for before/after).
+        existing = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(openclip_semantic_results)")}
+        for name in ("neg_penalty_json", "adjusted_scores_json"):
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE openclip_semantic_results ADD COLUMN {name} TEXT")
         self.conn.commit()
 
     def resolve_source_run_id(self, requested: str) -> str:
@@ -210,14 +215,20 @@ class Step2SemanticStore:
     ) -> int:
         raw_json = json.dumps(classification, ensure_ascii=False, sort_keys=True)
         top_prompt = str(((classification.get("top_prompts") or [{}])[0]).get("prompt") or "")
+        neg_penalty = classification.get("neg_penalty")
+        adjusted_scores = classification.get("adjusted_scores")
+        neg_penalty_json = json.dumps(neg_penalty, ensure_ascii=False, sort_keys=True) if neg_penalty is not None else None
+        adjusted_scores_json = (
+            json.dumps(adjusted_scores, ensure_ascii=False, sort_keys=True) if adjusted_scores is not None else None
+        )
         row = self.conn.execute(
             """
             INSERT INTO openclip_semantic_results (
                 semantic_run_id, source_detection_id, source_run_id, image_id, image_rel_path, image_path,
                 prompt_key, detector_label, detector_score, x1, y1, x2, y2, crop_path, status,
                 predicted_label, predicted_probability, predicted_probability_pct, top_prompt,
-                error_type, error_message, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                error_type, error_message, raw_json, neg_penalty_json, adjusted_scores_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 semantic_run_id,
@@ -242,6 +253,8 @@ class Step2SemanticStore:
                 None,
                 None,
                 raw_json,
+                neg_penalty_json,
+                adjusted_scores_json,
             ),
         )
         result_id = int(row.lastrowid)

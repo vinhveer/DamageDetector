@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
 from torch_runtime import describe_device_fallback, select_device_str
@@ -160,6 +160,10 @@ class SamRunner:
             raise FileNotFoundError(f"Image not found: {image_path}")
         if not os.path.isfile(params.sam_checkpoint):
             raise FileNotFoundError(f"SAM checkpoint not found: {params.sam_checkpoint}")
+        if select_device_str(params.device) == "mps":
+            if log_fn is not None:
+                log_fn("SAM only auto-mask mode: MPS AMG is not reliable on this backend; falling back to CPU.")
+            params = replace(params, device="cpu")
         predictor, _device = self.ensure_model_loaded(params, log_fn=log_fn)
         return _process_one_image_sam_only(
             image_path=image_path,

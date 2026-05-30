@@ -70,3 +70,36 @@ def geometry_score(area_ratio: float) -> float:
     if ratio <= 0.70:
         return 0.5
     return 0.1
+
+
+# --- C3: containment-aware dedup score + elongation guard --------------------
+
+def elongation(box: Any) -> float:
+    """max(aspect_ratio, 1 / aspect_ratio); always >= 1.0."""
+    a = aspect(box)
+    return max(a, 1.0 / a)
+
+
+def intersection_area(box_a: Any, box_b: Any) -> float:
+    ax1, ay1, ax2, ay2 = (float(getattr(box_a, name)) for name in ("x1", "y1", "x2", "y2"))
+    bx1, by1, bx2, by2 = (float(getattr(box_b, name)) for name in ("x1", "y1", "x2", "y2"))
+    return max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+
+
+def dup_score_v2(
+    box_a: Any, box_b: Any, emb_a: np.ndarray, emb_b: np.ndarray
+) -> tuple[float, float, float, float]:
+    """Return (score, iou, containment, cos_sim_clamped).
+
+    Spatial component is max(IoU, Containment); score = spatial * clamp(cos, 0, 1).
+    Disjoint pairs (intersection <= 0) and missing/zero embeddings score 0.0.
+    """
+    inter = intersection_area(box_a, box_b)
+    if inter <= 0.0:
+        return (0.0, 0.0, 0.0, 0.0)
+    union = area(box_a) + area(box_b) - inter
+    iou_value = inter / max(union, 1e-6)
+    containment = inter / max(min(area(box_a), area(box_b)), 1e-6)
+    spatial = max(iou_value, containment)
+    cos_value = max(0.0, min(1.0, cosine_similarity(emb_a, emb_b)))
+    return (float(spatial * cos_value), float(iou_value), float(containment), float(cos_value))

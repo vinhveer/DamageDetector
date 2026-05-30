@@ -154,6 +154,44 @@ def load_embeddings(box_labels: dict[int, str], embedding_db_path: Path) -> tupl
     return X, y, aligned_ids
 
 
+def load_training_data(
+    box_labels_X: np.ndarray,
+    box_labels_y: np.ndarray,
+    correction_store=None,
+    *,
+    correction_weight: int = 3,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Augment (X, y) with human corrections (C6).
+
+    When ``correction_store`` is None, returns the inputs unchanged. Otherwise each
+    'confirm'/'relabel' correction that carries an embedding is appended as a labeled
+    example using its corrected_label, replicated ``correction_weight`` times.
+    """
+    if isinstance(correction_weight, bool) or not isinstance(correction_weight, int) or correction_weight <= 0:
+        raise ValueError(f"correction_weight must be a positive integer, got {correction_weight!r}")
+    if correction_store is None:
+        return box_labels_X, box_labels_y
+
+    add_X: list[np.ndarray] = []
+    add_y: list[str] = []
+    for correction in correction_store.iter_corrections():
+        if correction.correction_type not in ("confirm", "relabel"):
+            continue
+        if correction.embedding_blob is None:
+            continue
+        vec = np.frombuffer(correction.embedding_blob, dtype="<f4").astype(np.float32)
+        for _ in range(int(correction_weight)):
+            add_X.append(vec)
+            add_y.append(str(correction.corrected_label))
+
+    if not add_X:
+        return box_labels_X, box_labels_y
+    extra_X = np.stack(add_X)
+    new_X = np.vstack([box_labels_X, extra_X]) if box_labels_X.shape[0] else extra_X
+    new_y = np.concatenate([np.asarray(box_labels_y), np.asarray(add_y)])
+    return new_X, new_y
+
+
 def train_and_eval(X: np.ndarray, y: np.ndarray, *, random_state: int = 42) -> dict:
     from sklearn.linear_model import LogisticRegression
     from sklearn.metrics import classification_report, confusion_matrix

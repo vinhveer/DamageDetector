@@ -3,6 +3,7 @@ import {
   IconCirclePlus,
   IconCircleMinus,
   IconFolderOpen,
+  IconFolders,
   IconPlayerPlay,
   IconTrash,
   IconToggleLeft,
@@ -10,6 +11,10 @@ import {
   IconX,
   IconPointer,
   IconTextCaption,
+  IconChevronLeft,
+  IconChevronRight,
+  IconCheck,
+  IconAlertTriangle,
 } from '@tabler/icons-react';
 import { useDispatch, useSelector } from 'react-redux';
 import {
@@ -22,11 +27,16 @@ import {
   setImagePath,
   setPointMode,
   setSamCheckpoint,
+  setOutputDir,
   setSegMode,
   setTextPrompt,
   setBoxThreshold,
   setTextThreshold,
   toggleOverlay,
+  setQueue,
+  clearQueue,
+  setQueueIndex,
+  setAutoAdvance,
 } from './segmentSlice.js';
 import PointCanvas from './components/PointCanvas.jsx';
 import { Button, IconButton } from '../../components/ui/index.js';
@@ -48,16 +58,34 @@ export default function SegmentTab() {
     error,
     samCheckpoint,
     device,
+    outputDir,
     showOverlay,
     boxThreshold,
     textThreshold,
+    queue,
+    queueIndex,
+    processed,
+    autoAdvance,
   } = useSelector((s) => s.segment);
 
   const running = status === 'running';
 
   const browseImage = useCallback(async () => {
     const p = await window.electronAPI.browsePath('file');
-    if (p) dispatch(setImagePath(p));
+    if (p) {
+      dispatch(clearQueue());
+      dispatch(setImagePath(p));
+    }
+  }, [dispatch]);
+
+  const browseFolder = useCallback(async () => {
+    const dir = await window.electronAPI.browsePath('directory');
+    if (!dir) return;
+    const files = await window.electronAPI.listImageFiles({ rootPath: dir, recursive: false });
+    if (Array.isArray(files) && files.length > 0) {
+      dispatch(setQueue(files));
+      dispatch(setQueueIndex(0));
+    }
   }, [dispatch]);
 
   const browseCheckpoint = useCallback(async () => {
@@ -70,6 +98,11 @@ export default function SegmentTab() {
     if (p) dispatch(setGdinoCheckpoint(p));
   }, [dispatch]);
 
+  const browseOutputDir = useCallback(async () => {
+    const p = await window.electronAPI.browsePath('directory');
+    if (p) dispatch(setOutputDir(p));
+  }, [dispatch]);
+
   const handlePointAdded = useCallback((pt) => {
     dispatch(addPoint(pt));
   }, [dispatch]);
@@ -77,6 +110,11 @@ export default function SegmentTab() {
   const canRun = !running && imagePath && samCheckpoint && (
     segMode === 'text' ? textPrompt.trim().length > 0 : points.length > 0
   );
+
+  const processedValues = Object.values(processed);
+  const doneCount = processedValues.filter((s) => s === 'done').length;
+  const errorCount = processedValues.filter((s) => s === 'error').length;
+  const curStatus = imagePath ? processed[imagePath] : undefined;
 
   let canvasSrc = null;
   if (imagePath) {
@@ -140,7 +178,52 @@ export default function SegmentTab() {
               <IconButton label="Browse image" onClick={browseImage}>
                 <IconFolderOpen size={15} />
               </IconButton>
+              <IconButton label="Browse folder (queue)" onClick={browseFolder}>
+                <IconFolders size={15} />
+              </IconButton>
             </div>
+
+            {/* Folder queue navigator */}
+            {queue.length > 0 && (
+              <div className="flex flex-col gap-1.5 rounded-[5px] border border-[var(--border-muted)] bg-[var(--surface-2)] p-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-[var(--text-muted)]">
+                    Queue <span className="font-mono tabular-nums text-[var(--text)]">{queueIndex + 1} / {queue.length}</span>
+                    <span className="ml-1.5 text-[var(--success)]">{doneCount} done</span>
+                    {errorCount > 0 && <span className="ml-1.5 text-[var(--danger)]">{errorCount} err</span>}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => dispatch(clearQueue())}
+                    className="flex items-center gap-1 text-[11px] text-[var(--text-muted)] hover:text-[var(--danger)]"
+                  >
+                    <IconX size={11} /> Clear
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <IconButton label="Previous image" onClick={() => dispatch(setQueueIndex(queueIndex - 1))} disabled={queueIndex <= 0}>
+                    <IconChevronLeft size={15} />
+                  </IconButton>
+                  <div className="flex min-w-0 flex-1 items-center justify-center gap-1.5 truncate px-1 text-[11px] text-[var(--text)]">
+                    {curStatus === 'done' && <IconCheck size={12} className="shrink-0 text-[var(--success)]" />}
+                    {curStatus === 'error' && <IconAlertTriangle size={12} className="shrink-0 text-[var(--danger)]" />}
+                    <span className="truncate" title={imagePath || ''}>{imagePath ? imagePath.split('/').pop() : ''}</span>
+                  </div>
+                  <IconButton label="Next image" onClick={() => dispatch(setQueueIndex(queueIndex + 1))} disabled={queueIndex >= queue.length - 1}>
+                    <IconChevronRight size={15} />
+                  </IconButton>
+                </div>
+                <label className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]">
+                  <input
+                    type="checkbox"
+                    checked={autoAdvance}
+                    onChange={(e) => dispatch(setAutoAdvance(e.target.checked))}
+                    className="accent-[var(--primary)]"
+                  />
+                  Auto-advance to next after Run
+                </label>
+              </div>
+            )}
           </section>
 
           {/* SAM checkpoint */}
@@ -159,7 +242,25 @@ export default function SegmentTab() {
             </div>
           </section>
 
-          {/* ── Point mode controls ── */}
+          {/* Output directory */}
+          <section className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)]">Output Folder</span>
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                value={outputDir}
+                onChange={(e) => dispatch(setOutputDir(e.target.value))}
+                placeholder="Default (results_*_sam)"
+                title={outputDir || ''}
+                className="min-w-0 flex-1 rounded-[5px] border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1.5 text-[12px] text-[var(--text)] placeholder-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--primary)]"
+              />
+              <IconButton label="Browse output folder" onClick={browseOutputDir}>
+                <IconFolderOpen size={15} />
+              </IconButton>
+            </div>
+            <p className="text-[11px] text-[var(--text-muted)]">Where overlay &amp; mask images are saved. Leave empty for default.</p>
+          </section>
+
           {segMode === 'point' && (<>
             <section className="flex flex-col gap-1.5">
               <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-muted)]">Point Mode</span>
@@ -320,7 +421,7 @@ export default function SegmentTab() {
             ) : (
               <>
                 <IconPlayerPlay size={14} />
-                Run Segmentation
+                {queue.length > 0 && autoAdvance && queueIndex < queue.length - 1 ? 'Run & Next' : 'Run Segmentation'}
               </>
             )}
           </Button>
@@ -375,6 +476,33 @@ export default function SegmentTab() {
                 <span className="text-[11px] text-[var(--text-muted)]">Device</span>
                 <span className="text-[11px] text-[var(--text)]">{result.device}</span>
               </div>
+
+              {/* Mask cutout preview */}
+              {result.cutoutB64 && (
+                <div className="flex flex-col gap-1.5 border-t border-[var(--border-muted)] pt-2">
+                  <span className="text-[11px] text-[var(--text-muted)]">Cutout (mask only)</span>
+                  <div
+                    className="flex items-center justify-center rounded-[4px] border border-[var(--border-muted)] p-1"
+                    style={{
+                      backgroundImage:
+                        'linear-gradient(45deg,#2d333b 25%,transparent 25%),linear-gradient(-45deg,#2d333b 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#2d333b 75%),linear-gradient(-45deg,transparent 75%,#2d333b 75%)',
+                      backgroundSize: '12px 12px',
+                      backgroundPosition: '0 0,0 6px,6px -6px,-6px 0',
+                    }}
+                  >
+                    <img
+                      src={`data:image/png;base64,${result.cutoutB64}`}
+                      alt="Mask cutout"
+                      className="max-h-[140px] max-w-full object-contain"
+                    />
+                  </div>
+                  {result.cutoutPath && (
+                    <span className="truncate font-mono text-[10px] text-[var(--text-muted)]" title={result.cutoutPath}>
+                      {result.cutoutPath}
+                    </span>
+                  )}
+                </div>
+              )}
             </section>
           )}
         </aside>
@@ -387,7 +515,10 @@ export default function SegmentTab() {
                 <IconFolderOpen size={28} strokeWidth={1.2} />
               </div>
               <p className="text-[13px]">Select an image to start</p>
-              <Button variant="secondary" onClick={browseImage}>Browse Image</Button>
+              <div className="flex gap-2">
+                <Button variant="secondary" onClick={browseImage}>Browse Image</Button>
+                <Button variant="secondary" onClick={browseFolder}>Browse Folder</Button>
+              </div>
             </div>
           ) : (
             <PointCanvas

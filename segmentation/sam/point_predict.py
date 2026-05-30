@@ -130,11 +130,26 @@ def main() -> None:
         ys, xs = np.where(best_mask > 0)
         bbox = [int(xs.min()), int(ys.min()), int(xs.max() + 1), int(ys.max() + 1)] if xs.size else None
 
+        # Mask cutout: keep painted pixels, transparent elsewhere, cropped to mask bounds
+        cutout_path = None
+        cutout_b64 = None
+        if bbox is not None:
+            bgra = cv2.cvtColor(bgr, cv2.COLOR_BGR2BGRA)
+            bgra[:, :, 3] = best_mask * 255
+            x1, y1, x2, y2 = bbox
+            cutout = bgra[y1:y2, x1:x2]
+            cutout_path = os.path.join(output_dir, f"{base}_point_sam_cutout.png")
+            cv2.imwrite(cutout_path, cutout)
+            cut_ok, cut_buf = cv2.imencode(".png", cutout)
+            cutout_b64 = base64.b64encode(cut_buf.tobytes()).decode("ascii") if cut_ok else None
+
         print(json.dumps({
             "overlay_path": os.path.abspath(overlay_path),
             "mask_path": os.path.abspath(mask_path),
+            "cutout_path": os.path.abspath(cutout_path) if cutout_path else None,
             "overlay_b64": overlay_b64,
             "mask_b64": mask_b64,
+            "cutout_b64": cutout_b64,
             "bbox": bbox,
             "score": best_score,
             "mask_area": int(np.sum(best_mask)),
