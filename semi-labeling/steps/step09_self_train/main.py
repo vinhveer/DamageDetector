@@ -29,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", default=str(default_resemi_db()), help="Resemi SQLite DB.")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--classifier-run-id", required=True)
+    parser.add_argument("--self-training-run-id", default="", help="Optional custom id/name for this round (e.g. round1_clean_20260601_153000).")
     parser.add_argument("--round-index", type=int, default=1)
     parser.add_argument("--classifier-confidence-threshold", type=float, default=0.90)
     parser.add_argument("--classifier-margin-threshold", type=float, default=0.10)
@@ -73,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             include_low_priority=bool(args.include_low_priority),
             apply_promotions=bool(args.apply_promotions),
         )
-        result = run_self_training(conn, run_id=str(args.run_id), classifier_run_id=str(args.classifier_run_id), config=config)
+        result = run_self_training(conn, run_id=str(args.run_id), classifier_run_id=str(args.classifier_run_id), config=config, self_training_run_id=str(args.self_training_run_id or ""))
         if not bool(args.dry_run):
             persist_self_training_result(conn, result, created_at_utc=utc_now())
         print_summary(result)

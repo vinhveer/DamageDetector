@@ -91,6 +91,7 @@ def run_self_training(
     classifier_run_id: str,
     config: SelfTrainingConfig,
     taxonomy: LabelTaxonomy | None = None,
+    self_training_run_id: str = "",
 ) -> SelfTrainingResult:
     taxonomy = taxonomy or _resolve_taxonomy(conn, run_id=run_id)
     classifier = conn.execute("SELECT * FROM classifier_runs WHERE classifier_run_id = ? AND run_id = ?", (classifier_run_id, run_id)).fetchone()
@@ -101,7 +102,7 @@ def run_self_training(
     consistency = _read_consistency(conn, run_id=run_id)
     decisions: list[PromotionDecision] = []
     cleaned_rows: list[tuple] = []
-    self_training_run_id = f"selftrain_{run_id}_{classifier_run_id[:12]}_r{int(config.round_index)}"
+    self_training_run_id = str(self_training_run_id or "").strip() or f"selftrain_{run_id}_{classifier_run_id[:12]}_r{int(config.round_index)}"
     for row in rows:
         item = _decide_candidate(row, box=box.get(int(row["result_id"])), consistency=consistency.get(int(row["result_id"])), config=config)
         decisions.append(item)
