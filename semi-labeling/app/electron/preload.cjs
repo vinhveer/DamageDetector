@@ -1,14 +1,11 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// Generic shell IPC only — feature-screen APIs were removed.
 contextBridge.exposeInMainWorld('electronAPI', {
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   getDownloadsPath: () => ipcRenderer.invoke('app:get-downloads-path'),
-  listImageFiles: (payload) => ipcRenderer.invoke('files:list-images', payload),
   browsePath: (mode) => ipcRenderer.invoke('dialog:browse-path', mode),
   browseFiles: () => ipcRenderer.invoke('dialog:browse-path', 'files'),
   saveFileDialog: (opts) => ipcRenderer.invoke('dialog:save-path', opts),
-  saveCroppedImage: (payload) => ipcRenderer.invoke('saveCroppedImage', payload),
 
   // Labeling feature
   getLabelingDefaults: () => ipcRenderer.invoke('labeling:defaults'),
@@ -25,4 +22,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('labeling:step-output', listener);
     return () => ipcRenderer.removeListener('labeling:step-output', listener);
   },
+
+  // Review loop (R2/R3/R5/R6/R4)
+  listCleaned: (payload) => ipcRenderer.invoke('labeling:list-cleaned', payload),
+  updateCleanedLabel: (payload) => ipcRenderer.invoke('labeling:update-cleaned', payload),
+  commitCorrections: (payload) => ipcRenderer.invoke('labeling:commit-corrections', payload),
+  getSessionDecisions: (payload) => ipcRenderer.invoke('labeling:session-decisions', payload),
+  getSelfTrainingPromotions: (payload) => ipcRenderer.invoke('labeling:selftrain-promotions', payload),
+  getRunMetrics: (payload) => ipcRenderer.invoke('labeling:run-metrics', payload),
+  exportDataset: (payload) => ipcRenderer.invoke('labeling:export-dataset', payload),
 });

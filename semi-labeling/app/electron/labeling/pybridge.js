@@ -44,6 +44,7 @@ export const bridgeInfo = () => ({
 const STEP_MODULES = {
   step08: 'steps.step08_classifier.main',
   step09: 'steps.step09_self_train.main',
+  export_dataset: 'tools.export_dataset',
 };
 
 const isSafeScalar = (v) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';

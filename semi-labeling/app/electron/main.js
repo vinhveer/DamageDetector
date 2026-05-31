@@ -1,27 +1,19 @@
 import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   labelingDefaults, listRuns, listQueue, commitSession,
   getRunResources, listSessions, listSelfTrainingRuns,
+  listCleaned, updateCleanedLabel, commitCorrections,
+  getSessionDecisions, getSelfTrainingPromotions, getRunMetrics,
   runStep, bridgeInfo,
 } from './labeling/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
-const MAX_BASE64_CHARS = 120 * 1024 * 1024;
-const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff']);
 
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-
-const cleanPath = (value, fieldName) => {
-  if (typeof value !== 'string' || value.trim() === '' || value.includes('\0')) {
-    throw new Error(`Invalid ${fieldName}`);
-  }
-  return value.trim();
-};
 
 const createWindow = async () => {
   const mainWindow = new BrowserWindow({
@@ -73,33 +65,9 @@ const installSecurityHeaders = () => {
   });
 };
 
-const listImagesUnder = async (rootPath, recursive) => {
-  const root = path.resolve(cleanPath(rootPath, 'rootPath'));
-  const out = [];
-  const scan = async (dir) => {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (recursive) await scan(fullPath);
-        continue;
-      }
-      if (entry.isFile() && IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
-        out.push(fullPath);
-      }
-    }
-  };
-  await scan(root);
-  return out.sort((a, b) => a.localeCompare(b));
-};
-
-// ── Generic shell IPC (no feature screens) ──────────────────────────────────
+// ── Generic shell IPC ───────────────────────────────────────────────────────
 ipcMain.handle('app:get-version', () => app.getVersion());
 ipcMain.handle('app:get-downloads-path', () => app.getPath('downloads'));
-ipcMain.handle('files:list-images', async (_event, payload = {}) => {
-  const options = isPlainObject(payload) ? payload : {};
-  return listImagesUnder(options.rootPath, Boolean(options.recursive));
-});
 
 // ── Labeling feature IPC ────────────────────────────────────────────────────
 ipcMain.handle('labeling:defaults', () => labelingDefaults());
@@ -110,6 +78,12 @@ ipcMain.handle('labeling:run-resources', (_event, payload) => getRunResources(pa
 ipcMain.handle('labeling:list-sessions', (_event, payload) => listSessions(payload));
 ipcMain.handle('labeling:list-selftrain', (_event, payload) => listSelfTrainingRuns(payload));
 ipcMain.handle('labeling:bridge-info', () => bridgeInfo());
+ipcMain.handle('labeling:list-cleaned', (_event, payload) => listCleaned(payload));
+ipcMain.handle('labeling:update-cleaned', (_event, payload) => updateCleanedLabel(payload));
+ipcMain.handle('labeling:commit-corrections', (_event, payload) => commitCorrections(payload));
+ipcMain.handle('labeling:session-decisions', (_event, payload) => getSessionDecisions(payload));
+ipcMain.handle('labeling:selftrain-promotions', (_event, payload) => getSelfTrainingPromotions(payload));
+ipcMain.handle('labeling:run-metrics', (_event, payload) => getRunMetrics(payload));
 
 // Streams step stdout/stderr to the renderer via 'labeling:step-output' events,
 // keyed by a caller-supplied jobId. Resolves with the final { code, output }.
@@ -120,6 +94,29 @@ ipcMain.handle('labeling:run-step', async (event, payload = {}) => {
     if (!sender.isDestroyed()) sender.send('labeling:step-output', { jobId, chunk });
   };
   return runStep({ step, flags, onData });
+});
+
+// Export cleaned_labels to a YOLO/COCO dataset via the export_dataset tool.
+// Parses the tool's final JSON line into a structured result for the renderer.
+ipcMain.handle('labeling:export-dataset', async (_event, payload = {}) => {
+  const options = isPlainObject(payload) ? payload : {};
+  const flags = {
+    '--db': String(options.resemiDbPath || ''),
+    '--run-id': String(options.runId || ''),
+    '--image-root': String(options.imageRootPath || ''),
+    '--output-dir': String(options.outputDir || ''),
+    '--format': String(options.format || 'both'),
+  };
+  const res = await runStep({ step: 'export_dataset', flags });
+  // find the last non-empty line that parses as JSON
+  const lines = String(res.output || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    try {
+      const parsed = JSON.parse(lines[i]);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch { /* not JSON, keep scanning */ }
+  }
+  return { error: `Export failed (exit ${res.code})`, output: res.output };
 });
 
 ipcMain.handle('dialog:browse-path', async (_event, mode) => {
@@ -147,30 +144,6 @@ ipcMain.handle('dialog:save-path', async (_event, opts = {}) => {
     filters: Array.isArray(options.filters) ? options.filters : [{ name: 'PNG image', extensions: ['png'] }],
   });
   return result.canceled ? '' : (result.filePath || '');
-});
-
-ipcMain.handle('saveCroppedImage', async (_event, payload = {}) => {
-  try {
-    const { srcPath, pngBase64, outputDir } = isPlainObject(payload) ? payload : {};
-    const sourcePath = cleanPath(srcPath, 'srcPath');
-    const targetDir = path.resolve(cleanPath(outputDir, 'outputDir'));
-    const imageBase64 = String(pngBase64 || '');
-    if (!/^[a-zA-Z0-9+/=\s]+$/.test(imageBase64) || imageBase64.length > MAX_BASE64_CHARS) {
-      throw new Error('Invalid PNG payload');
-    }
-    await fs.mkdir(targetDir, { recursive: true });
-
-    const ext = path.extname(sourcePath);
-    const base = path.basename(sourcePath, ext).replace(/[^a-zA-Z0-9._-]+/g, '_') || 'image';
-    const outPath = path.join(targetDir, `${base}_crop.png`);
-
-    const buffer = Buffer.from(imageBase64, 'base64');
-    await fs.writeFile(outPath, buffer);
-
-    return { outPath };
-  } catch (err) {
-    return { error: err?.message || 'Failed to save cropped image' };
-  }
 });
 
 app.whenReady().then(async () => {
