@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, ErrorMessage, Field, SelectControl, TextInput } from '../../components/ui/index.js';
+import { shouldEmitDataChanged, needsHumanLabelConfirm } from './runFlow.js';
 
 const api = () => (typeof window !== 'undefined' ? window.electronAPI : null);
 
@@ -15,7 +16,7 @@ const makeStamped = (name) => {
 
 // Runs step08 (classifier) then step09 (self-training) for the selected run,
 // streaming Python output. The "filter name" is used to tag the round.
-export default function RunSteps({ dbPath, onChangeDbPath }) {
+export default function RunSteps({ dbPath, onChangeDbPath, onDataChanged }) {
   const [runs, setRuns] = useState([]);
   const [runId, setRunId] = useState('');
   const [resources, setResources] = useState(null);
@@ -66,6 +67,11 @@ export default function RunSteps({ dbPath, onChangeDbPath }) {
 
   const runPipeline = useCallback(async () => {
     if (!runId) { setError('Chọn run trước.'); return; }
+    // R8: warn + confirm when there are no human labels yet
+    if (needsHumanLabelConfirm(resources?.counts?.reviewDecisions ?? 0)) {
+      const ok = window.confirm('Chưa có nhãn người nào cho run này. Kết quả huấn luyện có thể yếu. Vẫn chạy?');
+      if (!ok) return;
+    }
     setRunning(true);
     setError('');
     setLog('');
@@ -105,12 +111,14 @@ export default function RunSteps({ dbPath, onChangeDbPath }) {
       if (r9.code !== 0) { setError('step09 thất bại (xem log).'); setRunning(false); return; }
 
       await loadResources();
+      // R7: notify other tabs only when both steps succeeded
+      if (shouldEmitDataChanged(r8.code, r9.code)) onDataChanged?.();
     } catch (e) {
       setError(String(e?.message || e));
     } finally {
       setRunning(false);
     }
-  }, [runId, dbPath, resources, confThreshold, marginThreshold, applyPromotions, filterName, loadResources]);
+  }, [runId, dbPath, resources, confThreshold, marginThreshold, applyPromotions, filterName, loadResources, onDataChanged]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--bg)]">
@@ -126,6 +134,11 @@ export default function RunSteps({ dbPath, onChangeDbPath }) {
             {error && <ErrorMessage>{error}</ErrorMessage>}
             {bridge && !bridge.pythonExists && (
               <ErrorMessage>Không tìm thấy Python venv ({bridge.python}). Kiểm tra .venv của dự án.</ErrorMessage>
+            )}
+            {resources && needsHumanLabelConfirm(resources.counts?.reviewDecisions ?? 0) && (
+              <div className="rounded-[6px] border border-[var(--accent,#f43f5e)] bg-[var(--surface)] px-3 py-2 text-[12px] text-[var(--accent,#f43f5e)]">
+                ⚠ Chưa có nhãn người (review_decisions = 0). Nên label một ít ở tab Labeling trước; kết quả train có thể yếu.
+              </div>
             )}
 
             <Field label="Resemi DB">

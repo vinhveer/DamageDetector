@@ -7,18 +7,28 @@ import {
   IconTag,
   IconPlayerPlay,
   IconHistory,
+  IconChecklist,
+  IconChartLine,
+  IconDownload,
 } from '@tabler/icons-react';
 import { IconButton } from './components/ui/index.js';
 import { cn } from './components/ui/cn.js';
 import Labeling from './features/labeling/Labeling.jsx';
+import CleanedLabels from './features/labeling/CleanedLabels.jsx';
 import RunSteps from './features/labeling/RunSteps.jsx';
 import Versions from './features/labeling/Versions.jsx';
+import Metrics from './features/labeling/Metrics.jsx';
+import Export from './features/labeling/Export.jsx';
 
-// Semi-labeling loop: label a sample -> run next steps -> review versions.
+// Semi-labeling loop: label a sample -> review machine labels -> run next steps
+// -> inspect versions/metrics -> export dataset.
 const NAV_MAIN = [
   { label: 'Labeling', value: 'labeling', icon: IconTag },
+  { label: 'Cleaned', value: 'cleaned', icon: IconChecklist },
   { label: 'Chạy bước', value: 'run-steps', icon: IconPlayerPlay },
   { label: 'Phiên bản', value: 'versions', icon: IconHistory },
+  { label: 'Chỉ số', value: 'metrics', icon: IconChartLine },
+  { label: 'Export', value: 'export', icon: IconDownload },
 ];
 
 const NAV_BOTTOM = [
@@ -74,6 +84,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState(DEFAULT_TAB);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [dbPath, setDbPath] = useState('');
+  const [dataVersion, setDataVersion] = useState(0);
+  const onDataChanged = () => setDataVersion((v) => v + 1);
 
   const currentTitle = ALL_NAV_ITEMS.find((i) => i.value === activeTab)?.label ?? 'Semi-labeling Review';
 
@@ -148,9 +160,12 @@ export default function App() {
           {/* Main content */}
           <section className="min-w-0 flex-1 overflow-hidden bg-[var(--bg)]">
             {activeTab === 'labeling' && <Labeling />}
-            {activeTab === 'run-steps' && <RunSteps dbPath={dbPath} onChangeDbPath={setDbPath} />}
-            {activeTab === 'versions' && <Versions dbPath={dbPath} onChangeDbPath={setDbPath} />}
-            {!['labeling', 'run-steps', 'versions'].includes(activeTab) && <EmptyContent />}
+            {activeTab === 'cleaned' && <CleanedLabels dbPath={dbPath} onChangeDbPath={setDbPath} dataVersion={dataVersion} />}
+            {activeTab === 'run-steps' && <RunSteps dbPath={dbPath} onChangeDbPath={setDbPath} onDataChanged={onDataChanged} />}
+            {activeTab === 'versions' && <Versions dbPath={dbPath} onChangeDbPath={setDbPath} dataVersion={dataVersion} />}
+            {activeTab === 'metrics' && <Metrics dbPath={dbPath} onChangeDbPath={setDbPath} dataVersion={dataVersion} />}
+            {activeTab === 'export' && <Export dbPath={dbPath} onChangeDbPath={setDbPath} />}
+            {!['labeling', 'cleaned', 'run-steps', 'versions', 'metrics', 'export'].includes(activeTab) && <EmptyContent />}
           </section>
 
         </div>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Button, EmptyState, ErrorMessage, Field, SelectControl, TextInput } from '../../components/ui/index.js';
 import { cn } from '../../components/ui/cn.js';
 import BoxImage from './BoxImage.jsx';
+import { reasonLabelVi } from './reasonLabels.js';
 
 const ACTIONS = {
   ACCEPT: 'manual_accept',
@@ -258,7 +259,46 @@ export default function Labeling() {
             <div className="text-[var(--text-muted)]">result_id <span className="text-[var(--text)]">{current.resultId}</span></div>
             <div className="text-[var(--text-muted)]">queue <span className="text-[var(--text)]">{current.queueType}</span></div>
             <div className="text-[var(--text-muted)]">reliability <span className="text-[var(--text)]">{current.reliabilityScore.toFixed(2)}</span></div>
-            <div className="text-[var(--text-muted)]">gợi ý <span className="text-[var(--text)]">{current.suggestedLabel || current.initialLabel}</span></div>
+            <div className="text-[var(--text-muted)]">gợi ý (step07) <span className="text-[var(--text)]">{current.suggestedLabel || current.initialLabel}</span></div>
+            <div className="text-[var(--text-muted)]">nhãn gốc <span className="text-[var(--text)]">{current.initialLabel}</span></div>
+          </div>
+
+          {/* R1: classifier prediction + defer reasons */}
+          <div className="grid gap-1 rounded-[6px] border border-[var(--border)] bg-[var(--surface-2)] p-2.5">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)]">Máy đoán</div>
+            {current.prediction ? (
+              <>
+                <div className="text-[var(--text)]">
+                  {current.prediction.predictedLabel}
+                  <span className="ml-1 text-[var(--text-muted)]">
+                    {(current.prediction.predictedProbability * 100).toFixed(1)}% · margin {current.prediction.margin.toFixed(2)}
+                  </span>
+                </div>
+                {current.prediction.secondLabel && (
+                  <div className="text-[12px] text-[var(--text-muted)]">
+                    kế tiếp: {current.prediction.secondLabel}
+                    {current.prediction.secondProbability != null && ` (${(current.prediction.secondProbability * 100).toFixed(1)}%)`}
+                  </div>
+                )}
+                {current.prediction.disagreesWithPolicy && (
+                  <div className="text-[12px] text-[var(--accent,#f43f5e)]">
+                    ⚠ máy không đồng ý policy{current.prediction.policyLabel ? ` (policy: ${current.prediction.policyLabel})` : ''}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="text-[12px] text-[var(--text-subtle)]">chưa có dự đoán — dùng gợi ý step07</div>
+            )}
+            {current.deferReasons.length > 0 && (
+              <div className="mt-1 grid gap-1">
+                <div className="text-[11px] text-[var(--text-muted)]">lý do defer:</div>
+                <div className="flex flex-wrap gap-1">
+                  {current.deferReasons.map((r) => (
+                    <span key={r} className="rounded-[4px] bg-[var(--hover)] px-1.5 py-0.5 text-[11px] text-[var(--text-muted)]">{reasonLabelVi(r)}</span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {current.reasons.length > 0 && (
