@@ -302,11 +302,12 @@ def _collect_training_items(conn: sqlite3.Connection, *, config: ClassifierConfi
 
     manual_rows = conn.execute(
         """
-        SELECT d.result_id, d.final_label, d.decision_type, d.review_session_id
+        SELECT d.result_id, d.new_label AS final_label, d.new_decision_type AS decision_type, d.review_session_id
         FROM review_decisions d
         JOIN review_sessions s ON s.review_session_id = d.review_session_id
-        WHERE s.run_id = ? AND d.decision_type IN ('manual_accept', 'manual_relabel')
-          AND d.final_label NOT IN ('reject', 'unknown', 'background', 'shadow', 'edge', 'object')
+        WHERE s.run_id = ? AND d.action IN ('manual_accept', 'manual_relabel')
+          AND d.new_label IS NOT NULL
+          AND d.new_label NOT IN ('reject', 'unknown', 'background', 'shadow', 'edge', 'object')
         """,
         (config.run_id,),
     ).fetchall()
