@@ -15,6 +15,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--final-max-dets-per-class", type=int, default=200)
+    parser.add_argument("--tiled-threshold", type=int, default=0,
+                        help="Images with max(width,height) above this run fixed-grid tiling + a full pass. 0 = always full-image (default).")
+    parser.add_argument("--tile-size", type=int, default=1024, help="Square tile size in px for tiled scan.")
+    parser.add_argument("--tile-overlap", type=int, default=128, help="Overlap in px between adjacent tiles.")
+    parser.add_argument("--nms-iou", type=float, default=0.0,
+                        help="Override per-class NMS IoU (recall). 0 = use each prompt spec's value (default).")
+    parser.add_argument("--box-threshold", type=float, default=0.0,
+                        help="Override per-class GDINO box threshold (recall). 0 = use each prompt spec's value (default).")
     parser.add_argument("--image-workers", type=int, default=1, help="How many images to process concurrently.")
     parser.add_argument("--service-workers", type=int, default=0, help="How many DINO worker processes to keep. 0 = auto.")
     parser.add_argument("--service-queue-size", type=int, default=0, help="How many waiting DINO calls to buffer. 0 = auto.")
@@ -43,6 +51,11 @@ def main(argv: list[str] | None = None) -> int:
         recursive=bool(args.recursive),
         limit=int(args.limit),
         final_max_dets_per_class=int(args.final_max_dets_per_class),
+        tiled_threshold=int(args.tiled_threshold),
+        tile_size=int(args.tile_size),
+        tile_overlap=int(args.tile_overlap),
+        nms_iou_override=float(args.nms_iou),
+        box_threshold_override=float(args.box_threshold),
         image_workers=int(args.image_workers),
         service_workers=int(args.service_workers),
         service_queue_size=int(args.service_queue_size),

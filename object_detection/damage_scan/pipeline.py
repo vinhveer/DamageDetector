@@ -10,7 +10,7 @@ from PIL import Image
 
 from .detectors import DamageDetector, GroundingDinoDetector
 from .geometry import GeoInput, compute_box_geometry, nms_detections
-from .models import Detection, ImageInfo
+from .models import Box, Detection, ImageInfo
 from .overlay import save_overlay
 from .prompts import PROMPT_ORDER, PROMPT_SPECS, PromptSpec
 from .sqlite_store import DamageScanStore
@@ -28,6 +28,15 @@ class DamageScanConfig:
     recursive: bool = False
     limit: int = 0
     final_max_dets_per_class: int = 200
+    # Tiled scan is OFF by default (original full-image behavior). Set >0 to enable
+    # for high-resolution images (used by the semi-labeling pipeline).
+    tiled_threshold: int = 0
+    tile_size: int = 1024
+    tile_overlap: int = 128
+    # Optional recall overrides. 0.0 = keep each prompt spec's own value (default repo
+    # behavior). The semi-labeling pipeline passes these to widen recall.
+    nms_iou_override: float = 0.0
+    box_threshold_override: float = 0.0
     max_box_fraction_of_image: float = 0.92
     save_overlays: bool = True
     include_full_raw_in_overlay: bool = False
@@ -166,9 +175,11 @@ class DamageScanPipeline:
         log_fn: Callable[[str], None] | None,
         detector_log_fn: Callable[[str], None] | None,
     ) -> None:
-        if log_fn is not None:
-            log_fn(f"[{index}/{total}] {image_path.name}")
         info = read_image_info(input_dir, image_path)
+        if log_fn is not None:
+            max_dim = max(int(info.width), int(info.height))
+            mode = "tiled" if (int(self.config.tiled_threshold) > 0 and max_dim > int(self.config.tiled_threshold)) else "full"
+            log_fn(f"[{index}/{total}] {image_path.name} {info.width}x{info.height} mode={mode}")
         image_id = self.store.upsert_image(
             run_id=run_id,
             image=info,
@@ -240,26 +251,35 @@ class DamageScanPipeline:
         spec: PromptSpec,
         log_fn: Callable[[str], None] | None,
     ) -> tuple[list[Detection], list[Detection]]:
-        raw_detections = self.detector.detect(
-            image_path=image.path,
-            prompt_key=spec.key,
-            prompt_text=spec.prompt,
-            box_threshold=float(spec.box_threshold),
-            text_threshold=float(spec.text_threshold),
-            max_dets=int(self.config.final_max_dets_per_class),
-            stage="full_raw",
-            source="full",
-            image_width=image.width,
-            image_height=image.height,
-            roi_box=None,
-            log_fn=log_fn,
-        )
+        # Recall overrides: 0.0 means "use the prompt spec's own value" (repo default).
+        box_threshold = float(self.config.box_threshold_override) if float(self.config.box_threshold_override) > 0.0 else float(spec.box_threshold)
+        nms_iou = float(self.config.nms_iou_override) if float(self.config.nms_iou_override) > 0.0 else float(spec.nms_iou)
+
+        max_dim = max(int(image.width), int(image.height))
+        use_tiled = int(self.config.tiled_threshold) > 0 and max_dim > int(self.config.tiled_threshold)
+        if use_tiled:
+            raw_detections = self._detect_tiled_plus_full(image=image, spec=spec, box_threshold=box_threshold, log_fn=log_fn)
+        else:
+            raw_detections = self.detector.detect(
+                image_path=image.path,
+                prompt_key=spec.key,
+                prompt_text=spec.prompt,
+                box_threshold=box_threshold,
+                text_threshold=float(spec.text_threshold),
+                max_dets=int(self.config.final_max_dets_per_class),
+                stage="full_raw",
+                source="full",
+                image_width=image.width,
+                image_height=image.height,
+                roi_box=None,
+                log_fn=log_fn,
+            )
         image_area = max(1, int(image.width) * int(image.height))
         max_area = float(self.config.max_box_fraction_of_image) * float(image_area)
         final_candidates = [det for det in raw_detections if float(det.box.area) <= max_area]
         final_candidates = nms_detections(
             final_candidates,
-            iou_threshold=float(spec.nms_iou),
+            iou_threshold=nms_iou,
             max_dets=int(self.config.final_max_dets_per_class),
         )
         final = [
@@ -278,3 +298,72 @@ class DamageScanPipeline:
             for det in final_candidates
         ]
         return raw_detections, final
+
+    def _grid_tiles(self, *, width: int, height: int) -> list[Box]:
+        """Fixed-size square tiles covering the image, with a small overlap so
+        damage straddling a tile edge still lands fully inside some tile."""
+        size = int(self.config.tile_size)
+        overlap = int(self.config.tile_overlap)
+        step = max(1, size - overlap)
+        tiles: list[Box] = []
+        ys = list(range(0, max(1, height - overlap), step))
+        xs = list(range(0, max(1, width - overlap), step))
+        for y in ys:
+            y1 = y
+            y2 = min(height, y + size)
+            if y2 - y1 < size and y2 == height:
+                y1 = max(0, height - size)
+            for x in xs:
+                x1 = x
+                x2 = min(width, x + size)
+                if x2 - x1 < size and x2 == width:
+                    x1 = max(0, width - size)
+                tiles.append(Box(float(x1), float(y1), float(x2), float(y2)))
+        return tiles
+
+    def _detect_tiled_plus_full(
+        self,
+        *,
+        image: ImageInfo,
+        spec: PromptSpec,
+        box_threshold: float,
+        log_fn: Callable[[str], None] | None,
+    ) -> list[Detection]:
+        """Fixed 1024 grid tiles (catch small damage in HD images) + one
+        full-image pass (catch large regions split across tiles), merged."""
+        collected: list[Detection] = []
+        tiles = self._grid_tiles(width=int(image.width), height=int(image.height))
+        for tile in tiles:
+            collected.extend(
+                self.detector.detect(
+                    image_path=image.path,
+                    prompt_key=spec.key,
+                    prompt_text=spec.prompt,
+                    box_threshold=box_threshold,
+                    text_threshold=float(spec.text_threshold),
+                    max_dets=int(self.config.final_max_dets_per_class),
+                    stage="tile_raw",
+                    source="tile",
+                    image_width=image.width,
+                    image_height=image.height,
+                    roi_box=tile,
+                    log_fn=log_fn,
+                )
+            )
+        collected.extend(
+            self.detector.detect(
+                image_path=image.path,
+                prompt_key=spec.key,
+                prompt_text=spec.prompt,
+                box_threshold=box_threshold,
+                text_threshold=float(spec.text_threshold),
+                max_dets=int(self.config.final_max_dets_per_class),
+                stage="full_raw",
+                source="full",
+                image_width=image.width,
+                image_height=image.height,
+                roi_box=None,
+                log_fn=log_fn,
+            )
+        )
+        return collected
