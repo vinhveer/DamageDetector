@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Generic shell IPC only — feature-screen APIs were removed.
 contextBridge.exposeInMainWorld('electronAPI', {
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   getDownloadsPath: () => ipcRenderer.invoke('app:get-downloads-path'),
@@ -8,46 +9,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
   browseFiles: () => ipcRenderer.invoke('dialog:browse-path', 'files'),
   saveFileDialog: (opts) => ipcRenderer.invoke('dialog:save-path', opts),
   saveCroppedImage: (payload) => ipcRenderer.invoke('saveCroppedImage', payload),
-
-  getDedupGroupsDefaults: () => ipcRenderer.invoke('dedup-groups:defaults'),
-  listDedupRuns: (payload) => ipcRenderer.invoke('dedup-groups:list-runs', payload),
-  listDedupGroups: (payload) => ipcRenderer.invoke('dedup-groups:list-groups', payload),
-  listDedupGroupMembers: (payload) => ipcRenderer.invoke('dedup-groups:list-members', payload),
-  listDedupImages: (payload) => ipcRenderer.invoke('dedup-groups:list-images', payload),
-  listDedupImageBoxes: (payload) => ipcRenderer.invoke('dedup-groups:list-image-boxes', payload),
-
-  getClusterLabelingDefaults: () => ipcRenderer.invoke('cluster-labeling:defaults'),
-  listClusterRuns: (payload) => ipcRenderer.invoke('cluster-labeling:list-runs', payload),
-  listClusters: (payload) => ipcRenderer.invoke('cluster-labeling:list-clusters', payload),
-  getClusterMembers: (payload) => ipcRenderer.invoke('cluster-labeling:get-cluster-members', payload),
-  getBoxImage: (payload) => ipcRenderer.invoke('cluster-labeling:get-box-image', payload),
-  listClusterSessions: (payload) => ipcRenderer.invoke('cluster-labeling:list-sessions', payload),
-  loadClusterSession: (payload) => ipcRenderer.invoke('cluster-labeling:load-session', payload),
-  saveClusterSession: (payload) => ipcRenderer.invoke('cluster-labeling:save-session', payload),
-  createClusterSession: (payload) => ipcRenderer.invoke('cluster-labeling:create-session', payload),
-  deleteClusterSession: (payload) => ipcRenderer.invoke('cluster-labeling:delete-session', payload),
-
-  getClassifierResultsDefaults: () => ipcRenderer.invoke('classifier-results:defaults'),
-  listClassifierRuns: (payload) => ipcRenderer.invoke('classifier-results:list-runs', payload),
-  getClassifierApply: (payload) => ipcRenderer.invoke('classifier-results:get-apply', payload),
-  getClassifierTraining: (payload) => ipcRenderer.invoke('classifier-results:get-training', payload),
-
-  getLabelReviewDefaults: () => ipcRenderer.invoke('label-review:defaults'),
-  listSubclusterRuns: (payload) => ipcRenderer.invoke('label-review:list-runs', payload),
-  listSubclustersByClass: (payload) => ipcRenderer.invoke('label-review:list-subclusters', payload),
-  getSubclusterMembers: (payload) => ipcRenderer.invoke('label-review:get-subcluster-members', payload),
-  listSuspectRuns: (payload) => ipcRenderer.invoke('label-review:list-suspect-runs', payload),
-  listSuspectClusters: (payload) => ipcRenderer.invoke('label-review:list-suspect-clusters', payload),
-  getSuspectClusterMembers: (payload) => ipcRenderer.invoke('label-review:get-suspect-cluster-members', payload),
-  listLabelReviewSessions: (payload) => ipcRenderer.invoke('label-review:list-sessions', payload),
-  loadLabelReviewSession: (payload) => ipcRenderer.invoke('label-review:load-session', payload),
-  saveLabelReviewSession: (payload) => ipcRenderer.invoke('label-review:save-session', payload),
-  createLabelReviewSession: (payload) => ipcRenderer.invoke('label-review:create-session', payload),
-  deleteLabelReviewSession: (payload) => ipcRenderer.invoke('label-review:delete-session', payload),
-
-  getFinalReviewDefaults: () => ipcRenderer.invoke('final-review:defaults'),
-  listFinalCsvs: (payload) => ipcRenderer.invoke('final-review:list-csvs', payload),
-  listFinalImages: (payload) => ipcRenderer.invoke('final-review:list-images', payload),
-  getFinalImageBoxes: (payload) => ipcRenderer.invoke('final-review:get-image-boxes', payload),
-  exportFinalToCoco: (payload) => ipcRenderer.invoke('final-review:export-coco', payload),
 });

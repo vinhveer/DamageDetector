@@ -1,11 +1,6 @@
-import { Component, Suspense, lazy, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import {
-  IconBrain,
-  IconChecklist,
-  IconCirclesRelation,
-  IconFlag,
-  IconLayoutGrid,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
   IconSettings,
@@ -13,20 +8,9 @@ import {
 import { IconButton } from './components/ui/index.js';
 import { cn } from './components/ui/cn.js';
 
-const DedupGroups = lazy(() => import('./features/dedupGroups/DedupGroups.jsx'));
-const ClusterLabeling = lazy(() => import('./features/clusterLabeling/ClusterLabeling.jsx'));
-const ClassifierResults = lazy(() => import('./features/classifierResults/ClassifierResults.jsx'));
-const LabelReview = lazy(() => import('./features/labelReview/LabelReview.jsx'));
-const FinalReview = lazy(() => import('./features/finalReview/FinalReview.jsx'));
-const SettingsPage = lazy(() => import('./features/settings/SettingsPage.jsx'));
-
-const NAV_MAIN = [
-  { label: 'Step 4 · Dedup',      value: 'dedupGroups',       icon: IconCirclesRelation },
-  { label: 'Step 5 · Cluster',    value: 'clusterLabeling',   icon: IconLayoutGrid       },
-  { label: 'Step 6 · Classifier', value: 'classifierResults', icon: IconBrain            },
-  { label: 'Step 7 · Review',     value: 'labelReview',       icon: IconChecklist        },
-  { label: 'Step 8 · Final',      value: 'finalReview',       icon: IconFlag             },
-];
+// Layout shell only. Feature screens were removed — add new ones to NAV and
+// render them in the content section below.
+const NAV_MAIN = [];
 
 const NAV_BOTTOM = [
   { label: 'Settings', value: 'settings', icon: IconSettings },
@@ -34,7 +18,7 @@ const NAV_BOTTOM = [
 
 const ALL_NAV_ITEMS = [...NAV_MAIN, ...NAV_BOTTOM];
 
-const DEFAULT_TAB = 'labelReview';
+const DEFAULT_TAB = ALL_NAV_ITEMS[0]?.value ?? '';
 
 function NavItem({ item, isActive, sidebarOpen, onClick }) {
   const Icon = item.icon;
@@ -69,44 +53,10 @@ function NavItem({ item, isActive, sidebarOpen, onClick }) {
   );
 }
 
-class TabErrorBoundary extends Component {
-  constructor(props) {
-    super(props);
-    this.state = { error: null };
-  }
-
-  static getDerivedStateFromError(error) {
-    return { error };
-  }
-
-  componentDidUpdate(prevProps) {
-    if (prevProps.tabKey !== this.props.tabKey && this.state.error) {
-      this.setState({ error: null });
-    }
-  }
-
-  render() {
-    if (this.state.error) {
-      return (
-        <div className="flex h-full items-center justify-center bg-[var(--bg)] p-6">
-          <div className="max-w-[520px] rounded-[6px] border border-[var(--border)] bg-[var(--surface)] p-4">
-            <div className="text-[14px] font-semibold text-[var(--text)]">Tab failed to render</div>
-            <p className="mt-2 text-[13px] text-[var(--text-muted)]">
-              {this.state.error?.message || 'Unknown UI error'}
-            </p>
-          </div>
-        </div>
-      );
-    }
-
-    return this.props.children;
-  }
-}
-
-function TabFallback() {
+function EmptyContent() {
   return (
     <div className="flex h-full items-center justify-center bg-[var(--bg)] text-[13px] text-[var(--text-muted)]">
-      Loading...
+      No screens yet — this is the layout shell.
     </div>
   );
 }
@@ -178,16 +128,7 @@ export default function App() {
 
           {/* Main content */}
           <section className="min-w-0 flex-1 overflow-hidden bg-[var(--bg)]">
-            <TabErrorBoundary tabKey={activeTab}>
-              <Suspense fallback={<TabFallback />}>
-                {activeTab === 'dedupGroups'       && <DedupGroups />}
-                {activeTab === 'clusterLabeling'   && <ClusterLabeling />}
-                {activeTab === 'classifierResults' && <ClassifierResults />}
-                {activeTab === 'labelReview'       && <LabelReview />}
-                {activeTab === 'finalReview'       && <FinalReview />}
-                {activeTab === 'settings'          && <SettingsPage />}
-              </Suspense>
-            </TabErrorBoundary>
+            <EmptyContent />
           </section>
 
         </div>

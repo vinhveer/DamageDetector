@@ -2,53 +2,6 @@ import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  dedupGroupsDefaults,
-  listDedupGroupMembers,
-  listDedupGroups,
-  listDedupImageBoxes,
-  listDedupImages,
-  listDedupRuns
-} from './dedup_groups/index.js';
-import {
-  clusterLabelingDefaults,
-  createSession,
-  deleteSession,
-  getBoxImage,
-  getClusterMembers,
-  listClusterRuns,
-  listClusters,
-  listSessions,
-  loadSession,
-  saveSession,
-} from './cluster_labeling/index.js';
-import {
-  classifierResultsDefaults,
-  getApplyRun,
-  getTrainingRun,
-  listClassifierRuns,
-} from './classifier_results/index.js';
-import {
-  labelReviewDefaults,
-  listSubclusterRuns,
-  listSubclustersByClass,
-  getSubclusterMembers,
-  listSuspectRuns,
-  listSuspectClusters,
-  getSuspectClusterMembers,
-  listSessions as listLabelReviewSessions,
-  loadSession as loadLabelReviewSession,
-  saveSession as saveLabelReviewSession,
-  createSession as createLabelReviewSession,
-  deleteSession as deleteLabelReviewSession,
-} from './label_review/index.js';
-import {
-  finalReviewDefaults,
-  listFinalCsvs,
-  listFinalImages,
-  getFinalImageBoxes,
-  exportFinalToCoco,
-} from './final_review/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -135,54 +88,13 @@ const listImagesUnder = async (rootPath, recursive) => {
   return out.sort((a, b) => a.localeCompare(b));
 };
 
+// ── Generic shell IPC (no feature screens) ──────────────────────────────────
 ipcMain.handle('app:get-version', () => app.getVersion());
 ipcMain.handle('app:get-downloads-path', () => app.getPath('downloads'));
 ipcMain.handle('files:list-images', async (_event, payload = {}) => {
   const options = isPlainObject(payload) ? payload : {};
   return listImagesUnder(options.rootPath, Boolean(options.recursive));
 });
-
-ipcMain.handle('dedup-groups:defaults', dedupGroupsDefaults);
-ipcMain.handle('dedup-groups:list-runs', (_event, payload) => listDedupRuns(payload));
-ipcMain.handle('dedup-groups:list-groups', (_event, payload) => listDedupGroups(payload));
-ipcMain.handle('dedup-groups:list-members', (_event, payload) => listDedupGroupMembers(payload));
-ipcMain.handle('dedup-groups:list-images', (_event, payload) => listDedupImages(payload));
-ipcMain.handle('dedup-groups:list-image-boxes', (_event, payload) => listDedupImageBoxes(payload));
-
-ipcMain.handle('cluster-labeling:defaults', clusterLabelingDefaults);
-ipcMain.handle('cluster-labeling:list-runs', (_event, payload) => listClusterRuns(payload));
-ipcMain.handle('cluster-labeling:list-clusters', (_event, payload) => listClusters(payload));
-ipcMain.handle('cluster-labeling:get-cluster-members', (_event, payload) => getClusterMembers(payload));
-ipcMain.handle('cluster-labeling:get-box-image', (_event, payload) => getBoxImage(payload));
-ipcMain.handle('cluster-labeling:list-sessions', (_event, payload) => listSessions(payload));
-ipcMain.handle('cluster-labeling:load-session', (_event, payload) => loadSession(payload));
-ipcMain.handle('cluster-labeling:save-session', (_event, payload) => saveSession(payload));
-ipcMain.handle('cluster-labeling:create-session', (_event, payload) => createSession(payload));
-ipcMain.handle('cluster-labeling:delete-session', (_event, payload) => deleteSession(payload));
-
-ipcMain.handle('classifier-results:defaults', classifierResultsDefaults);
-ipcMain.handle('classifier-results:list-runs', (_event, payload) => listClassifierRuns(payload));
-ipcMain.handle('classifier-results:get-apply', (_event, payload) => getApplyRun(payload));
-ipcMain.handle('classifier-results:get-training', (_event, payload) => getTrainingRun(payload));
-
-ipcMain.handle('label-review:defaults', labelReviewDefaults);
-ipcMain.handle('label-review:list-runs', (_event, payload) => listSubclusterRuns(payload));
-ipcMain.handle('label-review:list-subclusters', (_event, payload) => listSubclustersByClass(payload));
-ipcMain.handle('label-review:get-subcluster-members', (_event, payload) => getSubclusterMembers(payload));
-ipcMain.handle('label-review:list-suspect-runs', (_event, payload) => listSuspectRuns(payload));
-ipcMain.handle('label-review:list-suspect-clusters', (_event, payload) => listSuspectClusters(payload));
-ipcMain.handle('label-review:get-suspect-cluster-members', (_event, payload) => getSuspectClusterMembers(payload));
-ipcMain.handle('label-review:list-sessions', (_event, payload) => listLabelReviewSessions(payload));
-ipcMain.handle('label-review:load-session', (_event, payload) => loadLabelReviewSession(payload));
-ipcMain.handle('label-review:save-session', (_event, payload) => saveLabelReviewSession(payload));
-ipcMain.handle('label-review:create-session', (_event, payload) => createLabelReviewSession(payload));
-ipcMain.handle('label-review:delete-session', (_event, payload) => deleteLabelReviewSession(payload));
-
-ipcMain.handle('final-review:defaults', finalReviewDefaults);
-ipcMain.handle('final-review:list-csvs', (_event, payload) => listFinalCsvs(payload));
-ipcMain.handle('final-review:list-images', (_event, payload) => listFinalImages(payload));
-ipcMain.handle('final-review:get-image-boxes', (_event, payload) => getFinalImageBoxes(payload));
-ipcMain.handle('final-review:export-coco', (_event, payload) => exportFinalToCoco(payload));
 
 ipcMain.handle('dialog:browse-path', async (_event, mode) => {
   if (!['file', 'directory', 'file_or_directory', 'files'].includes(mode)) {
