@@ -7,7 +7,7 @@ decisions additionally produce a `prototype_versions` + `prototype_items` set.
 
 Invoked by the Electron review console as a subprocess:
 
-    python -m resemi.tools.review_commit --input <payload.json>
+    python -m tools.review_commit --input <payload.json>
 
 The payload shape (produced by app/electron/review_console/sessions.js):
 
@@ -34,11 +34,11 @@ import json
 import uuid
 from pathlib import Path
 
-from resemi.lib import bootstrap
+from lib import bootstrap
 
 bootstrap.ensure_on_path()
 
-from resemi.lib.schema import connect_output, utc_now  # noqa: E402
+from lib.schema import connect_output, utc_now  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:

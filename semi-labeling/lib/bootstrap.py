@@ -1,16 +1,16 @@
-"""Import bootstrap for resemi step/tool CLIs.
+"""Import bootstrap for the step/tool CLIs.
 
-Ensures the ``semi-labeling`` directory (which contains the ``resemi`` package)
-is on sys.path so the modules import cleanly whether invoked as
-``python -m resemi.steps.stepNN`` or as a direct file path.
+Ensures the ``semi-labeling`` directory is on sys.path so the top-level
+``lib`` / ``steps`` / ``tools`` packages import cleanly whether invoked as
+``python -m steps.stepNN`` or as a direct file path.
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-# bootstrap.py -> lib/ -> resemi/ -> semi-labeling/
-_SEMI_LABELING_DIR = Path(__file__).resolve().parents[2]
+# bootstrap.py -> lib/ -> semi-labeling/
+_SEMI_LABELING_DIR = Path(__file__).resolve().parents[1]
 
 
 def ensure_on_path() -> None:

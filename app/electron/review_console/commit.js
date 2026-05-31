@@ -10,8 +10,8 @@ const __dirname = path.dirname(__filename);
 const appRoot = path.resolve(__dirname, '..', '..');
 const repoRoot = path.resolve(appRoot, '..');
 const labRoot = path.resolve(repoRoot, '..');
-const commitModule = 'resemi.tools.review_commit';
-const commitScript = path.join(repoRoot, 'semi-labeling', 'resemi', 'tools', 'review_commit.py');
+const commitModule = 'tools.review_commit';
+const commitScript = path.join(repoRoot, 'semi-labeling', 'tools', 'review_commit.py');
 
 const cleanPath = (value, fieldName) => {
   const raw = String(value || '').trim();

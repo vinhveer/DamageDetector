@@ -16,12 +16,12 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from resemi.lib import bootstrap
+from lib import bootstrap
 
 bootstrap.ensure_on_path()
 
-from resemi.lib.paths import default_resemi_db  # noqa: E402
-from resemi.lib.prototype_bank import (  # noqa: E402
+from lib.paths import default_resemi_db  # noqa: E402
+from lib.prototype_bank import (  # noqa: E402
     PrototypeBankConfig,
     PrototypeSpec,
     build_prototype_bank,
@@ -30,7 +30,7 @@ from resemi.lib.prototype_bank import (  # noqa: E402
     score_prototype_bank_preview,
     score_prototypes,
 )
-from resemi.lib.schema import connect_output, utc_now  # noqa: E402
+from lib.schema import connect_output, utc_now  # noqa: E402
 
 
 DEFAULT_MODEL_NAME = "facebook/dinov2-small"

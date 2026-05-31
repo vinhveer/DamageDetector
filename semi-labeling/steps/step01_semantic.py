@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import argparse
 
-from resemi.lib import bootstrap
+from lib import bootstrap
 
 bootstrap.ensure_on_path()
 
-from resemi.lib.crop_generation import parse_view_specs  # noqa: E402
-from resemi.lib.paths import default_dedup_db, default_image_root, default_resemi_db, default_source_db  # noqa: E402
-from resemi.lib.pipeline import ResemiConfig, ResemiPipeline  # noqa: E402
+from lib.crop_generation import parse_view_specs  # noqa: E402
+from lib.paths import default_dedup_db, default_image_root, default_resemi_db, default_source_db  # noqa: E402
+from lib.pipeline import ResemiConfig, ResemiPipeline  # noqa: E402
 
 
 def parse_labels(raw: str) -> tuple[str, ...]:

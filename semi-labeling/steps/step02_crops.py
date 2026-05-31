@@ -17,15 +17,15 @@ import argparse
 import json
 from pathlib import Path
 
-from resemi.lib import bootstrap
+from lib import bootstrap
 
 bootstrap.ensure_on_path()
 
-from resemi.lib.crop_generation import DEFAULT_VIEW_SPECS, generate_crop_views, parse_view_specs  # noqa: E402
-from resemi.lib.paths import default_image_root, default_resemi_db  # noqa: E402
-from resemi.lib.pipeline import ResemiPipeline  # noqa: E402
-from resemi.lib.schema import connect_output  # noqa: E402
-from resemi.lib.source_store import connect_readonly, read_source_detections  # noqa: E402
+from lib.crop_generation import DEFAULT_VIEW_SPECS, generate_crop_views, parse_view_specs  # noqa: E402
+from lib.paths import default_image_root, default_resemi_db  # noqa: E402
+from lib.pipeline import ResemiPipeline  # noqa: E402
+from lib.schema import connect_output  # noqa: E402
+from lib.source_store import connect_readonly, read_source_detections  # noqa: E402
 
 
 def _read_run_row(conn, run_id: str) -> dict:
@@ -36,7 +36,7 @@ def _read_run_row(conn, run_id: str) -> dict:
     if row is None:
         raise RuntimeError(
             f"Resemi run not found: '{run_id}'. Run step01 first.\n"
-            "  python -m resemi.run_pipeline run step01 --run-id <id>"
+            "  python -m run_pipeline run step01 --run-id <id>"
         )
     return {
         "source_db_path": str(row["source_db_path"]),

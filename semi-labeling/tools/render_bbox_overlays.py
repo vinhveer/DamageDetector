@@ -11,11 +11,11 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from resemi.lib import bootstrap
+from lib import bootstrap
 
 bootstrap.ensure_on_path()
 
-from resemi.lib.paths import LAB_ROOT, default_image_root, default_resemi_db  # noqa: E402
+from lib.paths import LAB_ROOT, default_image_root, default_resemi_db  # noqa: E402
 
 
 @dataclass(frozen=True)

@@ -36,11 +36,11 @@ import importlib
 import sqlite3
 from pathlib import Path
 
-from resemi.lib import bootstrap
+from lib import bootstrap
 
 bootstrap.ensure_on_path()
 
-from resemi.lib.paths import default_resemi_db  # noqa: E402
+from lib.paths import default_resemi_db  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ STEPS: list[dict] = [
     {
         "name": "step01",
         "label": "Semantic Init",
-        "module": "resemi.steps.step01_semantic",
+        "module": "steps.step01_semantic",
         "optional": False,
         "check_sql": "SELECT COUNT(*) FROM semantic_decisions WHERE run_id = ?",
         "check_label": "semantic_decisions",
@@ -60,7 +60,7 @@ STEPS: list[dict] = [
     {
         "name": "step02",
         "label": "Crop Generation",
-        "module": "resemi.steps.step02_crops",
+        "module": "steps.step02_crops",
         "optional": False,
         "check_sql": (
             "SELECT COUNT(*) FROM crop_views "
@@ -72,7 +72,7 @@ STEPS: list[dict] = [
     {
         "name": "step03",
         "label": "DINOv2 Embedding",
-        "module": "resemi.steps.step03_embed",
+        "module": "steps.step03_embed",
         "optional": False,
         "check_sql": "SELECT COUNT(*) FROM embedding_runs WHERE run_id = ?",
         "check_label": "embedding_runs",
@@ -81,7 +81,7 @@ STEPS: list[dict] = [
     {
         "name": "step04",
         "label": "Core Cluster Mining",
-        "module": "resemi.steps.step04_core",
+        "module": "steps.step04_core",
         "optional": True,
         "check_sql": "SELECT COUNT(*) FROM core_mining_runs WHERE run_id = ?",
         "check_label": "core_mining_runs",
@@ -90,7 +90,7 @@ STEPS: list[dict] = [
     {
         "name": "step05",
         "label": "Prototype Bank",
-        "module": "resemi.steps.step05_proto",
+        "module": "steps.step05_proto",
         "optional": True,
         "check_sql": "SELECT COUNT(*) FROM prototype_scoring_runs WHERE run_id = ?",
         "check_label": "prototype_scoring_runs",
@@ -99,7 +99,7 @@ STEPS: list[dict] = [
     {
         "name": "step06",
         "label": "Reliability Scoring",
-        "module": "resemi.steps.step06_reliability",
+        "module": "steps.step06_reliability",
         "optional": True,
         "check_sql": "SELECT COUNT(*) FROM reliability_scoring_runs WHERE run_id = ?",
         "check_label": "reliability_scoring_runs",
@@ -108,7 +108,7 @@ STEPS: list[dict] = [
     {
         "name": "step07",
         "label": "Decision Policy",
-        "module": "resemi.steps.step07_decision",
+        "module": "steps.step07_decision",
         "optional": True,
         "check_sql": "SELECT COUNT(*) FROM decision_policy_runs WHERE run_id = ?",
         "check_label": "decision_policy_runs",
@@ -117,7 +117,7 @@ STEPS: list[dict] = [
     {
         "name": "step08",
         "label": "Lightweight Classifier",
-        "module": "resemi.steps.step08_classifier",
+        "module": "steps.step08_classifier",
         "optional": True,
         "check_sql": "SELECT COUNT(*) FROM classifier_runs WHERE run_id = ?",
         "check_label": "classifier_runs",
@@ -126,7 +126,7 @@ STEPS: list[dict] = [
     {
         "name": "step09",
         "label": "Self-Training",
-        "module": "resemi.steps.step09_self_train",
+        "module": "steps.step09_self_train",
         "optional": True,
         "check_sql": "SELECT COUNT(*) FROM self_training_runs WHERE run_id = ?",
         "check_label": "self_training_runs",

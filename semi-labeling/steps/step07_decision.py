@@ -13,13 +13,13 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from resemi.lib import bootstrap
+from lib import bootstrap
 
 bootstrap.ensure_on_path()
 
-from resemi.lib.decision_policy_v1 import DecisionPolicyConfig, apply_decision_policy, persist_decision_policy_result  # noqa: E402
-from resemi.lib.paths import default_resemi_db  # noqa: E402
-from resemi.lib.schema import connect_output, utc_now  # noqa: E402
+from lib.decision_policy_v1 import DecisionPolicyConfig, apply_decision_policy, persist_decision_policy_result  # noqa: E402
+from lib.paths import default_resemi_db  # noqa: E402
+from lib.schema import connect_output, utc_now  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:

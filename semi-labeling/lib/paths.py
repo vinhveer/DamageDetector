@@ -13,8 +13,8 @@ def _resolve_lab_root() -> Path:
     for candidate in current.parents:
         if (candidate / "DamageDetector").exists() and (candidate / "infer_results").exists():
             return candidate
-    # lib/ -> resemi/ -> semi-labeling/ -> DamageDetector/ -> Lab
-    return current.parents[4]
+    # lib/ -> semi-labeling/ -> DamageDetector/ -> Lab
+    return current.parents[3]
 
 
 LAB_ROOT = _resolve_lab_root()

@@ -13,13 +13,13 @@ import argparse
 import sqlite3
 from pathlib import Path
 
-from resemi.lib import bootstrap
+from lib import bootstrap
 
 bootstrap.ensure_on_path()
 
-from resemi.lib.core_mining import CoreMiningConfig, persist_core_mining_result, run_core_mining  # noqa: E402
-from resemi.lib.paths import default_resemi_db  # noqa: E402
-from resemi.lib.schema import connect_output, utc_now  # noqa: E402
+from lib.core_mining import CoreMiningConfig, persist_core_mining_result, run_core_mining  # noqa: E402
+from lib.paths import default_resemi_db  # noqa: E402
+from lib.schema import connect_output, utc_now  # noqa: E402
 
 
 DEFAULT_MODEL_NAME = "facebook/dinov2-small"

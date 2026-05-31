@@ -20,12 +20,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, UnidentifiedImageError
 
-from resemi.lib import bootstrap
+from lib import bootstrap
 
 bootstrap.ensure_embedder_on_path()
 
 from embedder import DinoV2Embedder  # type: ignore  # noqa: E402
-from resemi.lib.embedding_cache import (  # noqa: E402
+from lib.embedding_cache import (  # noqa: E402
     CropEmbeddingRow,
     existing_embedding_keys,
     existing_skip_keys,
@@ -33,8 +33,8 @@ from resemi.lib.embedding_cache import (  # noqa: E402
     read_crop_views,
     update_embedding_counts,
 )
-from resemi.lib.paths import default_resemi_db  # noqa: E402
-from resemi.lib.schema import connect_output, utc_now  # noqa: E402
+from lib.paths import default_resemi_db  # noqa: E402
+from lib.schema import connect_output, utc_now  # noqa: E402
 
 
 DEFAULT_MODEL_NAME = "facebook/dinov2-small"
