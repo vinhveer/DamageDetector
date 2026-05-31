@@ -6,12 +6,12 @@ import argparse
 import json
 from pathlib import Path
 
-from lib import bootstrap
+from shared.runtime import bootstrap
 
 bootstrap.ensure_on_path()
 
-from lib.paths import default_resemi_db  # noqa: E402
-from lib.schema import SCHEMA_VERSION, connect_output  # noqa: E402
+from shared.runtime.paths import default_resemi_db  # noqa: E402
+from shared.db.schema import SCHEMA_VERSION, connect_output  # noqa: E402
 
 
 REQUIRED_TABLES: tuple[str, ...] = (

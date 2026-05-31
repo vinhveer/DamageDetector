@@ -34,11 +34,11 @@ import json
 import uuid
 from pathlib import Path
 
-from lib import bootstrap
+from shared.runtime import bootstrap
 
 bootstrap.ensure_on_path()
 
-from lib.schema import connect_output, utc_now  # noqa: E402
+from shared.db.schema import connect_output, utc_now  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
