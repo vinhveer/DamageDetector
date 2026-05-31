@@ -10,7 +10,8 @@ const __dirname = path.dirname(__filename);
 const appRoot = path.resolve(__dirname, '..', '..');
 const repoRoot = path.resolve(appRoot, '..');
 const labRoot = path.resolve(repoRoot, '..');
-const commitScript = path.join(repoRoot, 'semi-labeling', 'resemi', 'run_review_commit.py');
+const commitModule = 'resemi.tools.review_commit';
+const commitScript = path.join(repoRoot, 'semi-labeling', 'resemi', 'tools', 'review_commit.py');
 
 const cleanPath = (value, fieldName) => {
   const raw = String(value || '').trim();
@@ -71,7 +72,7 @@ export const commitSession = async (payload = {}) => {
 
     const python = resolvePython(payload);
     const result = await new Promise((resolve) => {
-      const child = spawn(python, [commitScript, '--input', tmpPath], {
+      const child = spawn(python, ['-m', commitModule, '--input', tmpPath], {
         cwd: path.join(repoRoot, 'semi-labeling'),
         env: pythonEnv(),
       });
