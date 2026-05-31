@@ -15,4 +15,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listLabelingRuns: (payload) => ipcRenderer.invoke('labeling:list-runs', payload),
   listLabelingQueue: (payload) => ipcRenderer.invoke('labeling:list-queue', payload),
   commitLabeling: (payload) => ipcRenderer.invoke('labeling:commit', payload),
+  getRunResources: (payload) => ipcRenderer.invoke('labeling:run-resources', payload),
+  listSessions: (payload) => ipcRenderer.invoke('labeling:list-sessions', payload),
+  listSelfTrainingRuns: (payload) => ipcRenderer.invoke('labeling:list-selftrain', payload),
+  getBridgeInfo: () => ipcRenderer.invoke('labeling:bridge-info'),
+  runStep: (payload) => ipcRenderer.invoke('labeling:run-step', payload),
+  onStepOutput: (handler) => {
+    const listener = (_event, data) => handler(data);
+    ipcRenderer.on('labeling:step-output', listener);
+    return () => ipcRenderer.removeListener('labeling:step-output', listener);
+  },
 });

@@ -5,14 +5,20 @@ import {
   IconLayoutSidebarLeftExpand,
   IconSettings,
   IconTag,
+  IconPlayerPlay,
+  IconHistory,
 } from '@tabler/icons-react';
 import { IconButton } from './components/ui/index.js';
 import { cn } from './components/ui/cn.js';
 import Labeling from './features/labeling/Labeling.jsx';
+import RunSteps from './features/labeling/RunSteps.jsx';
+import Versions from './features/labeling/Versions.jsx';
 
-// Single feature: manual labeling of the review_queue produced by step07.
+// Semi-labeling loop: label a sample -> run next steps -> review versions.
 const NAV_MAIN = [
   { label: 'Labeling', value: 'labeling', icon: IconTag },
+  { label: 'Chạy bước', value: 'run-steps', icon: IconPlayerPlay },
+  { label: 'Phiên bản', value: 'versions', icon: IconHistory },
 ];
 
 const NAV_BOTTOM = [
@@ -67,11 +73,21 @@ function EmptyContent() {
 export default function App() {
   const [activeTab, setActiveTab] = useState(DEFAULT_TAB);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [dbPath, setDbPath] = useState('');
 
   const currentTitle = ALL_NAV_ITEMS.find((i) => i.value === activeTab)?.label ?? 'Semi-labeling Review';
 
   useEffect(() => {
     if (window.location.pathname !== '/') window.history.replaceState(null, '', '/');
+  }, []);
+
+  // shared default DB path for the run-steps / versions tabs
+  useEffect(() => {
+    const a = typeof window !== 'undefined' ? window.electronAPI : null;
+    if (!a) return;
+    a.getLabelingDefaults()
+      .then((d) => setDbPath(d.resemiDbPath || ''))
+      .catch(() => {});
   }, []);
 
   return (
@@ -131,7 +147,10 @@ export default function App() {
 
           {/* Main content */}
           <section className="min-w-0 flex-1 overflow-hidden bg-[var(--bg)]">
-            {activeTab === 'labeling' ? <Labeling /> : <EmptyContent />}
+            {activeTab === 'labeling' && <Labeling />}
+            {activeTab === 'run-steps' && <RunSteps dbPath={dbPath} onChangeDbPath={setDbPath} />}
+            {activeTab === 'versions' && <Versions dbPath={dbPath} onChangeDbPath={setDbPath} />}
+            {!['labeling', 'run-steps', 'versions'].includes(activeTab) && <EmptyContent />}
           </section>
 
         </div>

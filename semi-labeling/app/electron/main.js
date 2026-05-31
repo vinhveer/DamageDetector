@@ -2,7 +2,11 @@ import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { labelingDefaults, listRuns, listQueue, commitSession } from './labeling/index.js';
+import {
+  labelingDefaults, listRuns, listQueue, commitSession,
+  getRunResources, listSessions, listSelfTrainingRuns,
+  runStep, bridgeInfo,
+} from './labeling/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -102,6 +106,21 @@ ipcMain.handle('labeling:defaults', () => labelingDefaults());
 ipcMain.handle('labeling:list-runs', (_event, payload) => listRuns(payload));
 ipcMain.handle('labeling:list-queue', (_event, payload) => listQueue(payload));
 ipcMain.handle('labeling:commit', (_event, payload) => commitSession(payload));
+ipcMain.handle('labeling:run-resources', (_event, payload) => getRunResources(payload));
+ipcMain.handle('labeling:list-sessions', (_event, payload) => listSessions(payload));
+ipcMain.handle('labeling:list-selftrain', (_event, payload) => listSelfTrainingRuns(payload));
+ipcMain.handle('labeling:bridge-info', () => bridgeInfo());
+
+// Streams step stdout/stderr to the renderer via 'labeling:step-output' events,
+// keyed by a caller-supplied jobId. Resolves with the final { code, output }.
+ipcMain.handle('labeling:run-step', async (event, payload = {}) => {
+  const { step, flags, jobId } = payload || {};
+  const sender = event.sender;
+  const onData = (chunk) => {
+    if (!sender.isDestroyed()) sender.send('labeling:step-output', { jobId, chunk });
+  };
+  return runStep({ step, flags, onData });
+});
 
 ipcMain.handle('dialog:browse-path', async (_event, mode) => {
   if (!['file', 'directory', 'file_or_directory', 'files'].includes(mode)) {

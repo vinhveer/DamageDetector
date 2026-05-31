@@ -26,6 +26,7 @@ export default function Labeling() {
   const [loading, setLoading] = useState(false);
   const [screen, setScreen] = useState('setup'); // setup | review
   const [committing, setCommitting] = useState(false);
+  const [sessionName, setSessionName] = useState('');
 
   useEffect(() => {
     const a = api();
@@ -135,7 +136,7 @@ export default function Labeling() {
     setCommitting(true);
     setError('');
     try {
-      const res = await api().commitLabeling({ resemiDbPath: paths.resemiDbPath, runId, decisions: list });
+      const res = await api().commitLabeling({ resemiDbPath: paths.resemiDbPath, runId, decisions: list, sessionName });
       if (res.error) { setError(res.error); return; }
       setError('');
       alert(`Đã commit ${res.decisionCount} nhãn vào session ${res.reviewSessionId}`);
@@ -144,7 +145,7 @@ export default function Labeling() {
     } finally {
       setCommitting(false);
     }
-  }, [decisions, items, paths.resemiDbPath, runId]);
+  }, [decisions, items, paths.resemiDbPath, runId, sessionName]);
 
   if (screen === 'setup') {
     return (
@@ -234,6 +235,12 @@ export default function Labeling() {
         )}
         <span className="text-[var(--text)]">đã gán: {decidedCount}</span>
         <span className="ml-auto text-[var(--text-muted)]">phím: 1-{labels.length} gán nhãn · Enter nhận gợi ý · Space tiếp · ⌫ lùi</span>
+        <TextInput
+          value={sessionName}
+          onChange={(e) => setSessionName(e.currentTarget.value)}
+          placeholder="tên phiên (tuỳ chọn)"
+          className="w-[180px]"
+        />
         <Button onClick={commit} disabled={committing || decidedCount === 0}>{committing ? 'Committing…' : `Commit (${decidedCount})`}</Button>
       </div>
 

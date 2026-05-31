@@ -137,6 +137,16 @@ export const listQueue = (payload = {}) => {
 
 const utcNow = () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 
+// Build a "<name>_<YYYYMMDD_HHMMSS>" id from an optional English name.
+const makeStampedId = (name, fallbackPrefix) => {
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}_${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+  const clean = String(name || '').trim().replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+  const prefix = clean || fallbackPrefix;
+  return `${prefix}_${stamp}`;
+};
+
 // ── commit a labeling session into review_sessions + review_decisions ───────
 // decisions: [{ resultId, action: 'manual_accept'|'manual_relabel'|'manual_reject',
 //               previousLabel, newLabel, note }]
@@ -147,7 +157,8 @@ export const commitSession = (payload = {}) => {
   const decisions = Array.isArray(payload.decisions) ? payload.decisions : [];
   if (decisions.length === 0) return { error: 'No decisions to commit.' };
 
-  const sessionId = `rev_${Date.now().toString(16)}_${Math.random().toString(16).slice(2, 8)}`;
+  // Optional custom English name -> "<name>_<YYYYMMDD_HHMMSS>" for easy listing.
+  const sessionId = makeStampedId(payload.sessionName, 'review');
   const now = utcNow();
   const db = connectRw(dbPath);
   try {
@@ -191,6 +202,77 @@ export const commitSession = (payload = {}) => {
   } catch (err) {
     try { db.exec('ROLLBACK'); } catch { /* ignore */ }
     return { error: err?.message || 'Commit failed' };
+  } finally {
+    db.close();
+  }
+};
+
+// ── resources for a run (used to auto-fill "run next steps" flags) ──────────
+export const getRunResources = (payload = {}) => {
+  const dbPath = cleanPath(payload.resemiDbPath, 'resemiDbPath');
+  const runId = cleanPath(payload.runId, 'runId');
+  const db = connectRo(dbPath);
+  const one = (sql) => {
+    try { const r = db.prepare(sql).get(runId); return r || null; } catch { return null; }
+  };
+  try {
+    const emb = one(`SELECT embedding_run_id FROM embedding_runs WHERE run_id = ? AND view_name='tight' ORDER BY created_at_utc DESC LIMIT 1`);
+    const proto = one(`SELECT prototype_version_id FROM prototype_versions WHERE run_id = ? ORDER BY created_at_utc DESC LIMIT 1`);
+    const core = one(`SELECT core_mining_run_id FROM core_mining_runs WHERE run_id = ? ORDER BY created_at_utc DESC LIMIT 1`);
+    const clf = one(`SELECT classifier_run_id, created_at_utc FROM classifier_runs WHERE run_id = ? ORDER BY created_at_utc DESC LIMIT 1`);
+    const counts = {
+      reviewQueue: db.prepare(`SELECT COUNT(*) n FROM review_queue WHERE run_id = ?`).get(runId).n,
+      cleaned: db.prepare(`SELECT COUNT(*) n FROM cleaned_labels WHERE run_id = ?`).get(runId).n,
+      reviewDecisions: db.prepare(`
+        SELECT COUNT(*) n FROM review_decisions d
+        JOIN review_sessions s ON s.review_session_id = d.review_session_id
+        WHERE s.run_id = ?`).get(runId).n,
+    };
+    return {
+      embeddingRunId: emb ? emb.embedding_run_id : '',
+      prototypeVersionId: proto ? proto.prototype_version_id : '',
+      coreMiningRunId: core ? core.core_mining_run_id : '',
+      classifierRunId: clf ? clf.classifier_run_id : '',
+      counts,
+    };
+  } finally {
+    db.close();
+  }
+};
+
+// ── management: list human review sessions for a run ────────────────────────
+export const listSessions = (payload = {}) => {
+  const dbPath = cleanPath(payload.resemiDbPath, 'resemiDbPath');
+  const runId = cleanPath(payload.runId, 'runId');
+  const db = connectRo(dbPath);
+  try {
+    const rows = db.prepare(`
+      SELECT s.review_session_id, s.reviewer, s.status, s.created_at_utc, s.committed_at_utc, s.notes,
+             (SELECT COUNT(*) FROM review_decisions d WHERE d.review_session_id = s.review_session_id) AS decision_count
+      FROM review_sessions s
+      WHERE s.run_id = ?
+      ORDER BY s.created_at_utc DESC
+    `).all(runId);
+    return { sessions: rows };
+  } finally {
+    db.close();
+  }
+};
+
+// ── management: list self-training (filter) runs for a run ──────────────────
+export const listSelfTrainingRuns = (payload = {}) => {
+  const dbPath = cleanPath(payload.resemiDbPath, 'resemiDbPath');
+  const runId = cleanPath(payload.runId, 'runId');
+  const db = connectRo(dbPath);
+  try {
+    const rows = db.prepare(`
+      SELECT self_training_run_id, classifier_run_id, created_at_utc, round_index,
+             candidate_count, promoted_count, rejected_count, deferred_count
+      FROM self_training_runs
+      WHERE run_id = ?
+      ORDER BY created_at_utc DESC
+    `).all(runId);
+    return { runs: rows };
   } finally {
     db.close();
   }
