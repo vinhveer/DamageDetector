@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { labelingDefaults, listRuns, listQueue, commitSession } from './labeling/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -95,6 +96,12 @@ ipcMain.handle('files:list-images', async (_event, payload = {}) => {
   const options = isPlainObject(payload) ? payload : {};
   return listImagesUnder(options.rootPath, Boolean(options.recursive));
 });
+
+// ── Labeling feature IPC ────────────────────────────────────────────────────
+ipcMain.handle('labeling:defaults', () => labelingDefaults());
+ipcMain.handle('labeling:list-runs', (_event, payload) => listRuns(payload));
+ipcMain.handle('labeling:list-queue', (_event, payload) => listQueue(payload));
+ipcMain.handle('labeling:commit', (_event, payload) => commitSession(payload));
 
 ipcMain.handle('dialog:browse-path', async (_event, mode) => {
   if (!['file', 'directory', 'file_or_directory', 'files'].includes(mode)) {

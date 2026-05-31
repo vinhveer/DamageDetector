@@ -9,4 +9,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   browseFiles: () => ipcRenderer.invoke('dialog:browse-path', 'files'),
   saveFileDialog: (opts) => ipcRenderer.invoke('dialog:save-path', opts),
   saveCroppedImage: (payload) => ipcRenderer.invoke('saveCroppedImage', payload),
+
+  // Labeling feature
+  getLabelingDefaults: () => ipcRenderer.invoke('labeling:defaults'),
+  listLabelingRuns: (payload) => ipcRenderer.invoke('labeling:list-runs', payload),
+  listLabelingQueue: (payload) => ipcRenderer.invoke('labeling:list-queue', payload),
+  commitLabeling: (payload) => ipcRenderer.invoke('labeling:commit', payload),
 });

@@ -4,13 +4,16 @@ import {
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
   IconSettings,
+  IconTag,
 } from '@tabler/icons-react';
 import { IconButton } from './components/ui/index.js';
 import { cn } from './components/ui/cn.js';
+import Labeling from './features/labeling/Labeling.jsx';
 
-// Layout shell only. Feature screens were removed — add new ones to NAV and
-// render them in the content section below.
-const NAV_MAIN = [];
+// Single feature: manual labeling of the review_queue produced by step07.
+const NAV_MAIN = [
+  { label: 'Labeling', value: 'labeling', icon: IconTag },
+];
 
 const NAV_BOTTOM = [
   { label: 'Settings', value: 'settings', icon: IconSettings },
@@ -18,7 +21,7 @@ const NAV_BOTTOM = [
 
 const ALL_NAV_ITEMS = [...NAV_MAIN, ...NAV_BOTTOM];
 
-const DEFAULT_TAB = ALL_NAV_ITEMS[0]?.value ?? '';
+const DEFAULT_TAB = NAV_MAIN[0]?.value ?? ALL_NAV_ITEMS[0]?.value ?? '';
 
 function NavItem({ item, isActive, sidebarOpen, onClick }) {
   const Icon = item.icon;
@@ -56,7 +59,7 @@ function NavItem({ item, isActive, sidebarOpen, onClick }) {
 function EmptyContent() {
   return (
     <div className="flex h-full items-center justify-center bg-[var(--bg)] text-[13px] text-[var(--text-muted)]">
-      No screens yet — this is the layout shell.
+      Chọn Labeling ở thanh bên để bắt đầu.
     </div>
   );
 }
@@ -128,7 +131,7 @@ export default function App() {
 
           {/* Main content */}
           <section className="min-w-0 flex-1 overflow-hidden bg-[var(--bg)]">
-            <EmptyContent />
+            {activeTab === 'labeling' ? <Labeling /> : <EmptyContent />}
           </section>
 
         </div>
