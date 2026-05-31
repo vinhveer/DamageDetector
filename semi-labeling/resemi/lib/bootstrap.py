@@ -20,8 +20,8 @@ def ensure_on_path() -> None:
 
 
 def ensure_embedder_on_path() -> None:
-    """step03 needs the DINOv2 embedder from step3_embedding/."""
+    """step03 needs the DINOv2 embedder from old/step3_embedding/."""
     ensure_on_path()
-    step3 = _SEMI_LABELING_DIR / "step3_embedding"
+    step3 = _SEMI_LABELING_DIR / "old" / "step3_embedding"
     if step3.is_dir() and str(step3) not in sys.path:
         sys.path.insert(0, str(step3))
