@@ -18,6 +18,8 @@ export default function Labeling() {
   const [runId, setRunId] = useState('');
   const [items, setItems] = useState([]);
   const [index, setIndex] = useState(0);
+  const [samplePercent, setSamplePercent] = useState(10);
+  const [queueTotal, setQueueTotal] = useState(0);
   // decisions keyed by resultId -> { action, newLabel }
   const [decisions, setDecisions] = useState({});
   const [error, setError] = useState('');
@@ -53,13 +55,17 @@ export default function Labeling() {
     setLoading(true);
     setError('');
     try {
+      const pct = Number(samplePercent);
+      const ratio = Number.isFinite(pct) && pct > 0 && pct < 100 ? pct / 100 : 0;
       const res = await api().listLabelingQueue({
         resemiDbPath: paths.resemiDbPath,
         runId,
         imageRootPath: paths.imageRootPath,
         queueType: 'all',
+        sampleRatio: ratio,
       });
       setItems(res.items || []);
+      setQueueTotal(res.queueTotal ?? (res.items || []).length);
       setIndex(0);
       // seed decisions from any previously committed rows
       const seeded = {};
@@ -73,7 +79,7 @@ export default function Labeling() {
     } finally {
       setLoading(false);
     }
-  }, [paths, runId]);
+  }, [paths, runId, samplePercent]);
 
   const current = items[index] || null;
   const decidedCount = useMemo(() => Object.keys(decisions).length, [decisions]);
@@ -172,6 +178,33 @@ export default function Labeling() {
                 </SelectControl>
               )}
             </div>
+            <Field label="Tỉ lệ mẫu cần label (%)">
+              <div className="flex items-center gap-3">
+                <input
+                  type="range"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={samplePercent}
+                  onChange={(e) => setSamplePercent(Number(e.currentTarget.value))}
+                  className="flex-1 accent-[var(--primary)]"
+                />
+                <div className="flex items-center gap-1">
+                  <TextInput
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={samplePercent}
+                    onChange={(e) => setSamplePercent(Number(e.currentTarget.value))}
+                    className="w-[64px] text-right"
+                  />
+                  <span className="text-[13px] text-[var(--text-muted)]">%</span>
+                </div>
+              </div>
+              <span className="text-[11px] text-[var(--text-subtle)]">
+                Chọn mẫu đa dạng nhất theo embedding (chia đều mỗi lớp). 100% = label toàn bộ queue.
+              </span>
+            </Field>
             <div>
               <Button onClick={startReview} disabled={!runId || loading}>{loading ? 'Loading…' : 'Bắt đầu review'}</Button>
             </div>
@@ -196,6 +229,9 @@ export default function Labeling() {
       <div className="flex shrink-0 items-center gap-3 border-b border-[var(--border-muted)] bg-[var(--surface)] px-4 py-2 text-[12px]">
         <Button onClick={() => setScreen('setup')}>← Setup</Button>
         <span className="text-[var(--text-muted)]">{index + 1} / {items.length}</span>
+        {queueTotal > items.length && (
+          <span className="text-[var(--text-subtle)]">(mẫu {items.length} / {queueTotal} queue)</span>
+        )}
         <span className="text-[var(--text)]">đã gán: {decidedCount}</span>
         <span className="ml-auto text-[var(--text-muted)]">phím: 1-{labels.length} gán nhãn · Enter nhận gợi ý · Space tiếp · ⌫ lùi</span>
         <Button onClick={commit} disabled={committing || decidedCount === 0}>{committing ? 'Committing…' : `Commit (${decidedCount})`}</Button>

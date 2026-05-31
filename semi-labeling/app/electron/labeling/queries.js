@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { cleanPath, connectRo, connectRw, expandHome, resolveDbPath } from './db.js';
+import { decodeVec, selectDiverseSample } from './sampling.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -52,6 +53,9 @@ export const listQueue = (payload = {}) => {
   const runId = cleanPath(payload.runId, 'runId');
   const imageRoot = String(payload.imageRootPath || '').trim();
   const queueType = String(payload.queueType || '').trim(); // '' = all
+  // sampleRatio in (0,1) -> pick a diverse subset (~ratio per class). >=1 or 0 = all.
+  const sampleRatioRaw = Number(payload.sampleRatio);
+  const sampleRatio = Number.isFinite(sampleRatioRaw) ? sampleRatioRaw : 0;
 
   const db = connectRo(dbPath);
   try {
@@ -70,7 +74,35 @@ export const listQueue = (payload = {}) => {
       ORDER BY q.reliability_score ASC, q.result_id ASC
     `).all(...params);
 
-    const items = rows.map((row) => {
+    // ── optional diverse sampling using cached DINOv2 tight embeddings ───────
+    let selectedIds = null; // null = keep all
+    if (sampleRatio > 0 && sampleRatio < 1 && rows.length > 0) {
+      const embRunRow = db.prepare(`
+        SELECT embedding_run_id FROM embedding_runs
+        WHERE run_id = ? AND view_name = 'tight'
+        ORDER BY created_at_utc DESC, rowid DESC LIMIT 1
+      `).get(runId);
+      const embRunId = embRunRow ? embRunRow.embedding_run_id : '';
+
+      const vecById = new Map();
+      if (embRunId) {
+        const embRows = db.prepare(`
+          SELECT result_id, embedding_blob FROM crop_embeddings
+          WHERE embedding_run_id = ? AND view_name = 'tight'
+        `).all(embRunId);
+        for (const er of embRows) vecById.set(Number(er.result_id), decodeVec(er.embedding_blob));
+      }
+
+      const sampleRows = rows.map((row) => ({
+        resultId: Number(row.result_id),
+        label: String(row.suggested_label || row.initial_label || 'unknown'),
+        reliability: Number(row.reliability_score || 0),
+        vec: vecById.get(Number(row.result_id)) || null,
+      }));
+      selectedIds = selectDiverseSample(sampleRows, sampleRatio);
+    }
+
+    const allItems = rows.map((row) => {
       const imgPath = resolveImagePath(imageRoot, row.image_rel_path);
       let reasons;
       try { reasons = JSON.parse(String(row.reason_codes_json || '[]')); } catch { reasons = []; }
@@ -93,9 +125,11 @@ export const listQueue = (payload = {}) => {
       };
     });
 
+    const items = selectedIds ? allItems.filter((it) => selectedIds.has(it.resultId)) : allItems;
+
     const counts = {};
     for (const it of items) counts[it.queueType] = (counts[it.queueType] || 0) + 1;
-    return { items, counts, total: items.length };
+    return { items, counts, total: items.length, queueTotal: allItems.length, sampled: Boolean(selectedIds) };
   } finally {
     db.close();
   }
