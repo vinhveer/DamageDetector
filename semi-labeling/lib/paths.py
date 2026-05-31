@@ -18,11 +18,16 @@ def _resolve_lab_root() -> Path:
 
 
 LAB_ROOT = _resolve_lab_root()
+
+# Inputs come from the existing pipeline artifacts under infer_results/.
 SEMI_RESULTS = LAB_ROOT / "infer_results" / "semi-labeling"
+
+# resemi v2 writes its own consolidated output here (fresh runs).
+RESEMI_OUTPUT_DIR = LAB_ROOT / "model_with_inference" / "semi_labeling"
 
 
 def default_resemi_db() -> Path:
-    return SEMI_RESULTS / "resemi" / "resemi.sqlite3"
+    return RESEMI_OUTPUT_DIR / "resemi.sqlite3"
 
 
 def default_source_db() -> Path:
