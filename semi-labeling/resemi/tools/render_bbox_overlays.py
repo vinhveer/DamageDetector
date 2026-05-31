@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Tool — render bbox cleanup overlay images for manual review."""
 from __future__ import annotations
 
 import argparse
@@ -10,16 +11,11 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from resemi.lib import bootstrap
 
-def _resolve_lab_root() -> Path:
-    current = Path(__file__).resolve()
-    for candidate in current.parents:
-        if (candidate / "DamageDetector").exists() and (candidate / "infer_results").exists():
-            return candidate
-    return current.parents[3]
+bootstrap.ensure_on_path()
 
-
-LAB_ROOT = _resolve_lab_root()
+from resemi.lib.paths import LAB_ROOT, default_image_root, default_resemi_db  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -46,10 +42,6 @@ COLORS = {
     "suspect_broad_box": (243, 156, 18),
     "manual_box_review": (155, 89, 182),
 }
-
-
-def default_db() -> Path:
-    return LAB_ROOT / "infer_results" / "semi-labeling" / "resemi" / "resemi.sqlite3"
 
 
 def default_output_dir(run_id: str) -> Path:
@@ -213,9 +205,9 @@ def render_overlay(image_path: Path, boxes: list[OverlayBox], output_path: Path)
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Render bbox cleanup overlay images for manual review.")
-    parser.add_argument("--db", default=str(default_db()), help="Resemi SQLite DB.")
+    parser.add_argument("--db", default=str(default_resemi_db()), help="Resemi SQLite DB.")
     parser.add_argument("--run-id", default="resemi_full_bbox_v1")
-    parser.add_argument("--image-root", default=str(LAB_ROOT / "data" / "HinhAnh"))
+    parser.add_argument("--image-root", default=str(default_image_root()))
     parser.add_argument("--output-dir", default="", help="Default: infer_results/semi-labeling/resemi/overlays/<run_id>_review30")
     parser.add_argument("--limit", type=int, default=30)
     parser.add_argument("--include-decisions", default="", help="Comma-separated decision types to draw. Empty = all.")

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Semi-labeling · Pipeline Map</title>
+<style>
+  :root{
+    --bg:#0f1115; --surface:#171a21; --surface2:#1e222b; --border:#2a2f3a;
+    --text:#e7ebf0; --muted:#9aa4b2; --faint:#6b7480;
+    --machine:#3b82f6; --machine-bg:#13233f;
+    --human:#f59e0b; --human-bg:#3a2c10;
+    --upstream:#34d399; --upstream-bg:#0f2e25;
+    --resemi:#a78bfa; --resemi-bg:#241b3d;
+    --accent:#60a5fa;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--text);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:40px 24px 80px}
+  header h1{font-size:26px;margin:0 0 6px;letter-spacing:-.2px}
+  header p{color:var(--muted);margin:0 0 4px;max-width:760px}
+  .legend{display:flex;flex-wrap:wrap;gap:10px;margin:22px 0 30px}
+  .chip{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;
+    border:1px solid var(--border);background:var(--surface);font-size:12px;font-weight:500}
+  .dot{width:9px;height:9px;border-radius:50%}
+  .dot.m{background:var(--machine)} .dot.h{background:var(--human)}
+  .dot.u{background:var(--upstream)} .dot.r{background:var(--resemi)}
+
+  .section-title{display:flex;align-items:baseline;gap:10px;margin:38px 0 4px}
+  .section-title h2{font-size:18px;margin:0}
+  .section-title .tag{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;
+    padding:2px 8px;border-radius:5px}
+  .tag.u{color:var(--upstream);background:var(--upstream-bg)}
+  .tag.r{color:var(--resemi);background:var(--resemi-bg)}
+  .section-sub{color:var(--muted);margin:0 0 18px;max-width:820px}
+
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0}
+  .node{position:relative;flex:1 1 0;min-width:118px;cursor:pointer;
+    background:var(--surface);border:1px solid var(--border);border-radius:10px;
+    padding:12px 12px 13px;margin:6px;transition:transform .12s,border-color .12s,background .12s}
+  .node:hover{transform:translateY(-2px);border-color:var(--accent)}
+  .node.active{border-color:var(--accent);background:var(--surface2)}
+  .node .num{font-size:11px;font-weight:700;color:var(--faint);letter-spacing:.5px}
+  .node .nm{font-weight:600;margin:3px 0 8px;font-size:13.5px}
+  .node .who{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600}
+  .node .who .dot{width:8px;height:8px}
+  .node .art{margin-top:9px;font-size:10.5px;color:var(--faint);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all}
+  .arrow{display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:18px;padding:0 2px;user-select:none}
+
+  .gate{margin:10px 6px;padding:11px 14px;border-radius:10px;border:1px dashed var(--human);
+    background:var(--human-bg);display:flex;gap:10px;align-items:flex-start}
+  .gate .ic{font-size:15px;line-height:1.3}
+  .gate b{color:var(--human)}
+  .gate small{color:var(--muted);display:block;margin-top:2px}
+
+  .detail{margin:14px 6px 0;background:var(--surface2);border:1px solid var(--border);
+    border-radius:10px;padding:0;max-height:0;overflow:hidden;transition:max-height .25s ease,padding .25s ease}
+  .detail.open{max-height:520px;padding:16px 18px}
+  .detail h4{margin:0 0 6px;font-size:14px}
+  .detail p{margin:0 0 10px;color:var(--muted)}
+  .detail code,.cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .cmd{display:block;background:#0b0d11;border:1px solid var(--border);border-radius:7px;
+    padding:10px 12px;font-size:12px;color:#cfe0ff;white-space:pre-wrap;margin:8px 0 0}
+  .kv{display:flex;gap:8px;font-size:12.5px;margin:3px 0}
+  .kv .k{color:var(--faint);min-width:74px}
+
+  .bridge{margin:26px 6px;padding:16px 18px;border-radius:12px;
+    background:linear-gradient(90deg,var(--upstream-bg),var(--resemi-bg));border:1px solid var(--border)}
+  .bridge h3{margin:0 0 6px;font-size:15px}
+  .bridge p{margin:0;color:var(--muted)}
+  .bridge .path{font-family:ui-monospace,monospace;color:#bfe9d7;font-size:12px}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:14px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+  .card h4{margin:0 0 6px;font-size:13.5px;display:flex;align-items:center;gap:7px}
+  .card p{margin:0;color:var(--muted);font-size:12.5px}
+  .card .q{color:var(--text);font-weight:600}
+
+  footer{margin-top:46px;color:var(--faint);font-size:12px;border-top:1px solid var(--border);padding-top:18px}
+  .pill{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;font-weight:700}
+  .pill.m{color:var(--machine);background:var(--machine-bg)}
+  .pill.h{color:var(--human);background:var(--human-bg)}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Semi-labeling · Bản đồ Pipeline</h1>
+    <p>Có <b>hai tầng</b> đều đánh số "step" — đó là lý do dễ rối. Tầng trên là pipeline gốc tạo dữ liệu. Tầng dưới là <b>resemi</b>, gói tinh chỉnh nhãn v2, cắm vào output của tầng trên.</p>
+  </header>
+
+  <div class="legend">
+    <span class="chip"><span class="dot u"></span> Pipeline gốc (thư mục step1–step7)</span>
+    <span class="chip"><span class="dot r"></span> resemi (script step01–step09)</span>
+    <span class="chip"><span class="dot m"></span> Máy chạy tự động</span>
+    <span class="chip"><span class="dot h"></span> Người làm tay</span>
+    <span class="chip">Bấm vào ô step để xem chi tiết &amp; lệnh chạy</span>
+  </div>
+
+  <!-- ===================== UPSTREAM ===================== -->
+  <div class="section-title">
+    <span class="tag u">Tầng 1</span>
+    <h2>Pipeline gốc — tạo dữ liệu thô</h2>
+  </div>
+  <p class="section-sub">Mỗi bước là một thư mục, ghi ra một file <code>.sqlite3</code> riêng dưới <code>infer_results/semi-labeling/</code>. resemi chỉ cần tới <b>step2</b> (bắt buộc) và <b>step4</b> (tùy chọn).</p>
+
+  <div class="flow" id="flow-upstream"></div>
+  <div class="detail" id="detail-upstream"></div>
+
+  <!-- ===================== BRIDGE ===================== -->
+  <div class="bridge">
+    <h3>🔗 Cầu nối giữa hai tầng</h3>
+    <p>resemi <b>không</b> tự sinh box. Nó đọc box + điểm OpenCLIP từ artifact của step2, và (nếu muốn lọc trùng) đọc thêm keep-flag từ step4.</p>
+    <p style="margin-top:8px" class="path">step2_sematic/damage_scan.sqlite3  ──▶  resemi.sqlite3  ◀──  step4_class_aware_dedup/dedup.sqlite3 (optional)</p>
+  </div>
+
+  <!-- ===================== RESEMI ===================== -->
+  <div class="section-title">
+    <span class="tag r">Tầng 2</span>
+    <h2>resemi — tinh chỉnh &amp; làm sạch nhãn</h2>
+  </div>
+  <p class="section-sub">9 step nội bộ, tất cả ghi vào <b>một</b> file <code>resemi.sqlite3</code>. step01–03 bắt buộc; step04–09 tùy chọn. <b>Embedding (step03) là cổng chặn</b> cho mọi thứ từ step04 trở đi.</p>
+
+  <div class="flow" id="flow-resemi"></div>
+  <div class="detail" id="detail-resemi"></div>
+
+  <!-- ===================== HUMAN GATES ===================== -->
+  <div class="section-title"><h2>3 chốt phải làm tay</h2></div>
+  <div class="cards">
+    <div class="card">
+      <h4><span class="pill h">Chốt 1</span> Pick prototype</h4>
+      <p><span class="q">Sau step04, trước step05.</span> Chọn 20–50 ảnh đại diện mỗi class (+ vài cái reject) làm mẫu chuẩn. Không có bước này thì prototype scoring vô nghĩa.</p>
+    </div>
+    <div class="card">
+      <h4><span class="pill h">Chốt 2</span> Review hàng nghi ngờ</h4>
+      <p><span class="q">Sau step07.</span> Chỉ duyệt phần trong <code>review_queue</code> (suspect / bất đồng), không phải cả dataset. UI review hiện chưa dựng — mới có schema.</p>
+    </div>
+    <div class="card">
+      <h4><span class="pill h">Chốt 3</span> Duyệt self-training</h4>
+      <p><span class="q">Trong step09.</span> Mặc định chỉ ghi audit, không sửa nhãn. Xem danh sách promote rồi mới chạy lại với <code>--apply-promotions</code>.</p>
+    </div>
+  </div>
+
+  <!-- ===================== FAQ ===================== -->
+  <div class="section-title"><h2>Mấy câu hay hỏi</h2></div>
+  <div class="cards">
+    <div class="card">
+      <h4>🧩 Phải embedding hết mới làm được gì?</h4>
+      <p><b>Không.</b> step01–02 và nhãn baseline thuần semantic chạy được mà không cần embedding. Embedding chỉ là cổng bắt buộc cho step04→09.</p>
+    </div>
+    <div class="card">
+      <h4>♻️ Embedding cũ tái dùng được không?</h4>
+      <p><b>Được.</b> Vector lưu cứng trong <code>crop_embeddings</code>. Khớp <code>model_name</code> + <code>view_name</code> + crop không đổi là step04/05/08 đọc lại, không tính lại. Chạy dở thì <code>--resume</code>.</p>
+    </div>
+    <div class="card">
+      <h4>🔁 Khi nào buộc chạy lại embedding?</h4>
+      <p>Đổi model, cần view mới chưa embed, hoặc crop bị sinh lại khác đi (step02). Khi đó dùng <code>--force</code> tạo run embedding mới.</p>
+    </div>
+  </div>
+
+  <footer>
+    Đường dẫn code: <code>DamageDetector/semi-labeling/</code> · resemi: <code>semi-labeling/resemi/</code> · Artifact: <code>infer_results/semi-labeling/resemi/resemi.sqlite3</code><br/>
+    Orchestrator: <code>python -m resemi.run_pipeline status --run-id &lt;id&gt;</code> &nbsp;·&nbsp; chạy 1 step: <code>python -m resemi.run_pipeline run step03 --run-id &lt;id&gt;</code>
+  </footer>
+</div>
+
+<script>
+const UPSTREAM = [
+  {num:"STEP 1", nm:"GroundingDINO", who:"m", folder:"step1_gdino_labeling",
+   art:"step1_grounding_dino/damage_scan.sqlite3",
+   desc:"Dò vật thể bằng GroundingDINO, sinh bounding box hư hỏng từ ảnh thô. Đây là nguồn box duy nhất của toàn hệ thống.",
+   cmd:"python step1_gdino_labeling/run_damage_scan.py \\\n  --input-dir <ảnh> --db .../step1_grounding_dino/damage_scan.sqlite3"},
+  {num:"STEP 2", nm:"OpenCLIP Semantic", who:"m", folder:"step2_sematic", key:true,
+   art:"step2_sematic/damage_scan.sqlite3",
+   desc:"Chấm điểm ngữ nghĩa mỗi box bằng OpenCLIP (weak label ban đầu). ĐÂY là input bắt buộc của resemi.",
+   cmd:"python step2_sematic/run_openclip_semantic.py \\\n  --db .../step2_sematic/damage_scan.sqlite3 --image-root <ảnh>"},
+  {num:"STEP 3", nm:"Embedding", who:"m", folder:"step3_embedding",
+   art:"(DINOv2 embeddings)",
+   desc:"Sinh embedding DINOv2 cho pipeline gốc. resemi có bước embedding riêng (step03) nên không phụ thuộc trực tiếp cái này."},
+  {num:"STEP 4", nm:"Class-aware Dedup", who:"m", folder:"step4_class_aware_dedup", key:true,
+   art:"step4_class_aware_dedup/dedup.sqlite3",
+   desc:"Lọc box trùng theo class. resemi đọc keep-flag từ đây (TÙY CHỌN) để chỉ giữ box keep=1.",
+   cmd:"# truyền vào resemi qua --dedup-db"},
+  {num:"STEP 5", nm:"Clustering", who:"m", folder:"step5_clustering",
+   art:"step5_clustering/clusters.sqlite3",
+   desc:"Gom cụm cho pipeline gốc / app review (tab Cluster). Không nằm trên đường dữ liệu của resemi."},
+  {num:"STEP 6", nm:"Classifier", who:"m", folder:"step6_classifier",
+   art:"step6_classifier/",
+   desc:"Classifier của pipeline gốc, phục vụ app review (tab Classifier)."},
+  {num:"STEP 7", nm:"Label Review", who:"h", folder:"step7_label_review",
+   art:"step7_label_review/*.sqlite3",
+   desc:"Tầng review nhãn của pipeline gốc (app Electron, tab Review/Final). Người làm tay ở đây."},
+];
+
+const RESEMI = [
+  {num:"step01", nm:"Semantic Init", who:"m", opt:false,
+   desc:"Đọc OpenCLIP (step2) + prompt GDINO, dựng ensemble, lọc chất lượng bbox, sinh decision baseline. KHÔNG cần embedding.",
+   cmd:"python -m resemi.run_pipeline run step01 --run-id <id>"},
+  {num:"step02", nm:"Crop Generation", who:"m", opt:false,
+   desc:"Cắt crop đa góc nhìn (tight / pad10 / pad25 / context) và cache vào crop_views.",
+   cmd:"python -m resemi.run_pipeline run step02 --run-id <id>"},
+  {num:"step03", nm:"DINOv2 Embedding", who:"m", opt:false, gateAfter:false,
+   desc:"Embed crop bằng DINOv2, lưu vector float32 chuẩn hoá. CỔNG CHẶN: step04→09 đều đọc vector từ đây. Tốn thời gian nhưng chỉ làm 1 lần, có --resume.",
+   cmd:"python -m resemi.run_pipeline run step03 --run-id <id> --view-name tight --resume"},
+  {num:"step04", nm:"Core Mining", who:"m", opt:true, gateAfter:true,
+   desc:"Gom cụm embedding theo class, tìm cụm lõi (core) và outlier.",
+   cmd:"python -m resemi.run_pipeline run step04 --run-id <id>"},
+  {num:"step05", nm:"Prototype Bank", who:"m", opt:true,
+   desc:"Chấm điểm mỗi detection so với prototype người chọn. Cần input tay ở Chốt 1.",
+   cmd:"python -m resemi.steps.step05_proto --run-id <id> --prototype <result_id>:crack ..."},
+  {num:"step06", nm:"Reliability", who:"m", opt:true,
+   desc:"Gộp semantic + core + prototype + hình học thành điểm tin cậy. Không bịa signal còn thiếu.",
+   cmd:"python -m resemi.run_pipeline run step06 --run-id <id> --core-mining-run-id latest"},
+  {num:"step07", nm:"Decision Policy", who:"m", opt:true, gateAfter:true,
+   desc:"Áp luật đã audit, chia auto_accept vs review_queue, dựng lại cleaned_labels.",
+   cmd:"python -m resemi.run_pipeline run step07 --run-id <id>"},
+  {num:"step08", nm:"Classifier", who:"m", opt:true,
+   desc:"Train classifier nhẹ (LogReg/MLP) trên nhãn sạch, sinh OOF predictions.",
+   cmd:"python -m resemi.steps.step08_classifier --run-id <id> ..."},
+  {num:"step09", nm:"Self-Training", who:"m", opt:true, gateAfter:true,
+   desc:"Promote prediction tự tin cao thành nhãn. Mặc định chỉ audit; cần --apply-promotions mới sửa nhãn.",
+   cmd:"python -m resemi.steps.step09_self_train --run-id <id> --classifier-run-id <id>"},
+];
+
+const WHO_LABEL = {m:"Máy", h:"Tay"};
+
+function nodeHTML(step, idx, kind){
+  const keyRing = step.key ? "box-shadow:0 0 0 1px var(--upstream) inset;" : "";
+  return `<div class="node" style="${keyRing}" data-kind="${kind}" data-idx="${idx}">
+    <div class="num">${step.num}${step.opt===true?' · optional':''}${step.opt===false?' · bắt buộc':''}</div>
+    <div class="nm">${step.nm}</div>
+    <div class="who"><span class="dot ${step.who}"></span>${WHO_LABEL[step.who]}</div>
+    ${step.art?`<div class="art">${step.art}</div>`:''}
+  </div>`;
+}
+
+function renderFlow(containerId, steps, kind){
+  const el = document.getElementById(containerId);
+  let html = "";
+  steps.forEach((s,i)=>{
+    html += nodeHTML(s,i,kind);
+    if(i<steps.length-1) html += `<div class="arrow">→</div>`;
+  });
+  el.innerHTML = html;
+}
+
+function detailHTML(s){
+  return `<h4>${s.num} · ${s.nm} &nbsp;<span class="who"><span class="dot ${s.who}"></span>${WHO_LABEL[s.who]}</span></h4>
+    ${s.folder?`<div class="kv"><span class="k">Thư mục</span><code>${s.folder}/</code></div>`:''}
+    ${s.art?`<div class="kv"><span class="k">Artifact</span><code>${s.art}</code></div>`:''}
+    <p style="margin-top:8px">${s.desc}</p>
+    ${s.cmd?`<div class="cmd">${s.cmd}</div>`:''}`;
+}
+
+function wire(containerId, detailId, steps){
+  const flow = document.getElementById(containerId);
+  const detail = document.getElementById(detailId);
+  flow.querySelectorAll('.node').forEach(node=>{
+    node.addEventListener('click',()=>{
+      const idx = +node.dataset.idx;
+      const wasActive = node.classList.contains('active');
+      flow.querySelectorAll('.node').forEach(n=>n.classList.remove('active'));
+      if(wasActive){ detail.classList.remove('open'); return; }
+      node.classList.add('active');
+      detail.innerHTML = detailHTML(steps[idx]);
+      detail.classList.add('open');
+    });
+  });
+}
+
+renderFlow('flow-upstream', UPSTREAM, 'u');
+renderFlow('flow-resemi', RESEMI, 'r');
+wire('flow-upstream','detail-upstream', UPSTREAM);
+wire('flow-resemi','detail-resemi', RESEMI);
+</script>
+</body>
+</html>

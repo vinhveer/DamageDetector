@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Commit a human review session (SPEC 11) into the resemi SQLite DB.
+"""Tool — commit a human review session (SPEC 11) into the resemi SQLite DB.
 
 Reads a JSON payload describing one drafted review session and writes it
 transactionally into `review_sessions` / `review_decisions`. Prototype-target
@@ -7,7 +7,7 @@ decisions additionally produce a `prototype_versions` + `prototype_items` set.
 
 Invoked by the Electron review console as a subprocess:
 
-    python run_review_commit.py --input <payload.json>
+    python -m resemi.tools.review_commit --input <payload.json>
 
 The payload shape (produced by app/electron/review_console/sessions.js):
 
@@ -31,20 +31,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import uuid
 from pathlib import Path
 
+from resemi.lib import bootstrap
 
-def _prepare_imports() -> None:
-    package_parent = Path(__file__).resolve().parents[1]
-    if str(package_parent) not in sys.path:
-        sys.path.insert(0, str(package_parent))
+bootstrap.ensure_on_path()
 
-
-_prepare_imports()
-
-from resemi.schema import connect_output, utc_now  # noqa: E402
+from resemi.lib.schema import connect_output, utc_now  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:

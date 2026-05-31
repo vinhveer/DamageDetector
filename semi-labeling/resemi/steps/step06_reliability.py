@@ -1,40 +1,31 @@
 #!/usr/bin/env python3
+"""Step 06 — Reliability Scoring.
+
+Combines semantic + core + prototype + consistency + geometry signals into a
+single reliability score per detection. Optional. Run after step04/step05.
+Does not fabricate missing signals.
+
+Inputs:  semantic/core/prototype tables in resemi.sqlite3
+Outputs: reliability_scoring_runs, reliability_scores (+ synced semantic_decisions)
+"""
 from __future__ import annotations
 
 import argparse
 import sqlite3
-import sys
 from pathlib import Path
 
+from resemi.lib import bootstrap
 
-def _resolve_lab_root() -> Path:
-    current = Path(__file__).resolve()
-    for candidate in current.parents:
-        if (candidate / "DamageDetector").exists() and (candidate / "infer_results").exists():
-            return candidate
-    return current.parents[3]
+bootstrap.ensure_on_path()
 
-
-def _prepare_imports() -> None:
-    package_parent = Path(__file__).resolve().parents[1]
-    if str(package_parent) not in sys.path:
-        sys.path.insert(0, str(package_parent))
-
-
-LAB_ROOT = _resolve_lab_root()
-_prepare_imports()
-
-from resemi.reliability_scoring import ReliabilityConfig, persist_reliability_scoring_result, run_reliability_scoring  # noqa: E402
-from resemi.schema import connect_output, utc_now  # noqa: E402
-
-
-def default_db() -> Path:
-    return LAB_ROOT / "infer_results" / "semi-labeling" / "resemi" / "resemi.sqlite3"
+from resemi.lib.paths import default_resemi_db  # noqa: E402
+from resemi.lib.reliability_scoring import ReliabilityConfig, persist_reliability_scoring_result, run_reliability_scoring  # noqa: E402
+from resemi.lib.schema import connect_output, utc_now  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Recompute resemi reliability scores from semantic, core, prototype, consistency, and geometry signals.")
-    parser.add_argument("--db", default=str(default_db()), help="Resemi SQLite DB.")
+    parser.add_argument("--db", default=str(default_resemi_db()), help="Resemi SQLite DB.")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--core-mining-run-id", default="latest", help="Core mining run id, latest, or none.")
     parser.add_argument("--prototype-score-run-id", default="latest", help="Prototype score run id, latest, or none.")

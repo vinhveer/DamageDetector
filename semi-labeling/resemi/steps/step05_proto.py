@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
+"""Step 05 — Prototype Bank.
+
+Creates and scores a prototype bank from human-picked detections (or core
+clusters). Optional. Run after step03/step04.
+
+HUMAN GATE: prototypes are picked by a person (20-50/class + rejects) and
+passed via --prototype / --reject / --cluster.
+
+Inputs:  crop_embeddings (+ core clusters) in resemi.sqlite3
+Outputs: prototype_versions, prototype_items, prototype_scoring_runs, prototype_scores
+"""
 from __future__ import annotations
 
 import argparse
 import sqlite3
-import sys
 from pathlib import Path
 
+from resemi.lib import bootstrap
 
-def _resolve_lab_root() -> Path:
-    current = Path(__file__).resolve()
-    for candidate in current.parents:
-        if (candidate / "DamageDetector").exists() and (candidate / "infer_results").exists():
-            return candidate
-    return current.parents[3]
+bootstrap.ensure_on_path()
 
-
-def _prepare_imports() -> None:
-    package_parent = Path(__file__).resolve().parents[1]
-    if str(package_parent) not in sys.path:
-        sys.path.insert(0, str(package_parent))
-
-
-LAB_ROOT = _resolve_lab_root()
-_prepare_imports()
-
-from resemi.prototype_bank import (  # noqa: E402
+from resemi.lib.paths import default_resemi_db  # noqa: E402
+from resemi.lib.prototype_bank import (  # noqa: E402
     PrototypeBankConfig,
     PrototypeSpec,
     build_prototype_bank,
@@ -33,19 +30,15 @@ from resemi.prototype_bank import (  # noqa: E402
     score_prototype_bank_preview,
     score_prototypes,
 )
-from resemi.schema import connect_output, utc_now  # noqa: E402
+from resemi.lib.schema import connect_output, utc_now  # noqa: E402
 
 
 DEFAULT_MODEL_NAME = "facebook/dinov2-small"
 
 
-def default_db() -> Path:
-    return LAB_ROOT / "infer_results" / "semi-labeling" / "resemi" / "resemi.sqlite3"
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create and score a resemi prototype bank from human-selected detections or core clusters.")
-    parser.add_argument("--db", default=str(default_db()), help="Resemi SQLite DB.")
+    parser.add_argument("--db", default=str(default_resemi_db()), help="Resemi SQLite DB.")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--view-name", default="tight")

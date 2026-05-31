@@ -1,43 +1,33 @@
 #!/usr/bin/env python3
+"""Step 08 — Lightweight Classifier.
+
+Trains a small classifier (LogisticRegression / LinearSVM / MLP) on audited
+labels + cached embeddings, with OOF predictions. Optional. Run after step07.
+
+Inputs:  cleaned_labels + crop_embeddings in resemi.sqlite3
+Outputs: classifier_runs, classifier_predictions, classifier_oof_predictions, ...
+"""
 from __future__ import annotations
 
 import argparse
 import sqlite3
-import sys
 from pathlib import Path
 
+from resemi.lib import bootstrap
 
-def _resolve_lab_root() -> Path:
-    current = Path(__file__).resolve()
-    for candidate in current.parents:
-        if (candidate / "DamageDetector").exists() and (candidate / "infer_results").exists():
-            return candidate
-    return current.parents[3]
+bootstrap.ensure_on_path()
 
-
-def _prepare_imports() -> None:
-    package_parent = Path(__file__).resolve().parents[1]
-    if str(package_parent) not in sys.path:
-        sys.path.insert(0, str(package_parent))
-
-
-LAB_ROOT = _resolve_lab_root()
-_prepare_imports()
-
-from resemi.lightweight_classifier import ClassifierConfig, persist_classifier_result, train_lightweight_classifier  # noqa: E402
-from resemi.schema import connect_output, utc_now  # noqa: E402
+from resemi.lib.lightweight_classifier import ClassifierConfig, persist_classifier_result, train_lightweight_classifier  # noqa: E402
+from resemi.lib.paths import default_resemi_db  # noqa: E402
+from resemi.lib.schema import connect_output, utc_now  # noqa: E402
 
 
 DEFAULT_MODEL_NAME = "facebook/dinov2-small"
 
 
-def default_db() -> Path:
-    return LAB_ROOT / "infer_results" / "semi-labeling" / "resemi" / "resemi.sqlite3"
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train a small classifier on audited resemi labels and cached embeddings.")
-    parser.add_argument("--db", default=str(default_db()), help="Resemi SQLite DB.")
+    parser.add_argument("--db", default=str(default_resemi_db()), help="Resemi SQLite DB.")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--view-name", default="tight")
