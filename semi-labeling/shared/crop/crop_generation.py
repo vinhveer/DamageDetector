@@ -64,6 +64,8 @@ def generate_crop_views(
     crop_dir: Path,
     view_specs: tuple[CropViewSpec, ...] = DEFAULT_VIEW_SPECS,
     num_workers: int = 0,
+    log_fn=None,
+    log_every: int = 2000,
 ) -> tuple[list[CropView], dict[int, str]]:
     crop_dir = Path(crop_dir).expanduser().resolve()
     crop_dir.mkdir(parents=True, exist_ok=True)
@@ -79,8 +81,36 @@ def generate_crop_views(
         groups.setdefault(detection.image_id, []).append(detection)
     group_list = list(groups.values())
 
+    total_dets = len(detections)
+    total_images = len(group_list)
+    if log_fn is not None:
+        log_fn(f"crop gen: images={total_images} detections={total_dets} workers={max(0, int(num_workers or 0))}")
+
     views: list[CropView] = []
     errors: dict[int, str] = {}
+
+    # Progress tracking by detections processed (works for both paths).
+    import time
+    start_ts = time.time()
+    done_dets = 0
+    done_images = 0
+    last_logged = 0
+    every = max(1, int(log_every or 0)) if log_fn is not None else 0
+
+    def _maybe_log() -> None:
+        nonlocal last_logged
+        if every <= 0:
+            return
+        if done_dets - last_logged < every and done_dets != total_dets:
+            return
+        last_logged = done_dets
+        elapsed = max(1e-6, time.time() - start_ts)
+        rate = done_dets / elapsed
+        eta = (total_dets - done_dets) / rate if rate > 0 else 0.0
+        log_fn(
+            f"[crop] {done_dets}/{total_dets} dets  images={done_images}/{total_images}  "
+            f"ok={len(views)} err={len(errors)}  {rate:.0f} det/s  eta={eta/60:.1f}m"
+        )
 
     def _process_group(group: list[SourceDetection]) -> tuple[list[CropView], dict[int, str]]:
         g_views: list[CropView] = []
@@ -111,14 +141,25 @@ def generate_crop_views(
             g_views, g_errors = _process_group(group)
             views.extend(g_views)
             errors.update(g_errors)
+            done_dets += len(group)
+            done_images += 1
+            _maybe_log()
     else:
         # PNG/zlib encode and PIL decode release the GIL, so threads give real
         # parallelism. Results merged as they complete; order does not matter
         # because each CropView carries its own result_id.
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="crop") as executor:
-            for g_views, g_errors in executor.map(_process_group, group_list):
+            for group, (g_views, g_errors) in zip(
+                group_list, executor.map(_process_group, group_list)
+            ):
                 views.extend(g_views)
                 errors.update(g_errors)
+                done_dets += len(group)
+                done_images += 1
+                _maybe_log()
+    if log_fn is not None:
+        elapsed = time.time() - start_ts
+        log_fn(f"[crop] done {done_dets}/{total_dets} dets in {elapsed/60:.1f}m ok={len(views)} err={len(errors)}")
     return views, errors
 
 

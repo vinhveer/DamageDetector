@@ -133,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
             crop_dir=crop_dir,
             view_specs=view_specs,
             num_workers=int(args.num_workers),
+            log_fn=lambda message: print(message, flush=True),
         )
 
         ok_count = sum(1 for view in crop_views if getattr(view, "status", "ok") == "ok")
