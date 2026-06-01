@@ -7,7 +7,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Sequence
 
@@ -33,6 +33,21 @@ _DINO_BOX_BLACK_RATIO_REJECT = 0.40
 _DINO_BLACK_PIXEL_THRESHOLD = 12
 
 
+def _default_tile_batch_size() -> int:
+    """Default tiles-per-forward for recursive GDINO detection.
+
+    Controlled by the GDINO_TILE_BATCH_SIZE env var so it can be tuned per
+    machine (e.g. a roomy A100) without threading a flag through every CLI.
+    Falls back to 1 (original one-tile-at-a-time behaviour) when unset or
+    invalid.
+    """
+    try:
+        value = int(os.environ.get("GDINO_TILE_BATCH_SIZE", "1"))
+    except (TypeError, ValueError):
+        return 1
+    return value if value >= 1 else 1
+
+
 @dataclass(frozen=True)
 class DinoParams:
     gdino_checkpoint: str
@@ -51,6 +66,12 @@ class DinoParams:
     # Which tile passes to run in recursive/tiled mode.
     # Supported: small, medium, large
     recursive_tile_scales: Sequence[str] = ("small", "medium", "large")
+    # How many tiles to push through GroundingDINO in a single forward pass
+    # during recursive/tiled detection. 1 = original one-tile-at-a-time
+    # behaviour (default, byte-for-byte unchanged). Higher values trade GPU
+    # VRAM for throughput on large GPUs. Defaults to the GDINO_TILE_BATCH_SIZE
+    # env var so it can be tuned per machine without code changes.
+    recursive_tile_batch_size: int = field(default_factory=_default_tile_batch_size)
     top_k: int = 1
     crop_dirname: str = "dino_crops"
     dinov2_checkpoint: str = ""
@@ -172,6 +193,78 @@ def run_text_boxes(
     scores = p0["scores"].detach().cpu().numpy().astype(np.float32)
     labels = p0.get("labels", [])
     return [Det(label=str(label), box_xyxy=box.astype(np.float32), score=float(score)) for box, score, label in zip(boxes, scores, labels)]
+
+
+def run_text_boxes_batch(
+    *,
+    processor: Any,
+    gdino: Any,
+    device: str,
+    pil_images: Sequence[Any],
+    text_queries: Sequence[str],
+    box_threshold: float,
+    text_threshold: float,
+) -> List[List[Det]]:
+    """Batched variant of run_text_boxes.
+
+    Runs several images through GroundingDINO in a single forward pass and
+    returns one detection list per input image (same order as pil_images).
+
+    All images share the same text caption. The HF processor pads batched
+    images and supplies a pixel_mask, so per-image results match running each
+    image on its own (the model ignores padded regions). target_sizes carries
+    each image's native (height, width) so boxes are rescaled correctly.
+    """
+    import numpy as np
+
+    torch = get_torch()
+
+    images = list(pil_images)
+    if not images:
+        return []
+
+    queries = normalize_queries(text_queries)
+    if not queries:
+        return [[] for _ in images]
+
+    caption = ". ".join(queries)
+    captions = [caption] * len(images)
+    target_sizes = torch.tensor(
+        [[int(img.size[1]), int(img.size[0])] for img in images],
+        device=device,
+    )
+    with torch.no_grad():
+        inputs = processor(
+            images=images,
+            text=captions,
+            return_tensors="pt",
+            padding=True,
+        ).to(device)
+        outputs = gdino(**inputs)
+        processed = post_process_gdino(
+            processor=processor,
+            outputs=outputs,
+            input_ids=inputs["input_ids"],
+            target_sizes=target_sizes,
+            box_threshold=box_threshold,
+            text_threshold=text_threshold,
+        )
+
+    results: List[List[Det]] = []
+    for p in processed:
+        boxes = p["boxes"].detach().cpu().numpy().astype(np.float32)
+        scores = p["scores"].detach().cpu().numpy().astype(np.float32)
+        labels = p.get("labels", [])
+        results.append(
+            [
+                Det(label=str(label), box_xyxy=box.astype(np.float32), score=float(score))
+                for box, score, label in zip(boxes, scores, labels)
+            ]
+        )
+    # Be resilient if the processor returns fewer rows than inputs.
+    while len(results) < len(images):
+        results.append([])
+    return results
 
 
 def _pad_rgb_for_grounding_dino(rgb: Any, *, min_side: int = 256, square_if_aspect_over: float = 8.0) -> Any:
@@ -1916,62 +2009,91 @@ class DinoRunner:
             if kept_tiles == 0:
                 continue
 
-            for tile_index, (tile_x1, tile_y1, tile_x2, tile_y2, coverage, tile_kind) in enumerate(tiles, start=1):
-                if stop_checker is not None and stop_checker():
-                    raise RuntimeError("Stopped")
+            effective_tile_batch = max(1, int(getattr(params, "recursive_tile_batch_size", 1) or 1))
+
+            # Collect non-empty tile patches first, then run GDINO in batches.
+            # Tiles in a pass share one identical caption and the HF processor
+            # pads batched images with a pixel_mask, so batched results match
+            # one-tile-at-a-time runs. batch=1 routes through the original
+            # single-image path for byte-for-byte identical behaviour.
+            pending: list[tuple[int, tuple, Any]] = []
+            for tile_index, tile_meta in enumerate(tiles, start=1):
+                tile_x1, tile_y1, tile_x2, tile_y2, coverage, tile_kind = tile_meta
                 patch_rgb = work_rgb[tile_y1:tile_y2, tile_x1:tile_x2]
                 if patch_rgb.size == 0:
                     continue
-                tile_dets = run_text_boxes(
-                    processor=processor,
-                    gdino=gdino,
-                    device=device,
-                    pil_image=Image.fromarray(patch_rgb),
-                    text_queries=list(params.text_queries),
-                    box_threshold=float(params.box_threshold),
-                    text_threshold=float(params.text_threshold),
-                )
-                total_tile_dets += len(tile_dets)
-                if log_fn is not None:
-                    log_fn(
-                        f"[{pass_name} {tile_index}/{kept_tiles}] {tile_kind} crop ({tile_x1},{tile_y1})-({tile_x2},{tile_y2}) "
-                        f"coverage={coverage:.3f} -> {len(tile_dets)} dets"
+                pending.append((tile_index, tile_meta, patch_rgb))
+
+            for batch_start in range(0, len(pending), effective_tile_batch):
+                if stop_checker is not None and stop_checker():
+                    raise RuntimeError("Stopped")
+                batch = pending[batch_start : batch_start + effective_tile_batch]
+                batch_images = [Image.fromarray(item[2]) for item in batch]
+                if len(batch_images) == 1:
+                    tile_dets_list = [
+                        run_text_boxes(
+                            processor=processor,
+                            gdino=gdino,
+                            device=device,
+                            pil_image=batch_images[0],
+                            text_queries=list(params.text_queries),
+                            box_threshold=float(params.box_threshold),
+                            text_threshold=float(params.text_threshold),
+                        )
+                    ]
+                else:
+                    tile_dets_list = run_text_boxes_batch(
+                        processor=processor,
+                        gdino=gdino,
+                        device=device,
+                        pil_images=batch_images,
+                        text_queries=list(params.text_queries),
+                        box_threshold=float(params.box_threshold),
+                        text_threshold=float(params.text_threshold),
                     )
-                for det in tile_dets:
-                    box = det.box_xyxy.astype(np.float32).copy()
-                    box[0] += float(tile_x1)
-                    box[1] += float(tile_y1)
-                    box[2] += float(tile_x1)
-                    box[3] += float(tile_y1)
-                    mapped_box = _map_box_from_rotated_to_original(
-                        box,
-                        inverse_matrix,
-                        original_width=original_width,
-                        original_height=original_height,
-                    )
-                    width_px = float(mapped_box[2] - mapped_box[0])
-                    height_px = float(mapped_box[3] - mapped_box[1])
-                    if width_px < float(effective_min_box_px) or height_px < float(effective_min_box_px):
-                        continue
-                    box_valid_coverage = _box_valid_coverage(
-                        mapped_box,
-                        original_valid_integral,
-                        width=original_width,
-                        height=original_height,
-                    )
-                    if box_valid_coverage < 1.0:
-                        continue
-                    if (
-                        _box_black_ratio(
+                for (tile_index, tile_meta, _patch), tile_dets in zip(batch, tile_dets_list):
+                    tile_x1, tile_y1, tile_x2, tile_y2, coverage, tile_kind = tile_meta
+                    total_tile_dets += len(tile_dets)
+                    if log_fn is not None:
+                        log_fn(
+                            f"[{pass_name} {tile_index}/{kept_tiles}] {tile_kind} crop ({tile_x1},{tile_y1})-({tile_x2},{tile_y2}) "
+                            f"coverage={coverage:.3f} -> {len(tile_dets)} dets"
+                        )
+                    for det in tile_dets:
+                        box = det.box_xyxy.astype(np.float32).copy()
+                        box[0] += float(tile_x1)
+                        box[1] += float(tile_y1)
+                        box[2] += float(tile_x1)
+                        box[3] += float(tile_y1)
+                        mapped_box = _map_box_from_rotated_to_original(
+                            box,
+                            inverse_matrix,
+                            original_width=original_width,
+                            original_height=original_height,
+                        )
+                        width_px = float(mapped_box[2] - mapped_box[0])
+                        height_px = float(mapped_box[3] - mapped_box[1])
+                        if width_px < float(effective_min_box_px) or height_px < float(effective_min_box_px):
+                            continue
+                        box_valid_coverage = _box_valid_coverage(
                             mapped_box,
-                            original_black_integral,
+                            original_valid_integral,
                             width=original_width,
                             height=original_height,
                         )
-                        >= _DINO_BOX_BLACK_RATIO_REJECT
-                    ):
-                        continue
-                    detections.append((mapped_box, str(det.label), float(det.score)))
+                        if box_valid_coverage < 1.0:
+                            continue
+                        if (
+                            _box_black_ratio(
+                                mapped_box,
+                                original_black_integral,
+                                width=original_width,
+                                height=original_height,
+                            )
+                            >= _DINO_BOX_BLACK_RATIO_REJECT
+                        ):
+                            continue
+                        detections.append((mapped_box, str(det.label), float(det.score)))
 
         if total_tiles_kept == 0:
             if log_fn is not None:
