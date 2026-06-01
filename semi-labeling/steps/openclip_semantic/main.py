@@ -27,6 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pretrained", default="laion2b_s34b_b79k", help="OpenCLIP pretrained tag, e.g. laion2b_s34b_b79k.")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--batch-size", type=int, default=16, help="How many crops to encode per OpenCLIP image batch. Default: 16")
+    parser.add_argument("--num-workers", type=int, default=0,
+                        help="Background threads to decode/crop images while the GPU runs. 0 = sequential (default).")
     parser.add_argument("--save-crops", action=argparse.BooleanOptionalAction, default=False, help="Save crop PNGs for each classified detection.")
     parser.add_argument("--crop-dir", default="", help="Optional crop output root. Used only when --save-crops is enabled.")
     return parser
@@ -48,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         pretrained=str(args.pretrained),
         device=str(args.device),
         batch_size=int(args.batch_size),
+        num_workers=int(args.num_workers),
         save_crops=bool(args.save_crops),
         crop_dir=Path(args.crop_dir).expanduser().resolve() if str(args.crop_dir or "").strip() else None,
     )

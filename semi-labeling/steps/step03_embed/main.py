@@ -35,6 +35,7 @@ from shared.db.embedding_cache import (  # noqa: E402
 )
 from shared.runtime.paths import default_resemi_db  # noqa: E402
 from shared.db.schema import connect_output, utc_now  # noqa: E402
+from shared.runtime.prefetch import ordered_prefetch  # noqa: E402
 
 
 DEFAULT_MODEL_NAME = "facebook/dinov2-small"
@@ -48,11 +49,6 @@ def parse_result_ids(raw: list[str]) -> list[int]:
             if part:
                 result.append(int(part))
     return result
-
-
-def chunks(items: list[CropEmbeddingRow], size: int) -> list[list[CropEmbeddingRow]]:
-    effective_size = max(1, int(size))
-    return [items[start : start + effective_size] for start in range(0, len(items), effective_size)]
 
 
 def open_crop(path: str) -> Image.Image:
@@ -174,6 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-version", default="", help="Optional audited model version/checkpoint tag.")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--num-workers", type=int, default=0,
+                        help="Background threads to decode crop PNGs while the GPU embeds. 0 = sequential (default).")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--result-id", action="append", default=[], help="Specific result_id(s), comma-separated or repeated.")
     parser.add_argument("--resume", action="store_true")
@@ -209,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
             "model_version": str(args.model_version),
             "device": str(args.device),
             "batch_size": int(args.batch_size),
+            "num_workers": int(args.num_workers),
             "limit": int(args.limit),
             "result_ids": result_ids,
             "resume": bool(args.resume),
@@ -253,35 +252,54 @@ def main(argv: list[str] | None = None) -> int:
             print(f"embedding_run_id={embedding_run_id} crops={len(crop_rows)} model={args.model_name}", flush=True)
 
         processed_since_log = 0
-        for batch in chunks(crop_rows, int(args.batch_size)):
-            ok_rows: list[CropEmbeddingRow] = []
-            images: list[Image.Image] = []
-            skips: list[tuple[CropEmbeddingRow, str, str]] = []
-            for row in batch:
-                try:
-                    images.append(open_crop(row.crop_path))
-                    ok_rows.append(row)
-                except Exception as exc:
-                    skips.append((row, skip_reason(exc), str(exc)))
-            insert_skips(conn, embedding_run_id=embedding_run_id, rows=skips)
-            if images:
-                try:
-                    vectors = embedder.embed(images, batch_size=int(args.batch_size))
-                finally:
-                    for image in images:
-                        image.close()
-                if vectors.shape[0] != len(ok_rows):
-                    raise RuntimeError(f"Embedding row mismatch: got {vectors.shape[0]}, expected {len(ok_rows)}")
-                if dim <= 0 and vectors.ndim == 2 and vectors.shape[1] > 0:
-                    dim = int(vectors.shape[1])
-                    conn.execute("UPDATE embedding_runs SET dim = ? WHERE embedding_run_id = ?", (dim, embedding_run_id))
-                    conn.commit()
-                insert_embeddings(conn, embedding_run_id=embedding_run_id, dim=dim, rows=list(zip(ok_rows, vectors, strict=True)))
-            embedded, skipped = update_embedding_counts(conn, embedding_run_id=embedding_run_id)
-            processed_since_log += len(batch)
+        batch_size = max(1, int(args.batch_size))
+        num_workers = max(0, int(args.num_workers or 0))
+
+        # Prefetch crop decode (CPU/disk bound) on worker threads while the GPU
+        # embeds the previous batch. Order preserved; one bad crop -> skip, not
+        # a crash. Buffers accumulate up to batch_size before each GPU call.
+        ok_rows: list[CropEmbeddingRow] = []
+        images: list[Image.Image] = []
+
+        def _flush_embed(dim_value: int) -> int:
+            if not images:
+                return dim_value
+            try:
+                vectors = embedder.embed(images, batch_size=batch_size)
+            finally:
+                for image in images:
+                    image.close()
+            if vectors.shape[0] != len(ok_rows):
+                raise RuntimeError(f"Embedding row mismatch: got {vectors.shape[0]}, expected {len(ok_rows)}")
+            if dim_value <= 0 and vectors.ndim == 2 and vectors.shape[1] > 0:
+                dim_value = int(vectors.shape[1])
+                conn.execute("UPDATE embedding_runs SET dim = ? WHERE embedding_run_id = ?", (dim_value, embedding_run_id))
+                conn.commit()
+            insert_embeddings(conn, embedding_run_id=embedding_run_id, dim=dim_value, rows=list(zip(ok_rows, vectors, strict=True)))
+            ok_rows.clear()
+            images.clear()
+            return dim_value
+
+        for row, image, exc in ordered_prefetch(
+            crop_rows, lambda r: open_crop(r.crop_path),
+            num_workers=num_workers, max_inflight=max(batch_size, num_workers * 2),
+        ):
+            if exc is not None:
+                insert_skips(conn, embedding_run_id=embedding_run_id, rows=[(row, skip_reason(exc), str(exc))])
+                processed_since_log += 1
+            else:
+                ok_rows.append(row)
+                images.append(image)
+                if len(images) >= batch_size:
+                    dim = _flush_embed(dim)
+                    processed_since_log += batch_size
+
             if int(args.log_every) > 0 and processed_since_log >= int(args.log_every):
+                embedded, skipped = update_embedding_counts(conn, embedding_run_id=embedding_run_id)
                 print(f"[embed] embedded={embedded} skipped={skipped} total={len(crop_rows)}", flush=True)
                 processed_since_log = 0
+
+        dim = _flush_embed(dim)
 
         embedded, skipped = update_embedding_counts(conn, embedding_run_id=embedding_run_id)
         print(f"Done: embedding_run_id={embedding_run_id} embedded={embedded} skipped={skipped} db={db_path}", flush=True)

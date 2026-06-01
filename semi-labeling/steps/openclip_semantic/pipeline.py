@@ -12,6 +12,8 @@ from .clip_model import OpenClipSemanticClassifier
 from .prompts import POS_PROMPTS
 from .sqlite_store import SourceDetection, Step2SemanticStore
 
+from shared.runtime.prefetch import ordered_prefetch
+
 
 @dataclass(frozen=True)
 class Step2SemanticConfig:
@@ -27,6 +29,7 @@ class Step2SemanticConfig:
     pretrained: str = "laion2b_s34b_b79k"
     device: str = "auto"
     batch_size: int = 16
+    num_workers: int = 0
     save_crops: bool = False
     crop_dir: Path | None = None
 
@@ -109,31 +112,26 @@ class Step2SemanticPipeline:
         ok_count = 0
         error_count = 0
         batch_size = max(1, int(self.config.batch_size or 1))
-        for batch_start in range(0, len(detections), batch_size):
-            batch = detections[batch_start : batch_start + batch_size]
-            prepared: list[tuple[SourceDetection, Image.Image, str]] = []
-            for local_index, detection in enumerate(batch, start=batch_start + 1):
-                try:
-                    crop_image, resolved_image_path = self._load_detection_crop(detection)
-                    prepared.append((detection, crop_image, str(resolved_image_path)))
-                except Exception as exc:
-                    self.store.insert_error_result(
-                        semantic_run_id=semantic_run_id,
-                        detection=detection,
-                        crop_path="",
-                        exc=exc,
-                    )
-                    error_count += 1
-                    if log_fn is not None:
-                        log_fn(f"[{local_index}/{len(detections)}] detection_id={detection.detection_id} error={exc}")
+        num_workers = max(0, int(self.config.num_workers or 0))
+        total = len(detections)
 
+        def _load(detection: SourceDetection) -> tuple[Image.Image, str]:
+            crop_image, resolved_image_path = self._load_detection_crop(detection)
+            return crop_image, str(resolved_image_path)
+
+        # Prefetch decode+crop on worker threads (CPU/disk bound) while the GPU
+        # classifies the previous batch. Order is preserved, so logging indices
+        # and DB writes stay identical to the sequential path.
+        prepared: list[tuple[SourceDetection, Image.Image, str]] = []
+        processed = 0
+
+        def _flush() -> tuple[int, int]:
             if not prepared:
-                continue
-
+                return 0, 0
             classifications = self.classifier.classify_images([item[1] for item in prepared])
-            for local_index, ((detection, crop_image, resolved_image_path), classification) in enumerate(
-                zip(prepared, classifications, strict=True),
-                start=batch_start + 1,
+            ok = 0
+            for (detection, crop_image, resolved_image_path), classification in zip(
+                prepared, classifications, strict=True
             ):
                 crop_path = ""
                 classification["resolved_image_path"] = resolved_image_path
@@ -145,11 +143,36 @@ class Step2SemanticPipeline:
                     crop_path=crop_path,
                     classification=classification,
                 )
-                ok_count += 1
+                ok += 1
+            prepared.clear()
+            return ok, 0
+
+        for detection, loaded, exc in ordered_prefetch(
+            detections, _load, num_workers=num_workers, max_inflight=max(batch_size, num_workers * 2)
+        ):
+            processed += 1
+            if exc is not None:
+                self.store.insert_error_result(
+                    semantic_run_id=semantic_run_id,
+                    detection=detection,
+                    crop_path="",
+                    exc=exc,
+                )
+                error_count += 1
                 if log_fn is not None:
-                    log_fn(
-                        f"[{local_index}/{len(detections)}] detection_id={detection.detection_id} label={classification['predicted_label']} pct={classification['predicted_probability_pct']:.2f}"
-                    )
+                    log_fn(f"[{processed}/{total}] detection_id={detection.detection_id} error={exc}")
+                continue
+
+            crop_image, resolved_image_path = loaded
+            prepared.append((detection, crop_image, resolved_image_path))
+            if len(prepared) >= batch_size:
+                ok, _ = _flush()
+                ok_count += ok
+                if log_fn is not None:
+                    log_fn(f"[{processed}/{total}] classified ok={ok_count} error={error_count}")
+
+        ok, _ = _flush()
+        ok_count += ok
 
         if log_fn is not None:
             log_fn(f"openclip_semantic_done ok={ok_count} error={error_count} db={self.store.db_path}")
