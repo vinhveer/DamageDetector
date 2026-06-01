@@ -64,9 +64,11 @@ def generate_crop_views(
     crop_dir: Path,
     view_specs: tuple[CropViewSpec, ...] = DEFAULT_VIEW_SPECS,
     num_workers: int = 0,
+    encoding: "CropEncoding | None" = None,
     log_fn=None,
     log_every: int = 2000,
 ) -> tuple[list[CropView], dict[int, str]]:
+    enc = encoding or DEFAULT_CROP_ENCODING
     crop_dir = Path(crop_dir).expanduser().resolve()
     crop_dir.mkdir(parents=True, exist_ok=True)
     # Pre-create view dirs once instead of per-detection (avoids 730k mkdir calls).
@@ -84,7 +86,14 @@ def generate_crop_views(
     total_dets = len(detections)
     total_images = len(group_list)
     if log_fn is not None:
-        log_fn(f"crop gen: images={total_images} detections={total_dets} workers={max(0, int(num_workers or 0))}")
+        enc_desc = (
+            f"jpeg q={enc.quality}" if enc.format == "jpeg" else f"png level={enc.compress_level}"
+        )
+        log_fn(
+            f"crop gen: images={total_images} detections={total_dets} "
+            f"workers={max(0, int(num_workers or 0))} encoding={enc_desc} "
+            f"views={[s.name for s in view_specs]}"
+        )
 
     views: list[CropView] = []
     errors: dict[int, str] = {}
@@ -128,7 +137,7 @@ def generate_crop_views(
             for detection in group:
                 try:
                     g_views.extend(
-                        _generate_detection_views(detection, rgb=rgb, crop_dir=crop_dir, view_specs=view_specs)
+                        _generate_detection_views(detection, rgb=rgb, crop_dir=crop_dir, view_specs=view_specs, encoding=enc)
                     )
                 except (FileNotFoundError, UnidentifiedImageError, ValueError, OSError) as exc:
                     g_errors[detection.result_id] = str(exc)
@@ -172,7 +181,9 @@ def _generate_detection_views(
     rgb: Image.Image,
     crop_dir: Path,
     view_specs: tuple[CropViewSpec, ...],
+    encoding: "CropEncoding | None" = None,
 ) -> list[CropView]:
+    enc = encoding or DEFAULT_CROP_ENCODING
     width, height = rgb.size
     output: list[CropView] = []
     for spec in view_specs:
@@ -181,8 +192,8 @@ def _generate_detection_views(
             continue
         x1, y1, x2, y2 = box
         crop = rgb.crop((x1, y1, x2, y2))
-        crop_hash, encoded = encode_png_with_hash(crop)
-        path = crop_dir / spec.name / f"{detection.result_id}_{spec.name}_{crop_hash[:12]}.png"
+        crop_hash, encoded = enc.encode(crop)
+        path = crop_dir / spec.name / f"{detection.result_id}_{spec.name}_{crop_hash[:12]}.{enc.extension}"
         if not path.is_file():
             path.write_bytes(encoded)
         output.append(
@@ -259,3 +270,48 @@ def encode_png_with_hash(image: Image.Image) -> tuple[str, bytes]:
     image.save(buffer, format="PNG")
     data = buffer.getvalue()
     return hashlib.sha256(data).hexdigest(), data
+
+
+@dataclass(frozen=True)
+class CropEncoding:
+    """How crop files are encoded.
+
+    - format "png": lossless. ``compress_level`` 0-9 (PIL default 6). Lower is
+      faster with slightly bigger files; pixels are identical at any level.
+    - format "jpeg": lossy but ~11x faster to encode and ~40% the file size.
+      ``quality`` 1-100. Safe for embedding crops (DINOv2/OpenCLIP downscale to
+      224/518px), but it DOES alter pixels — opt in deliberately.
+    """
+    format: str = "png"
+    compress_level: int = 1
+    quality: int = 95
+
+    @property
+    def extension(self) -> str:
+        return "jpg" if self.format == "jpeg" else "png"
+
+    def encode(self, image: Image.Image) -> tuple[str, bytes]:
+        buffer = BytesIO()
+        if self.format == "jpeg":
+            image.save(buffer, format="JPEG", quality=int(self.quality))
+        else:
+            level = max(0, min(9, int(self.compress_level)))
+            image.save(buffer, format="PNG", compress_level=level)
+        data = buffer.getvalue()
+        return hashlib.sha256(data).hexdigest(), data
+
+
+def parse_crop_encoding(*, fmt: str, compress_level: int, jpeg_quality: int) -> CropEncoding:
+    normalized = str(fmt or "png").strip().lower()
+    if normalized in ("jpg", "jpeg"):
+        normalized = "jpeg"
+    elif normalized != "png":
+        raise ValueError(f"Unknown crop format: {fmt}. Expected png or jpeg.")
+    return CropEncoding(
+        format=normalized,
+        compress_level=int(compress_level),
+        quality=int(jpeg_quality),
+    )
+
+
+DEFAULT_CROP_ENCODING = CropEncoding()

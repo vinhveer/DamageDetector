@@ -21,7 +21,7 @@ from shared.runtime import bootstrap
 
 bootstrap.ensure_on_path()
 
-from shared.crop.crop_generation import DEFAULT_VIEW_SPECS, generate_crop_views, parse_view_specs  # noqa: E402
+from shared.crop.crop_generation import DEFAULT_VIEW_SPECS, generate_crop_views, parse_crop_encoding, parse_view_specs  # noqa: E402
 from shared.runtime.paths import default_image_root, default_resemi_db  # noqa: E402
 from steps.step01_semantic.pipeline import ResemiPipeline  # noqa: E402
 from shared.db.schema import connect_output  # noqa: E402
@@ -66,6 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Process first N detections only (debug).")
     parser.add_argument("--num-workers", type=int, default=0,
                         help="Parallel threads for crop decode/encode (PNG encode is the bottleneck). 0 = sequential (default).")
+    parser.add_argument("--crop-format", default="png", choices=["png", "jpeg"],
+                        help="Crop file format. png=lossless (default). jpeg=~11x faster encode + ~40%% file size, but LOSSY.")
+    parser.add_argument("--crop-compress-level", type=int, default=1,
+                        help="PNG compression level 0-9. Lower=faster, same pixels. Default 1 (PIL default is 6).")
+    parser.add_argument("--jpeg-quality", type=int, default=95,
+                        help="JPEG quality 1-100 (only when --crop-format jpeg). Default 95.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print plan without generating any files.")
     return parser
@@ -127,12 +133,18 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"detections={len(detections)}")
 
+        crop_encoding = parse_crop_encoding(
+            fmt=str(args.crop_format),
+            compress_level=int(args.crop_compress_level),
+            jpeg_quality=int(args.jpeg_quality),
+        )
         crop_views, crop_errors = generate_crop_views(
             detections,
             image_root=image_root,
             crop_dir=crop_dir,
             view_specs=view_specs,
             num_workers=int(args.num_workers),
+            encoding=crop_encoding,
             log_fn=lambda message: print(message, flush=True),
         )
 
