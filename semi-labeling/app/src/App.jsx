@@ -10,19 +10,22 @@ import {
   IconChecklist,
   IconChartLine,
   IconDownload,
+  IconStar,
 } from '@tabler/icons-react';
 import { IconButton } from './components/ui/index.js';
 import { cn } from './components/ui/cn.js';
 import Labeling from './features/labeling/Labeling.jsx';
 import CleanedLabels from './features/labeling/CleanedLabels.jsx';
+import Prototype from './features/labeling/Prototype.jsx';
 import RunSteps from './features/labeling/RunSteps.jsx';
 import Versions from './features/labeling/Versions.jsx';
 import Metrics from './features/labeling/Metrics.jsx';
 import Export from './features/labeling/Export.jsx';
 
-// Semi-labeling loop: label a sample -> review machine labels -> run next steps
-// -> inspect versions/metrics -> export dataset.
+// Semi-labeling loop: pick prototypes -> label a sample -> review machine
+// labels -> run next steps -> inspect versions/metrics -> export dataset.
 const NAV_MAIN = [
+  { label: 'Prototype', value: 'prototype', icon: IconStar },
   { label: 'Labeling', value: 'labeling', icon: IconTag },
   { label: 'Cleaned', value: 'cleaned', icon: IconChecklist },
   { label: 'Chạy bước', value: 'run-steps', icon: IconPlayerPlay },
@@ -159,13 +162,14 @@ export default function App() {
 
           {/* Main content */}
           <section className="min-w-0 flex-1 overflow-hidden bg-[var(--bg)]">
+            {activeTab === 'prototype' && <Prototype dbPath={dbPath} onChangeDbPath={setDbPath} onDataChanged={onDataChanged} />}
             {activeTab === 'labeling' && <Labeling />}
             {activeTab === 'cleaned' && <CleanedLabels dbPath={dbPath} onChangeDbPath={setDbPath} dataVersion={dataVersion} />}
             {activeTab === 'run-steps' && <RunSteps dbPath={dbPath} onChangeDbPath={setDbPath} onDataChanged={onDataChanged} />}
             {activeTab === 'versions' && <Versions dbPath={dbPath} onChangeDbPath={setDbPath} dataVersion={dataVersion} />}
             {activeTab === 'metrics' && <Metrics dbPath={dbPath} onChangeDbPath={setDbPath} dataVersion={dataVersion} />}
             {activeTab === 'export' && <Export dbPath={dbPath} onChangeDbPath={setDbPath} />}
-            {!['labeling', 'cleaned', 'run-steps', 'versions', 'metrics', 'export'].includes(activeTab) && <EmptyContent />}
+            {!['prototype', 'labeling', 'cleaned', 'run-steps', 'versions', 'metrics', 'export'].includes(activeTab) && <EmptyContent />}
           </section>
 
         </div>
