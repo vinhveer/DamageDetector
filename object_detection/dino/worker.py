@@ -84,6 +84,23 @@ def _dispatch(proto: WorkerProtocol, call_id: int, method: str, params: dict[str
         proto.spawn_job(call_id, _job)
         return
 
+    if normalized == "predict_rois_batch":
+        def _job():
+            image_path = str(params.get("image_path") or "").strip()
+            roi_boxes = params.get("roi_boxes") or []
+            if not isinstance(roi_boxes, list):
+                raise TypeError("roi_boxes must be a list")
+            p = _params_from(params.get("params") or {})
+            return _runner.predict_rois_batch(
+                image_path,
+                p,
+                roi_boxes=roi_boxes,
+                stop_checker=proto.stop_checker(call_id),
+                log_fn=proto.log_fn(call_id),
+            )
+        proto.spawn_job(call_id, _job)
+        return
+
     if normalized == "recursive_detect":
         def _job():
             image_path = str(params.get("image_path") or "").strip()

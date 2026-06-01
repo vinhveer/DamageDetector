@@ -1600,6 +1600,211 @@ class DinoRunner:
             "detections": payload,
         }
 
+    def _filter_and_pack_crop_dets(
+        self,
+        detections: Sequence[Any],
+        *,
+        valid_integral: Any,
+        black_integral: Any,
+        crop_width: int,
+        crop_height: int,
+        offset_x: int,
+        offset_y: int,
+        max_dets: int,
+    ) -> list[dict[str, Any]]:
+        """Apply predict()'s invalid/black filter + max_dets cap to one crop's
+        detections, then shift boxes from crop-local to full-image coords.
+
+        Mirrors the single-ROI path (predict + _run_with_roi) exactly.
+        """
+        kept = [
+            det
+            for det in detections
+            if _box_is_fully_valid(det.box_xyxy, valid_integral, width=crop_width, height=crop_height)
+            and _box_black_ratio(det.box_xyxy, black_integral, width=crop_width, height=crop_height) < _DINO_BOX_BLACK_RATIO_REJECT
+        ]
+        kept = kept[: max(0, int(max_dets))] if int(max_dets) > 0 else kept
+        payload: list[dict[str, Any]] = []
+        for det in kept:
+            box = det.box_xyxy
+            payload.append(
+                {
+                    "label": str(det.label),
+                    "score": float(det.score),
+                    "box": [
+                        float(box[0]) + float(offset_x),
+                        float(box[1]) + float(offset_y),
+                        float(box[2]) + float(offset_x),
+                        float(box[3]) + float(offset_y),
+                    ],
+                    "model_name": "Dino",
+                }
+            )
+        return payload
+
+    def predict_rois_batch(
+        self,
+        image_path: str,
+        params: DinoParams,
+        *,
+        roi_boxes: Sequence[Sequence[int]],
+        stop_checker=None,
+        log_fn=None,
+    ) -> dict:
+        """Run GDINO detect-only over many ROIs of a single image, batching
+        the forward passes to use more GPU at once.
+
+        Per ROI the result matches predict(roi_box=...): crop the ROI, build
+        the valid-mask on that crop, run GDINO, apply the invalid/black filter
+        + max_dets cap, then shift boxes back to full-image coordinates. The
+        number of ROIs pushed through one forward pass is params.
+        recursive_tile_batch_size (env GDINO_TILE_BATCH_SIZE), default 1.
+
+        Returns {"results": [<predict-like dict>, ...]} in roi_boxes order.
+        """
+        import cv2
+        from PIL import Image
+
+        if not os.path.isfile(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
+        os.makedirs(params.output_dir, exist_ok=True)
+
+        image = _cv2_imread_any_path(image_path, cv2.IMREAD_COLOR)
+        if image is None:
+            raise FileNotFoundError(f"Cannot read image: {image_path}")
+        img_h, img_w = image.shape[:2]
+
+        processor, gdino, device = self.ensure_model_loaded(params, log_fn=log_fn)
+
+        # Prepare every crop up front (read image once instead of once-per-tile).
+        prepared: list[dict[str, Any]] = []
+        results_by_index: dict[int, dict[str, Any]] = {}
+        for roi_index, roi in enumerate(roi_boxes):
+            if not isinstance(roi, (list, tuple)) or len(roi) != 4:
+                results_by_index[roi_index] = {
+                    "image_path": str(image_path),
+                    "output_dir": params.output_dir,
+                    "dets": 0,
+                    "detections": [],
+                }
+                continue
+            rx1 = max(0, min(img_w - 1, int(roi[0])))
+            ry1 = max(0, min(img_h - 1, int(roi[1])))
+            rx2 = max(0, min(img_w, int(roi[2])))
+            ry2 = max(0, min(img_h, int(roi[3])))
+            if rx2 <= rx1 or ry2 <= ry1:
+                results_by_index[roi_index] = {
+                    "image_path": str(image_path),
+                    "output_dir": params.output_dir,
+                    "dets": 0,
+                    "detections": [],
+                }
+                continue
+            crop_bgr = image[ry1:ry2, rx1:rx2]
+            crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+            # Build the valid-mask on the crop (border-touching dark components),
+            # exactly as the single-ROI temp-file path does.
+            valid_mask = _build_opencv_valid_mask(crop_rgb)
+            crop_h, crop_w = crop_rgb.shape[:2]
+            prepared.append(
+                {
+                    "roi_index": roi_index,
+                    "offset_x": rx1,
+                    "offset_y": ry1,
+                    "crop_w": crop_w,
+                    "crop_h": crop_h,
+                    "rgb": crop_rgb,
+                    "valid_integral": _mask_integral(valid_mask),
+                    "black_integral": _pure_black_integral(crop_rgb),
+                }
+            )
+
+        effective_batch = max(1, int(getattr(params, "recursive_tile_batch_size", 1) or 1))
+        if log_fn is not None:
+            log_fn(
+                f"ROI batch DINO: rois={len(roi_boxes)} prepared={len(prepared)} "
+                f"batch_size={effective_batch}"
+            )
+
+        def _run_one(item: dict[str, Any]) -> list[Any]:
+            # Single-crop path keeps predict()'s extreme-aspect padding retry.
+            rgb = item["rgb"]
+            try:
+                return run_text_boxes(
+                    processor=processor,
+                    gdino=gdino,
+                    device=device,
+                    pil_image=Image.fromarray(rgb),
+                    text_queries=list(params.text_queries),
+                    box_threshold=float(params.box_threshold),
+                    text_threshold=float(params.text_threshold),
+                )
+            except RuntimeError as exc:
+                if "selected index k out of range" not in str(exc):
+                    raise
+                padded_rgb = _pad_rgb_for_grounding_dino(rgb)
+                if padded_rgb.shape[:2] == rgb.shape[:2]:
+                    raise
+                return run_text_boxes(
+                    processor=processor,
+                    gdino=gdino,
+                    device=device,
+                    pil_image=Image.fromarray(padded_rgb),
+                    text_queries=list(params.text_queries),
+                    box_threshold=float(params.box_threshold),
+                    text_threshold=float(params.text_threshold),
+                )
+
+        for batch_start in range(0, len(prepared), effective_batch):
+            if stop_checker is not None and stop_checker():
+                raise RuntimeError("Stopped")
+            batch = prepared[batch_start : batch_start + effective_batch]
+            if len(batch) == 1:
+                dets_list = [_run_one(batch[0])]
+            else:
+                try:
+                    dets_list = run_text_boxes_batch(
+                        processor=processor,
+                        gdino=gdino,
+                        device=device,
+                        pil_images=[Image.fromarray(item["rgb"]) for item in batch],
+                        text_queries=list(params.text_queries),
+                        box_threshold=float(params.box_threshold),
+                        text_threshold=float(params.text_threshold),
+                    )
+                except RuntimeError as exc:
+                    # Extreme-aspect crops can trip GDINO; fall back to the
+                    # per-crop path (with padding retry) for this batch only.
+                    if "selected index k out of range" not in str(exc):
+                        raise
+                    if log_fn is not None:
+                        log_fn("ROI batch: extreme-aspect crop in batch, falling back to per-crop for this group.")
+                    dets_list = [_run_one(item) for item in batch]
+
+            for item, detections in zip(batch, dets_list):
+                payload = self._filter_and_pack_crop_dets(
+                    detections,
+                    valid_integral=item["valid_integral"],
+                    black_integral=item["black_integral"],
+                    crop_width=item["crop_w"],
+                    crop_height=item["crop_h"],
+                    offset_x=item["offset_x"],
+                    offset_y=item["offset_y"],
+                    max_dets=int(params.max_dets),
+                )
+                results_by_index[item["roi_index"]] = {
+                    "image_path": str(image_path),
+                    "output_dir": params.output_dir,
+                    "dets": len(payload),
+                    "detections": payload,
+                }
+
+        ordered = [results_by_index[i] for i in range(len(roi_boxes))]
+        if log_fn is not None:
+            total = sum(int(r.get("dets") or 0) for r in ordered)
+            log_fn(f"ROI batch DINO done. rois={len(ordered)} total_dets={total}")
+        return {"results": ordered}
+
     def rank_boxes(self, image_path: str, params: DinoParams, *, stop_checker=None, log_fn=None) -> dict:
         import cv2
         from PIL import Image

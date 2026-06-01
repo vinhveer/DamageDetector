@@ -333,9 +333,14 @@ class DamageScanPipeline:
         full-image pass (catch large regions split across tiles), merged."""
         collected: list[Detection] = []
         tiles = self._grid_tiles(width=int(image.width), height=int(image.height))
-        for tile in tiles:
+
+        detect_rois = getattr(self.detector, "detect_rois", None)
+        if callable(detect_rois) and tiles:
+            # Batched path: push grid tiles through the worker in groups
+            # (GDINO_TILE_BATCH_SIZE per forward) instead of one call per tile.
+            # Result is identical to the per-tile loop, just faster on big GPUs.
             collected.extend(
-                self.detector.detect(
+                detect_rois(
                     image_path=image.path,
                     prompt_key=spec.key,
                     prompt_text=spec.prompt,
@@ -346,10 +351,28 @@ class DamageScanPipeline:
                     source="tile",
                     image_width=image.width,
                     image_height=image.height,
-                    roi_box=tile,
+                    roi_boxes=tiles,
                     log_fn=log_fn,
                 )
             )
+        else:
+            for tile in tiles:
+                collected.extend(
+                    self.detector.detect(
+                        image_path=image.path,
+                        prompt_key=spec.key,
+                        prompt_text=spec.prompt,
+                        box_threshold=box_threshold,
+                        text_threshold=float(spec.text_threshold),
+                        max_dets=int(self.config.final_max_dets_per_class),
+                        stage="tile_raw",
+                        source="tile",
+                        image_width=image.width,
+                        image_height=image.height,
+                        roi_box=tile,
+                        log_fn=log_fn,
+                    )
+                )
         collected.extend(
             self.detector.detect(
                 image_path=image.path,

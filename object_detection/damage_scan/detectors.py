@@ -122,5 +122,102 @@ class GroundingDinoDetector(DamageDetector):
             )
         return detections
 
+    def _raw_to_detections(
+        self,
+        raw_detections: list[dict[str, Any]],
+        *,
+        prompt_key: str,
+        prompt_text: str,
+        stage: str,
+        source: str,
+        image_width: int,
+        image_height: int,
+    ) -> list[Detection]:
+        detections: list[Detection] = []
+        for raw in list(raw_detections or []):
+            raw_box = raw.get("box")
+            if not isinstance(raw_box, (list, tuple)) or len(raw_box) != 4:
+                continue
+            clipped = clip_box(
+                Box(float(raw_box[0]), float(raw_box[1]), float(raw_box[2]), float(raw_box[3])),
+                width=int(image_width),
+                height=int(image_height),
+            )
+            if clipped is None:
+                continue
+            detections.append(
+                Detection(
+                    box=clipped,
+                    label=str(raw.get("label") or prompt_key),
+                    score=float(raw.get("score") or 0.0),
+                    prompt_key=str(prompt_key),
+                    prompt_text=str(prompt_text),
+                    stage=str(stage),
+                    source=str(source),
+                    model_name=str(raw.get("model_name") or "groundingdino"),
+                    raw=dict(raw),
+                )
+            )
+        return detections
+
+    def detect_rois(
+        self,
+        *,
+        image_path: Path,
+        prompt_key: str,
+        prompt_text: str,
+        box_threshold: float,
+        text_threshold: float,
+        max_dets: int,
+        stage: str,
+        source: str,
+        image_width: int,
+        image_height: int,
+        roi_boxes: list[Box],
+        log_fn: Callable[[str], None] | None = None,
+    ) -> list[Detection]:
+        """Detect over many ROIs of one image, batching forward passes on the
+        worker. Equivalent to calling detect() once per ROI, just faster.
+
+        Returns a single flat list of detections across all ROIs (matching the
+        old per-tile concatenation order).
+        """
+        if not roi_boxes:
+            return []
+        queries = [item.strip() for item in str(prompt_text).split(",") if item.strip()]
+        params: dict[str, Any] = {
+            "gdino_checkpoint": self.checkpoint,
+            "gdino_config_id": "auto",
+            "text_queries": queries,
+            "box_threshold": float(box_threshold),
+            "text_threshold": float(text_threshold),
+            "max_dets": int(max_dets),
+            "device": self.device,
+            "output_dir": self.output_dir,
+        }
+        result = self._service.call(
+            "predict_rois_batch",
+            {
+                "image_path": str(image_path),
+                "roi_boxes": [list(box.as_int_xyxy()) for box in roi_boxes],
+                "params": params,
+            },
+            log_fn=log_fn,
+        )
+        detections: list[Detection] = []
+        for per_roi in list((result or {}).get("results") or []):
+            detections.extend(
+                self._raw_to_detections(
+                    list((per_roi or {}).get("detections") or []),
+                    prompt_key=prompt_key,
+                    prompt_text=prompt_text,
+                    stage=stage,
+                    source=source,
+                    image_width=image_width,
+                    image_height=image_height,
+                )
+            )
+        return detections
+
     def close(self) -> None:
         self._service.close()
