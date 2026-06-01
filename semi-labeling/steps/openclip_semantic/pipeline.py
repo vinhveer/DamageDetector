@@ -115,19 +115,44 @@ class Step2SemanticPipeline:
         num_workers = max(0, int(self.config.num_workers or 0))
         total = len(detections)
 
-        def _load(detection: SourceDetection) -> tuple[Image.Image, str]:
-            crop_image, resolved_image_path = self._load_detection_crop(detection)
-            return crop_image, str(resolved_image_path)
+        # Group detections by source image, preserving order. The list is
+        # ordered by detection_id so an image's detections are already adjacent;
+        # grouping lets us decode each image ONCE and crop every box from it,
+        # instead of re-opening the full image per detection (the real
+        # bottleneck — one HD image was being JPEG-decoded N times).
+        from collections import OrderedDict
 
-        # Prefetch decode+crop on worker threads (CPU/disk bound) while the GPU
-        # classifies the previous batch. Order is preserved, so logging indices
-        # and DB writes stay identical to the sequential path.
+        groups: "OrderedDict[int, list[SourceDetection]]" = OrderedDict()
+        for det in detections:
+            groups.setdefault(det.image_id, []).append(det)
+        group_list = list(groups.values())
+        if log_fn is not None:
+            log_fn(f"images={len(group_list)} detections={total} (decode once per image)")
+
+        # Returns one (detection, crop|None, error|None) per detection in the
+        # group. A failed image-open fails the whole group; a bad crop box fails
+        # only that detection.
+        def _load_group(group: list[SourceDetection]) -> list[tuple[SourceDetection, Image.Image | None, str, Exception | None]]:
+            image_path = self._resolve_image_path(group[0])
+            if not image_path.is_file():
+                raise FileNotFoundError(f"Image not found: {image_path}")
+            out: list[tuple[SourceDetection, Image.Image | None, str, Exception | None]] = []
+            with Image.open(image_path) as image:
+                rgb = image.convert("RGB")
+                for det in group:
+                    try:
+                        crop_box = _sanitize_crop_box(det)
+                        out.append((det, rgb.crop(crop_box), str(image_path), None))
+                    except Exception as exc:  # noqa: BLE001 - per-detection skip
+                        out.append((det, None, str(image_path), exc))
+            return out
+
         prepared: list[tuple[SourceDetection, Image.Image, str]] = []
         processed = 0
 
-        def _flush() -> tuple[int, int]:
+        def _flush() -> int:
             if not prepared:
-                return 0, 0
+                return 0
             classifications = self.classifier.classify_images([item[1] for item in prepared])
             ok = 0
             for (detection, crop_image, resolved_image_path), classification in zip(
@@ -145,34 +170,42 @@ class Step2SemanticPipeline:
                 )
                 ok += 1
             prepared.clear()
-            return ok, 0
+            return ok
 
-        for detection, loaded, exc in ordered_prefetch(
-            detections, _load, num_workers=num_workers, max_inflight=max(batch_size, num_workers * 2)
+        def _record_error(detection: SourceDetection, exc: Exception) -> None:
+            nonlocal error_count
+            self.store.insert_error_result(
+                semantic_run_id=semantic_run_id,
+                detection=detection,
+                crop_path="",
+                exc=exc,
+            )
+            error_count += 1
+
+        for group, loaded, group_exc in ordered_prefetch(
+            group_list, _load_group, num_workers=num_workers, max_inflight=max(2, num_workers * 2)
         ):
-            processed += 1
-            if exc is not None:
-                self.store.insert_error_result(
-                    semantic_run_id=semantic_run_id,
-                    detection=detection,
-                    crop_path="",
-                    exc=exc,
-                )
-                error_count += 1
+            if group_exc is not None:
+                # Whole image failed to open: mark every detection in it.
+                for detection in group:
+                    processed += 1
+                    _record_error(detection, group_exc)
                 if log_fn is not None:
-                    log_fn(f"[{processed}/{total}] detection_id={detection.detection_id} error={exc}")
+                    log_fn(f"[{processed}/{total}] image_id={group[0].image_id} error={group_exc}")
                 continue
 
-            crop_image, resolved_image_path = loaded
-            prepared.append((detection, crop_image, resolved_image_path))
-            if len(prepared) >= batch_size:
-                ok, _ = _flush()
-                ok_count += ok
-                if log_fn is not None:
-                    log_fn(f"[{processed}/{total}] classified ok={ok_count} error={error_count}")
+            for detection, crop_image, resolved_image_path, det_exc in loaded:
+                processed += 1
+                if det_exc is not None or crop_image is None:
+                    _record_error(detection, det_exc or ValueError("crop failed"))
+                    continue
+                prepared.append((detection, crop_image, resolved_image_path))
+                if len(prepared) >= batch_size:
+                    ok_count += _flush()
+                    if log_fn is not None:
+                        log_fn(f"[{processed}/{total}] classified ok={ok_count} error={error_count}")
 
-        ok, _ = _flush()
-        ok_count += ok
+        ok_count += _flush()
 
         if log_fn is not None:
             log_fn(f"openclip_semantic_done ok={ok_count} error={error_count} db={self.store.db_path}")
