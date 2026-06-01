@@ -30,5 +30,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSessionDecisions: (payload) => ipcRenderer.invoke('labeling:session-decisions', payload),
   getSelfTrainingPromotions: (payload) => ipcRenderer.invoke('labeling:selftrain-promotions', payload),
   getRunMetrics: (payload) => ipcRenderer.invoke('labeling:run-metrics', payload),
+  listPrototypeCandidates: (payload) => ipcRenderer.invoke('labeling:proto-candidates', payload),
+  latestPrototype: (payload) => ipcRenderer.invoke('labeling:latest-prototype', payload),
   exportDataset: (payload) => ipcRenderer.invoke('labeling:export-dataset', payload),
 });

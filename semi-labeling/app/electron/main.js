@@ -6,6 +6,7 @@ import {
   getRunResources, listSessions, listSelfTrainingRuns,
   listCleaned, updateCleanedLabel, commitCorrections,
   getSessionDecisions, getSelfTrainingPromotions, getRunMetrics,
+  listPrototypeCandidates, latestPrototype,
   runStep, bridgeInfo,
 } from './labeling/index.js';
 
@@ -84,6 +85,8 @@ ipcMain.handle('labeling:commit-corrections', (_event, payload) => commitCorrect
 ipcMain.handle('labeling:session-decisions', (_event, payload) => getSessionDecisions(payload));
 ipcMain.handle('labeling:selftrain-promotions', (_event, payload) => getSelfTrainingPromotions(payload));
 ipcMain.handle('labeling:run-metrics', (_event, payload) => getRunMetrics(payload));
+ipcMain.handle('labeling:proto-candidates', (_event, payload) => listPrototypeCandidates(payload));
+ipcMain.handle('labeling:latest-prototype', (_event, payload) => latestPrototype(payload));
 
 // Streams step stdout/stderr to the renderer via 'labeling:step-output' events,
 // keyed by a caller-supplied jobId. Resolves with the final { code, output }.

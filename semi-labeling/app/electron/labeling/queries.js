@@ -567,3 +567,85 @@ export const getRunMetrics = (payload = {}) => {
     db.close();
   }
 };
+
+// ── step05 gallery: candidate crops grouped by suggested label ──────────────
+// Returns the best-looking candidates per class (high reliability first) so the
+// human can pick prototypes. Only detections with a tight crop on disk + a
+// cached tight embedding qualify (a prototype must be embeddable).
+export const listPrototypeCandidates = (payload = {}) => {
+  const dbPath = cleanPath(payload.resemiDbPath, 'resemiDbPath');
+  const runId = cleanPath(payload.runId, 'runId');
+  const imageRoot = String(payload.imageRootPath || '').trim();
+  const label = String(payload.label || '').trim();
+  const perClass = Math.max(1, Math.min(400, Number(payload.perClass) || 60));
+
+  const db = connectRo(dbPath);
+  try {
+    const embRow = db.prepare(`
+      SELECT embedding_run_id FROM embedding_runs
+      WHERE run_id = ? AND view_name = 'tight'
+      ORDER BY created_at_utc DESC, rowid DESC LIMIT 1
+    `).get(runId);
+    const embRunId = embRow ? embRow.embedding_run_id : '';
+
+    const labelClause = label && label !== 'all' ? 'AND sd.final_label = ?' : '';
+    const params = [embRunId, runId, runId];
+    if (label && label !== 'all') params.push(label);
+
+    // rank by reliability desc within each class, cap perClass via window-less
+    // approach: fetch all qualifying then trim per label in JS.
+    const rows = db.prepare(`
+      SELECT sd.result_id, sd.final_label, sd.reliability_score, sd.model_agreement,
+             cv.crop_path, cv.image_rel_path, cv.x1, cv.y1, cv.x2, cv.y2
+      FROM semantic_decisions sd
+      JOIN crop_views cv ON cv.run_id = sd.run_id AND cv.result_id = sd.result_id AND cv.view_name = 'tight'
+      JOIN crop_embeddings ce ON ce.embedding_run_id = ? AND ce.result_id = sd.result_id AND ce.view_name = 'tight'
+      WHERE sd.run_id = ?
+        AND sd.final_label IN ('crack','mold','spall','stain')
+        AND sd.run_id = ?
+        ${labelClause}
+      ORDER BY sd.final_label ASC, sd.reliability_score DESC, sd.result_id ASC
+    `).all(...params);
+
+    const byLabel = {};
+    const items = [];
+    for (const row of rows) {
+      const lab = String(row.final_label || '');
+      byLabel[lab] = (byLabel[lab] || 0) + 1;
+      if (byLabel[lab] > perClass) continue;
+      const cropOk = row.crop_path && fs.existsSync(row.crop_path);
+      items.push({
+        resultId: Number(row.result_id),
+        label: lab,
+        reliabilityScore: Number(row.reliability_score || 0),
+        modelAgreement: Number(row.model_agreement || 0),
+        cropUri: cropOk ? fileUri(row.crop_path) : '',
+        imageUri: fileUri(resolveImagePath(imageRoot, row.image_rel_path)),
+        box: row.x1 == null ? null : {
+          x1: Number(row.x1), y1: Number(row.y1), x2: Number(row.x2), y2: Number(row.y2),
+        },
+      });
+    }
+    return { items, labels: ['crack', 'mold', 'spall', 'stain'], embeddingRunId: embRunId };
+  } finally {
+    db.close();
+  }
+};
+
+// Latest prototype version for a run (so the gallery can show "đã có bank").
+export const latestPrototype = (payload = {}) => {
+  const dbPath = cleanPath(payload.resemiDbPath, 'resemiDbPath');
+  const runId = cleanPath(payload.runId, 'runId');
+  const db = connectRo(dbPath);
+  try {
+    const row = db.prepare(`
+      SELECT pv.prototype_version_id, pv.created_at_utc, pv.notes,
+             (SELECT COUNT(*) FROM prototype_items pi WHERE pi.prototype_version_id = pv.prototype_version_id) AS item_count
+      FROM prototype_versions pv WHERE pv.run_id = ?
+      ORDER BY pv.created_at_utc DESC LIMIT 1
+    `).get(runId);
+    return { prototype: row || null };
+  } finally {
+    db.close();
+  }
+};

@@ -42,6 +42,7 @@ export const bridgeInfo = () => ({
 
 // Build argv for a known step. Only an allow-listed set of modules can run.
 const STEP_MODULES = {
+  step05: 'steps.step05_proto.main',
   step08: 'steps.step08_classifier.main',
   step09: 'steps.step09_self_train.main',
   export_dataset: 'tools.export_dataset',

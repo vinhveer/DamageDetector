@@ -12,6 +12,8 @@ export {
   getSessionDecisions,
   getSelfTrainingPromotions,
   getRunMetrics,
+  listPrototypeCandidates,
+  latestPrototype,
 } from './queries.js';
 
 export { runStep, bridgeInfo } from './pybridge.js';
