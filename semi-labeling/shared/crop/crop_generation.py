@@ -101,7 +101,10 @@ def generate_crop_views(
         nonlocal last_logged
         if every <= 0:
             return
-        if done_dets - last_logged < every and done_dets != total_dets:
+        # Fire on the very first completed image (immediate sign of life),
+        # then every `every` detections, then at the end.
+        first = last_logged == 0 and done_dets > 0
+        if not first and done_dets - last_logged < every and done_dets != total_dets:
             return
         last_logged = done_dets
         elapsed = max(1e-6, time.time() - start_ts)
