@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -61,64 +63,102 @@ def generate_crop_views(
     image_root: Path | None,
     crop_dir: Path,
     view_specs: tuple[CropViewSpec, ...] = DEFAULT_VIEW_SPECS,
+    num_workers: int = 0,
 ) -> tuple[list[CropView], dict[int, str]]:
     crop_dir = Path(crop_dir).expanduser().resolve()
     crop_dir.mkdir(parents=True, exist_ok=True)
+    # Pre-create view dirs once instead of per-detection (avoids 730k mkdir calls).
+    for spec in view_specs:
+        (crop_dir / spec.name).mkdir(parents=True, exist_ok=True)
+
+    # Group detections by source image, preserving order. Detections are ordered
+    # by result_id; grouping by image_id lets us decode each HD image ONCE and
+    # crop every box from it, instead of re-opening the full image per detection.
+    groups: "OrderedDict[int, list[SourceDetection]]" = OrderedDict()
+    for detection in detections:
+        groups.setdefault(detection.image_id, []).append(detection)
+    group_list = list(groups.values())
+
     views: list[CropView] = []
     errors: dict[int, str] = {}
-    for detection in detections:
+
+    def _process_group(group: list[SourceDetection]) -> tuple[list[CropView], dict[int, str]]:
+        g_views: list[CropView] = []
+        g_errors: dict[int, str] = {}
         try:
-            views.extend(_generate_detection_views(detection, image_root=image_root, crop_dir=crop_dir, view_specs=view_specs))
+            image_path = resolve_image_path(group[0], image_root)
+            if not image_path.is_file():
+                raise FileNotFoundError(f"Image not found: {image_path}")
+            with Image.open(image_path) as image:
+                rgb = image.convert("RGB")
+                rgb.load()
+            for detection in group:
+                try:
+                    g_views.extend(
+                        _generate_detection_views(detection, rgb=rgb, crop_dir=crop_dir, view_specs=view_specs)
+                    )
+                except (FileNotFoundError, UnidentifiedImageError, ValueError, OSError) as exc:
+                    g_errors[detection.result_id] = str(exc)
         except (FileNotFoundError, UnidentifiedImageError, ValueError, OSError) as exc:
-            errors[detection.result_id] = str(exc)
+            # Whole image failed to open: every detection in it errors.
+            for detection in group:
+                g_errors[detection.result_id] = str(exc)
+        return g_views, g_errors
+
+    workers = max(0, int(num_workers or 0))
+    if workers <= 0:
+        for group in group_list:
+            g_views, g_errors = _process_group(group)
+            views.extend(g_views)
+            errors.update(g_errors)
+    else:
+        # PNG/zlib encode and PIL decode release the GIL, so threads give real
+        # parallelism. Results merged as they complete; order does not matter
+        # because each CropView carries its own result_id.
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="crop") as executor:
+            for g_views, g_errors in executor.map(_process_group, group_list):
+                views.extend(g_views)
+                errors.update(g_errors)
     return views, errors
 
 
 def _generate_detection_views(
     detection: SourceDetection,
     *,
-    image_root: Path | None,
+    rgb: Image.Image,
     crop_dir: Path,
     view_specs: tuple[CropViewSpec, ...],
 ) -> list[CropView]:
-    image_path = resolve_image_path(detection, image_root)
-    if not image_path.is_file():
-        raise FileNotFoundError(f"Image not found: {image_path}")
-
-    with Image.open(image_path) as image:
-        rgb = image.convert("RGB")
-        width, height = rgb.size
-        output: list[CropView] = []
-        for spec in view_specs:
-            box = padded_box(detection, width=width, height=height, padding_ratio=spec.padding_ratio)
-            if box is None:
-                continue
-            x1, y1, x2, y2 = box
-            crop = rgb.crop((x1, y1, x2, y2))
-            crop_hash, encoded = encode_png_with_hash(crop)
-            view_dir = crop_dir / spec.name
-            view_dir.mkdir(parents=True, exist_ok=True)
-            path = view_dir / f"{detection.result_id}_{spec.name}_{crop_hash[:12]}.png"
-            if not path.is_file():
-                path.write_bytes(encoded)
-            output.append(
-                CropView(
-                    result_id=detection.result_id,
-                    view_name=spec.name,
-                    crop_path=str(path),
-                    image_rel_path=detection.image_rel_path,
-                    x1=float(x1),
-                    y1=float(y1),
-                    x2=float(x2),
-                    y2=float(y2),
-                    source="resemi_multicrop",
-                    crop_hash=crop_hash,
-                    crop_width=int(crop.width),
-                    crop_height=int(crop.height),
-                    padding_ratio=float(spec.padding_ratio),
-                )
+    width, height = rgb.size
+    output: list[CropView] = []
+    for spec in view_specs:
+        box = padded_box(detection, width=width, height=height, padding_ratio=spec.padding_ratio)
+        if box is None:
+            continue
+        x1, y1, x2, y2 = box
+        crop = rgb.crop((x1, y1, x2, y2))
+        crop_hash, encoded = encode_png_with_hash(crop)
+        path = crop_dir / spec.name / f"{detection.result_id}_{spec.name}_{crop_hash[:12]}.png"
+        if not path.is_file():
+            path.write_bytes(encoded)
+        output.append(
+            CropView(
+                result_id=detection.result_id,
+                view_name=spec.name,
+                crop_path=str(path),
+                image_rel_path=detection.image_rel_path,
+                x1=float(x1),
+                y1=float(y1),
+                x2=float(x2),
+                y2=float(y2),
+                source="resemi_multicrop",
+                crop_hash=crop_hash,
+                crop_width=int(crop.width),
+                crop_height=int(crop.height),
+                padding_ratio=float(spec.padding_ratio),
             )
-        return output
+        )
+    return output
 
 
 def resolve_image_path(detection: SourceDetection, image_root: Path | None) -> Path:

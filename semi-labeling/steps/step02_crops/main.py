@@ -64,6 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Override view list (tight,pad10,pad25,context). Default: from run options.")
     parser.add_argument("--limit", type=int, default=0,
                         help="Process first N detections only (debug).")
+    parser.add_argument("--num-workers", type=int, default=0,
+                        help="Parallel threads for crop decode/encode (PNG encode is the bottleneck). 0 = sequential (default).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print plan without generating any files.")
     return parser
@@ -130,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             image_root=image_root,
             crop_dir=crop_dir,
             view_specs=view_specs,
+            num_workers=int(args.num_workers),
         )
 
         ok_count = sum(1 for view in crop_views if getattr(view, "status", "ok") == "ok")
