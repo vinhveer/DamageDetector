@@ -10,12 +10,32 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import re
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from shared.runtime import bootstrap
 
 bootstrap.ensure_repo_root_on_path()
+
+
+EXPORT_MAP = {
+    "crack": "crack",
+    "mold": "mold",
+    "spall": "spall",
+    "reject": "reject",
+    "other": "reject",
+    "stain": "reject",
+    "efflorescence": "reject",
+    "shadow": "reject",
+    "edge": "reject",
+    "background": "reject",
+    "object": "reject",
+    "unknown": "reject",
+}
+VALID_ACTIONS = {"manual_accept", "manual_relabel", "manual_reject"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +65,135 @@ def _run_module(module: str, argv: list[str]) -> int:
     print("=" * 88, flush=True)
     mod = importlib.import_module(module)
     return int(mod.main(argv))
+
+
+def _connect_rw(db_path: str | Path) -> sqlite3.Connection:
+    path = Path(db_path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"SQLite database not found: {path}")
+    conn = sqlite3.connect(str(path), timeout=60)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=60000")
+    return conn
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _make_stamped_id(name: str | None, fallback_prefix: str) -> str:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    clean = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(name or "").strip()).strip("_")
+    return f"{clean or fallback_prefix}_{stamp}"
+
+
+def _export_label(label: str) -> str:
+    return EXPORT_MAP.get(str(label or "").strip().lower(), "reject")
+
+
+def _normalise_decisions(edits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for edit in edits:
+        try:
+            result_id = int(edit.get("resultId", edit.get("result_id")))
+        except Exception:
+            continue
+        action = str(edit.get("action") or "").strip()
+        if action not in VALID_ACTIONS:
+            continue
+        new_label = "reject" if action == "manual_reject" else str(edit.get("newLabel", edit.get("new_label")) or "").strip().lower()
+        if not new_label:
+            continue
+        rows.append(
+            {
+                "targetType": "result",
+                "targetId": str(result_id),
+                "resultId": result_id,
+                "action": action,
+                "previousLabel": str(edit.get("previousLabel", edit.get("previous_label")) or ""),
+                "newLabel": new_label,
+                "newDecisionType": "reject" if action == "manual_reject" else "manual_accept",
+                "reasonCodesJson": json.dumps(["human_correction"]),
+                "affectedResultIdsJson": json.dumps([result_id]),
+                "note": str(edit.get("note") or ""),
+            }
+        )
+    return rows
+
+
+def _insert_review_rows(
+    db_path: str,
+    run_id: str,
+    edits: list[dict[str, Any]],
+    *,
+    reviewer: str = "",
+    session_name: str = "",
+    notes: str = "",
+    apply_to_cleaned: bool = False,
+) -> dict[str, Any]:
+    rows = _normalise_decisions(edits)
+    if not rows:
+        return {"error": "No valid review decisions."}
+    session_id = _make_stamped_id(session_name, "review")
+    now = _utc_now()
+    conn = _connect_rw(db_path)
+    try:
+        conn.execute("BEGIN")
+        conn.execute(
+            """
+            INSERT INTO review_sessions (review_session_id, run_id, reviewer, status, created_at_utc, committed_at_utc, notes)
+            VALUES (?, ?, ?, 'committed', ?, ?, ?)
+            """,
+            (session_id, run_id, reviewer, now, now, notes),
+        )
+        for row in rows:
+            conn.execute(
+                """
+                INSERT INTO review_decisions (
+                  review_session_id, target_type, target_id, result_id, action,
+                  previous_label, new_label, new_decision_type, reason_codes_json,
+                  affected_result_ids_json, note, created_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    row["targetType"],
+                    row["targetId"],
+                    row["resultId"],
+                    row["action"],
+                    row["previousLabel"],
+                    row["newLabel"],
+                    row["newDecisionType"],
+                    row["reasonCodesJson"],
+                    row["affectedResultIdsJson"],
+                    row["note"],
+                    now,
+                ),
+            )
+            if apply_to_cleaned:
+                conn.execute(
+                    """
+                    UPDATE cleaned_labels
+                    SET final_label = ?, export_label = ?, decision_type = ?
+                    WHERE run_id = ? AND result_id = ?
+                    """,
+                    (row["newLabel"], _export_label(row["newLabel"]), row["newDecisionType"], run_id, row["resultId"]),
+                )
+                conn.execute(
+                    """
+                    UPDATE semantic_decisions
+                    SET final_label = ?, decision_type = ?
+                    WHERE run_id = ? AND result_id = ?
+                    """,
+                    (row["newLabel"], row["newDecisionType"], run_id, row["resultId"]),
+                )
+        conn.commit()
+        return {"committed": True, "reviewSessionId": session_id, "decisionCount": len(rows), "committedAtUtc": now}
+    except Exception as exc:
+        conn.rollback()
+        return {"error": str(exc)}
+    finally:
+        conn.close()
 
 
 def _request_type(payload: dict[str, Any], override: str) -> str:
@@ -111,8 +260,6 @@ def apply_prototype(payload: dict[str, Any], *, chain: bool, seed: bool, policy:
 
 
 def apply_review(payload: dict[str, Any]) -> int:
-    from semilabel_app.services.write_service import commit_corrections, commit_session
-
     db = str(payload.get("db") or payload.get("db_path") or "").strip()
     run_id = str(payload.get("run_id") or payload.get("runId") or "").strip()
     if not db or not run_id:
@@ -124,9 +271,13 @@ def apply_review(payload: dict[str, Any]) -> int:
     corrections = list(payload.get("corrections") or [])
     results: dict[str, Any] = {}
     if decisions:
-        results["decisions"] = commit_session(db, run_id, decisions, reviewer=reviewer, session_name=session_name, notes=notes)
+        results["decisions"] = _insert_review_rows(
+            db, run_id, decisions, reviewer=reviewer, session_name=session_name, notes=notes, apply_to_cleaned=False
+        )
     if corrections:
-        results["corrections"] = commit_corrections(db, run_id, corrections, reviewer=reviewer, session_name=session_name, notes=notes)
+        results["corrections"] = _insert_review_rows(
+            db, run_id, corrections, reviewer=reviewer, session_name=session_name, notes=notes, apply_to_cleaned=True
+        )
     if not results:
         results["error"] = "No decisions/corrections in review request."
     print(json.dumps(results, ensure_ascii=False), flush=True)

@@ -81,7 +81,7 @@ def cmd_detect(args: argparse.Namespace) -> int:
         "--final-max-dets-per-class", str(args.final_max_dets_per_class),
         "--image-workers", str(args.image_workers),
         "--service-workers", str(args.service_workers),
-        "--service-queue-size", str(args.service_queue_size),
+        "--service-queue-size", str(args.service_queue_size or max(16, int(args.image_workers) * 4)),
         "--service-batch-size", str(args.service_batch_size),
         "--store-image-path-mode", str(args.store_image_path_mode),
     ]
@@ -270,7 +270,8 @@ def add_detect_args(parser: argparse.ArgumentParser) -> None:
                         help="Images processed concurrently. 2 overlaps CPU/IO with the GPU worker without changing results.")
     parser.add_argument("--service-workers", type=int, default=0,
                         help="GDINO worker processes. 0=auto, usually one per visible GPU.")
-    parser.add_argument("--service-queue-size", type=int, default=0)
+    parser.add_argument("--service-queue-size", type=int, default=16,
+                        help="Waiting GDINO calls before backpressure. Keep >= image-workers*4 to avoid queue-full errors.")
     parser.add_argument("--service-batch-size", type=int, default=0)
     parser.add_argument("--service-device-ids", default="")
     parser.add_argument("--store-image-path-mode", default="relative", choices=["name", "relative", "absolute"])

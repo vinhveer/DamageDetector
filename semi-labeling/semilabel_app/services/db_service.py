@@ -511,16 +511,16 @@ def list_prototype_candidates(
         cluster_by_result: dict[int, dict[str, Any]] = {}
         if core_run_id:
             for row in conn.execute(
-                "SELECT core_cluster_id, member_count FROM core_clusters WHERE core_mining_run_id = ?",
-                (core_run_id,),
+                "SELECT core_cluster_id, size FROM core_clusters WHERE run_id = ?",
+                (run_id,),
             ):
-                size_by_cluster[row["core_cluster_id"]] = int(row["member_count"] or 0)
+                size_by_cluster[row["core_cluster_id"]] = int(row["size"] or 0)
             for row in conn.execute(
                 """
                 SELECT result_id, core_cluster_id, similarity
-                FROM core_cluster_members WHERE core_mining_run_id = ?
+                FROM core_cluster_members WHERE run_id = ?
                 """,
-                (core_run_id,),
+                (run_id,),
             ):
                 cluster_by_result[int(row["result_id"])] = {
                     "cluster_id": row["core_cluster_id"],
