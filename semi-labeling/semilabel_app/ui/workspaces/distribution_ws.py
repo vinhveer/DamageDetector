@@ -26,6 +26,21 @@ class DistributionWorkspace(QtWidgets.QWidget):
         toolbar.add(self.refresh_btn)
         self.total_chip = Chip("Tổng 0", self)
         toolbar.add(self.total_chip)
+        self.prev_page_btn = QtWidgets.QPushButton("Prev", self)
+        self.prev_page_btn.setFixedWidth(58)
+        toolbar.add(self.prev_page_btn)
+        self.page_chip = Chip("0/0", self)
+        toolbar.add(self.page_chip)
+        self.next_page_btn = QtWidgets.QPushButton("Next", self)
+        self.next_page_btn.setFixedWidth(58)
+        toolbar.add(self.next_page_btn)
+        toolbar.add_label("Page size")
+        self.page_size = QtWidgets.QSpinBox(self)
+        self.page_size.setRange(50, 5000)
+        self.page_size.setSingleStep(50)
+        self.page_size.setValue(500)
+        self.page_size.setFixedWidth(86)
+        toolbar.add(self.page_size)
         toolbar.add_stretch()
         self.sel_chip = Chip("0 đã chọn", self)
         toolbar.add(self.sel_chip)
@@ -65,12 +80,19 @@ class DistributionWorkspace(QtWidgets.QWidget):
         # ── Wiring ──────────────────────────────────────────────────────
         self.refresh_btn.clicked.connect(self.refresh)
         self.table.cellClicked.connect(lambda row, _col: self._load_label(self.table.item(row, 0).text()))
+        self.prev_page_btn.clicked.connect(self._prev_page)
+        self.next_page_btn.clicked.connect(self._next_page)
+        self.page_size.valueChanged.connect(self._reset_page_size)
         self.apply_btn.clicked.connect(self._bulk_relabel)
         self.commit_btn.clicked.connect(self._commit)
         self.grid.selectionChanged.connect(lambda items: self.sel_chip.setText(f"{len(items)} đã chọn"))
-        self.store.cleanedChanged.connect(lambda: self.grid.set_items(self.store.cleaned_items))
+        self.store.cleanedChanged.connect(self._on_cleaned_changed)
         self.store.pendingChanged.connect(self._render_commit)
         self._render_commit()
+        self._current_label = ""
+        self._offset = 0
+        self._limit = 500
+        self._render_pager()
 
     def refresh(self) -> None:
         worker = db_service.DbWorker(
@@ -100,7 +122,63 @@ class DistributionWorkspace(QtWidgets.QWidget):
             self.table.setCellWidget(row, 2, PercentBar(float(pct), f"{pct:.1%}"))
 
     def _load_label(self, label: str) -> None:
-        self.controller.load_cleaned(final_label=label, limit=500)
+        self._current_label = str(label or "")
+        self._offset = 0
+        self._load_page()
+
+    def _load_page(self) -> None:
+        if not self._current_label:
+            self.grid.set_items([])
+            self._render_pager()
+            return
+        self._limit = int(self.page_size.value())
+        self.controller.load_cleaned(final_label=self._current_label, limit=self._limit, offset=self._offset)
+
+    def _on_cleaned_changed(self) -> None:
+        self.grid.set_items(self.store.cleaned_items)
+        self._render_pager()
+
+    def _prev_page(self) -> None:
+        self._limit = int(self.page_size.value())
+        self._offset = max(0, self._offset - self._limit)
+        self._load_page()
+
+    def _next_page(self) -> None:
+        loaded = len(self.store.cleaned_items)
+        total = int(self.store.cleaned_filtered_total or 0)
+        if loaded <= 0:
+            return
+        self._limit = int(self.page_size.value())
+        next_offset = self._offset + self._limit
+        if total and next_offset >= total:
+            return
+        self._offset = next_offset
+        self._load_page()
+
+    def _reset_page_size(self, _value: int) -> None:
+        if not self._current_label or not self.store.cleaned_items:
+            self._render_pager()
+            return
+        self._offset = 0
+        self._load_page()
+
+    def _render_pager(self) -> None:
+        loaded = len(self.store.cleaned_items)
+        total = int(self.store.cleaned_filtered_total or 0)
+        offset = int(self.store.cleaned_offset or self._offset)
+        limit = int(self.store.cleaned_limit or self.page_size.value())
+        if self._current_label and loaded and total:
+            start = offset + 1
+            end = offset + loaded
+            page = (offset // max(1, limit)) + 1
+            pages = ((total - 1) // max(1, limit)) + 1
+            self.page_chip.setText(f"{self._current_label}: {page}/{pages} ({start}-{end}/{total})")
+        elif self._current_label:
+            self.page_chip.setText(f"{self._current_label}: 0/0")
+        else:
+            self.page_chip.setText("Choose label")
+        self.prev_page_btn.setEnabled(offset > 0)
+        self.next_page_btn.setEnabled(bool(total and offset + loaded < total))
 
     def _bulk_relabel(self) -> None:
         label = self.relabel.currentText()
@@ -110,7 +188,7 @@ class DistributionWorkspace(QtWidgets.QWidget):
             return
         for item in selected:
             self.controller.update_cleaned(item, label)
-        self.controller.load_cleaned(limit=500)
+        self._render_commit()
 
     def _commit(self) -> None:
         payload = self.controller.commit_pending_corrections()

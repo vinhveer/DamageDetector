@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .bbox_quality import BBoxQualityResult, BoxCleanupDecision, run_bbox_quality_filter
-from shared.crop.crop_generation import CropView, CropViewSpec, DEFAULT_VIEW_SPECS, generate_crop_views
+from shared.crop.crop_generation import CropEncoding, CropView, CropViewSpec, DEFAULT_CROP_ENCODING, DEFAULT_VIEW_SPECS, generate_crop_views
 from .decision_policy import DecisionConfig, SemanticDecision, decide
 from shared.taxonomy.label_taxonomy import LabelTaxonomy, build_label_taxonomy
 from shared.db.schema import connect_output, utc_now
@@ -46,8 +46,10 @@ class ResemiConfig:
     crop_dir: Path | None = None
     crop_view_specs: tuple[CropViewSpec, ...] = DEFAULT_VIEW_SPECS
     generate_crops: bool = True
+    crop_num_workers: int = 0
+    crop_encoding: CropEncoding = DEFAULT_CROP_ENCODING
     taxonomy_version_id: str = "label_taxonomy_v1"
-    stain_export_label: str = "stain"
+    stain_export_label: str = "reject"
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,8 @@ class ResemiPipeline:
                     image_root=self.config.image_root,
                     crop_dir=crop_dir,
                     view_specs=self.config.crop_view_specs,
+                    num_workers=int(self.config.crop_num_workers),
+                    encoding=self.config.crop_encoding,
                 )
             else:
                 crop_views = self._step2_crop_views(detections)
@@ -175,6 +179,22 @@ class ResemiPipeline:
         dedup_run_id: str | None,
     ) -> None:
         conn.execute(
+            "DELETE FROM self_training_promotions WHERE self_training_run_id IN (SELECT self_training_run_id FROM self_training_runs WHERE run_id = ?)",
+            (run_id,),
+        )
+        conn.execute(
+            "DELETE FROM classifier_prediction_summary WHERE classifier_run_id IN (SELECT classifier_run_id FROM classifier_runs WHERE run_id = ?)",
+            (run_id,),
+        )
+        conn.execute(
+            "DELETE FROM classifier_oof_predictions WHERE classifier_run_id IN (SELECT classifier_run_id FROM classifier_runs WHERE run_id = ?)",
+            (run_id,),
+        )
+        conn.execute(
+            "DELETE FROM classifier_training_items WHERE classifier_run_id IN (SELECT classifier_run_id FROM classifier_runs WHERE run_id = ?)",
+            (run_id,),
+        )
+        conn.execute(
             "DELETE FROM review_decisions WHERE review_session_id IN (SELECT review_session_id FROM review_sessions WHERE run_id = ?)",
             (run_id,),
         )
@@ -183,7 +203,23 @@ class ResemiPipeline:
             (run_id,),
         )
         conn.execute(
+            "DELETE FROM prototype_scores WHERE prototype_score_run_id IN (SELECT prototype_score_run_id FROM prototype_scoring_runs WHERE run_id = ?)",
+            (run_id,),
+        )
+        conn.execute(
+            "DELETE FROM decision_policy_audit WHERE decision_policy_run_id IN (SELECT decision_policy_run_id FROM decision_policy_runs WHERE run_id = ?)",
+            (run_id,),
+        )
+        conn.execute(
+            "DELETE FROM core_outliers WHERE core_mining_run_id IN (SELECT core_mining_run_id FROM core_mining_runs WHERE run_id = ?)",
+            (run_id,),
+        )
+        conn.execute(
             "DELETE FROM crop_embeddings WHERE embedding_run_id IN (SELECT embedding_run_id FROM embedding_runs WHERE run_id = ?)",
+            (run_id,),
+        )
+        conn.execute(
+            "DELETE FROM skipped_crop_embeddings WHERE embedding_run_id IN (SELECT embedding_run_id FROM embedding_runs WHERE run_id = ?)",
             (run_id,),
         )
         conn.execute(
@@ -207,18 +243,24 @@ class ResemiPipeline:
             (run_id,),
         )
         for table in (
+            "self_training_runs",
+            "classifier_runs",
+            "decision_policy_runs",
+            "reliability_scoring_runs",
+            "reliability_scores",
+            "prototype_scoring_runs",
+            "prototype_versions",
+            "core_cluster_members",
+            "core_clusters",
+            "core_mining_runs",
             "classifier_runs",
             "review_sessions",
             "embedding_runs",
             "box_graph_runs",
-            "core_cluster_members",
-            "core_clusters",
-            "prototype_versions",
             "review_queue",
             "cleaned_labels",
             "label_taxonomy_versions",
             "semantic_decisions",
-            "reliability_scores",
             "semantic_agreements",
             "semantic_model_outputs",
             "semantic_model_scores",
@@ -235,6 +277,12 @@ class ResemiPipeline:
             "crop_dir": str(self._resolve_crop_dir(run_id, Path(self.config.output_db).expanduser().resolve())),
             "crop_views": [item.name for item in self.config.crop_view_specs],
             "generate_crops": bool(self.config.generate_crops),
+            "crop_num_workers": int(self.config.crop_num_workers),
+            "crop_encoding": {
+                "format": self.config.crop_encoding.format,
+                "compress_level": int(self.config.crop_encoding.compress_level),
+                "quality": int(self.config.crop_encoding.quality),
+            },
             "prototype_version_id": self.config.prototype_version_id,
             "taxonomy_version_id": self.config.taxonomy_version_id,
             "stain_export_label": self.config.stain_export_label,

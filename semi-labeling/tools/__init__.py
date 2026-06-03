@@ -1,6 +1,7 @@
-"""tools — utilities outside the main step flow.
+"""tools — utilities used by the client semi-labeling flow.
 
-schema_audit       inspect the resemi SQLite schema
-review_commit      commit a human review session (called by the Electron app)
-render_bbox_overlays  render bbox cleanup overlays for manual review
+handoff            apply prototype/review JSON handoff requests
+export_dataset     export cleaned labels to YOLO/COCO
+relabel_semantic_seed  refresh labels using detector/prototype/core signals
+schema_audit       inspect the SQLite schema
 """

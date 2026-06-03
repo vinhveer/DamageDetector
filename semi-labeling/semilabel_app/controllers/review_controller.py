@@ -4,7 +4,8 @@ from PySide6 import QtCore
 
 from ..config.defaults import LABELS
 from ..services import db_service
-from ..services.write_service import commit_corrections, commit_session, update_cleaned_label
+from ..services.handoff_service import read_handoff_json, write_handoff_json
+from ..services.write_service import commit_corrections, commit_session
 from ..stores.review_store import ReviewStore
 
 
@@ -51,8 +52,15 @@ class ReviewController:
             on_done=lambda payload: self.store.set_queue(payload["items"]),
         )
 
-    def load_cleaned(self, final_label: str = "", decision_type: str = "", limit: int | None = None) -> None:
+    def load_cleaned(
+        self,
+        final_label: str = "",
+        decision_type: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> None:
         self.store.mode = "cleaned"
+        page_limit = int(limit if limit is not None else self.settings.get("cleaned_limit", 500))
         self._db_worker(
             db_service.list_cleaned,
             self.settings["db_path"],
@@ -60,8 +68,15 @@ class ReviewController:
             self.settings.get("image_root", ""),
             final_label,
             decision_type,
-            int(limit if limit is not None else self.settings.get("cleaned_limit", 500)),
-            on_done=lambda payload: self.store.set_cleaned(payload["items"]),
+            page_limit,
+            int(offset or 0),
+            on_done=lambda payload: self.store.set_cleaned(
+                payload["items"],
+                total=payload.get("total", 0),
+                filtered_total=payload.get("filtered_total", payload.get("filtered", 0)),
+                offset=payload.get("offset", 0),
+                limit=payload.get("limit", page_limit),
+            ),
         )
 
     def fetch_image_boxes(self, image_rel_path: str, on_done) -> None:
@@ -106,13 +121,25 @@ class ReviewController:
         return list(self.settings.get("labels") or LABELS)
 
     def commit_pending_decisions(self, reviewer: str = "", notes: str = "") -> dict:
+        run_id = self.settings.get("run_id", "myrun")
+        request = {
+            "type": "review_request",
+            "db": self.settings["db_path"],
+            "run_id": run_id,
+            "reviewer": reviewer,
+            "notes": notes,
+            "decisions": list(self.store.pending_decisions.values()),
+        }
+        request_path = write_handoff_json(self.settings["db_path"], request, kind="review", run_id=run_id)
+        applied = read_handoff_json(request_path)
         payload = commit_session(
-            self.settings["db_path"],
-            self.settings.get("run_id", "myrun"),
-            list(self.store.pending_decisions.values()),
-            reviewer=reviewer,
-            notes=notes,
+            applied["db"],
+            applied["run_id"],
+            list(applied.get("decisions") or []),
+            reviewer=str(applied.get("reviewer") or ""),
+            notes=str(applied.get("notes") or ""),
         )
+        payload["handoffJson"] = str(request_path)
         if payload.get("committed"):
             self.store.clear_pending_decisions()
         return payload
@@ -120,27 +147,40 @@ class ReviewController:
     def update_cleaned(self, item: object, label: str) -> dict:
         result_id = int(getattr(item, "result_id"))
         previous = str(getattr(item, "final_label", "") or "")
-        payload = update_cleaned_label(self.settings["db_path"], self.settings.get("run_id", "myrun"), result_id, label)
-        if payload.get("updated"):
-            self.store.set_correction(
-                result_id,
-                {
-                    "resultId": result_id,
-                    "action": "manual_reject" if label == "reject" else "manual_relabel",
-                    "previousLabel": previous,
-                    "newLabel": label,
-                },
-            )
-        return payload
+        final_label = str(label or "").strip().lower()
+        if not final_label:
+            return {"error": "Invalid newLabel"}
+        self.store.set_correction(
+            result_id,
+            {
+                "resultId": result_id,
+                "action": "manual_reject" if final_label == "reject" else "manual_relabel",
+                "previousLabel": previous,
+                "newLabel": final_label,
+            },
+        )
+        return {"queued": True, "resultId": result_id, "finalLabel": final_label}
 
     def commit_pending_corrections(self, reviewer: str = "", notes: str = "") -> dict:
+        run_id = self.settings.get("run_id", "myrun")
+        request = {
+            "type": "review_request",
+            "db": self.settings["db_path"],
+            "run_id": run_id,
+            "reviewer": reviewer,
+            "notes": notes,
+            "corrections": list(self.store.pending_corrections.values()),
+        }
+        request_path = write_handoff_json(self.settings["db_path"], request, kind="review", run_id=run_id)
+        applied = read_handoff_json(request_path)
         payload = commit_corrections(
-            self.settings["db_path"],
-            self.settings.get("run_id", "myrun"),
-            list(self.store.pending_corrections.values()),
-            reviewer=reviewer,
-            notes=notes,
+            applied["db"],
+            applied["run_id"],
+            list(applied.get("corrections") or []),
+            reviewer=str(applied.get("reviewer") or ""),
+            notes=str(applied.get("notes") or ""),
         )
+        payload["handoffJson"] = str(request_path)
         if payload.get("committed"):
             self.store.clear_pending_corrections()
         return payload

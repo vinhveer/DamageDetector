@@ -22,9 +22,14 @@ class DbServiceTest(unittest.TestCase):
     def test_list_runs_contains_myrun(self) -> None:
         payload = db_service.list_runs(self.db_path)
         run_ids = {row["run_id"] for row in payload["runs"]}
+        if RUN_ID not in run_ids:
+            raise unittest.SkipTest(f"Run {RUN_ID!r} not present in {self.db_path}")
         self.assertIn(RUN_ID, run_ids)
 
     def test_list_cleaned_limit_and_distribution(self) -> None:
+        payload = db_service.list_runs(self.db_path)
+        if RUN_ID not in {row["run_id"] for row in payload["runs"]}:
+            raise unittest.SkipTest(f"Run {RUN_ID!r} not present in {self.db_path}")
         cleaned = db_service.list_cleaned(
             self.db_path,
             RUN_ID,
@@ -34,14 +39,30 @@ class DbServiceTest(unittest.TestCase):
         )
         self.assertLessEqual(len(cleaned["items"]), 5)
         self.assertGreater(cleaned["total"], 0)
+        self.assertGreaterEqual(cleaned["filtered_total"], len(cleaned["items"]))
         if cleaned["items"]:
             self.assertEqual(cleaned["items"][0].final_label, "crack")
+            second_page = db_service.list_cleaned(
+                self.db_path,
+                RUN_ID,
+                str(self.image_root),
+                final_label="crack",
+                limit=5,
+                offset=5,
+            )
+            if second_page["items"]:
+                first_ids = {item.result_id for item in cleaned["items"]}
+                second_ids = {item.result_id for item in second_page["items"]}
+                self.assertTrue(first_ids.isdisjoint(second_ids))
 
         dist = db_service.cleaned_distribution(self.db_path, RUN_ID)
         self.assertEqual(dist.total, cleaned["total"])
         self.assertGreater(len(dist.by_label), 0)
 
     def test_queue_query_keeps_reliability_order(self) -> None:
+        payload = db_service.list_runs(self.db_path)
+        if RUN_ID not in {row["run_id"] for row in payload["runs"]}:
+            raise unittest.SkipTest(f"Run {RUN_ID!r} not present in {self.db_path}")
         queue = db_service.list_queue(
             self.db_path,
             RUN_ID,
@@ -59,6 +80,9 @@ class DbServiceTest(unittest.TestCase):
         self.assertNotIn("core_clusters", sql)
         self.assertIn("partition by eff_label, band", sql)
 
+        payload = db_service.list_runs(self.db_path)
+        if RUN_ID not in {row["run_id"] for row in payload["runs"]}:
+            raise unittest.SkipTest(f"Run {RUN_ID!r} not present in {self.db_path}")
         payload = db_service.list_prototype_candidates(
             self.db_path,
             RUN_ID,

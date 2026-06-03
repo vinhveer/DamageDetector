@@ -4,6 +4,7 @@ from PySide6 import QtCore
 
 from ..domain.models import ChainStep
 from ..services import db_service
+from ..services.handoff_service import write_handoff_json
 from ..services.pipeline_runner import PipelineRunner
 from ..services.step_runner import StepRunner
 from ..stores.prototype_store import PrototypeStore
@@ -56,45 +57,49 @@ class PrototypeController:
             on_done=done,
         )
 
-    def build_step05_flags(self) -> dict:
-        prototypes = []
-        rejects = []
+    def build_prototype_handoff(self, *, run_seed: bool = False, run_policy: bool = False) -> dict:
+        prototypes: list[dict] = []
+        rejects: list[dict] = []
         for result_id, pick in self.store.picks.items():
             label = str(pick.get("label") or "reject")
             target = rejects if label == "reject" or pick.get("is_reject") else prototypes
-            target.append(f"{int(result_id)}:{label}")
+            target.append({"resultId": int(result_id), "label": label, "isReject": target is rejects})
         return {
-            "--db": self.settings["db_path"],
-            "--run-id": self.settings.get("run_id", "myrun"),
-            "--model-name": self.settings.get("model_name", "facebook/dinov2-giant"),
-            "--view-name": self.settings.get("view_name", "tight"),
-            "--prototype": ",".join(prototypes),
-            "--reject": ",".join(rejects),
+            "type": "prototype_request",
+            "db": self.settings["db_path"],
+            "run_id": self.settings.get("run_id", "myrun"),
+            "model_name": self.settings.get("model_name", "facebook/dinov2-giant"),
+            "view_name": self.settings.get("view_name", "tight"),
+            "prototypes": prototypes,
+            "rejects": rejects,
+            "run_seed": bool(run_seed),
+            "run_policy": bool(run_policy),
         }
+
+    def write_prototype_handoff(self, *, run_seed: bool = False, run_policy: bool = False) -> str:
+        run_id = self.settings.get("run_id", "myrun")
+        path = write_handoff_json(
+            self.settings["db_path"],
+            self.build_prototype_handoff(run_seed=run_seed, run_policy=run_policy),
+            kind="prototype",
+            run_id=run_id,
+        )
+        self.run_store.append_log(f"handoff_json={path}\n")
+        return str(path)
 
     def run_step05_only(self) -> None:
         self.run_store.clear_log()
         self.run_store.set_running(True)
         runner = StepRunner()
         runner.output.connect(self.run_store.append_log)
-        runner.finished.connect(lambda code: self._on_single_step_finished("step05", code))
-        runner.run("step05", self.build_step05_flags())
+        runner.finished.connect(lambda code: self._on_single_step_finished("handoff:prototype", code))
+        request_json = self.write_prototype_handoff(run_seed=False, run_policy=False)
+        runner.run("handoff", {"--request-json": request_json, "--action": "prototype"})
         self._runner = runner
 
     def _chain_steps(self) -> list[ChainStep]:
-        db = self.settings["db_path"]
-        run_id = self.settings.get("run_id", "myrun")
-        model_name = self.settings.get("model_name", "facebook/dinov2-giant")
-        return [
-            ChainStep("step05", "steps.step05_proto.main", self.build_step05_flags()),
-            ChainStep("step06", "steps.step06_reliability.main", {"--db": db, "--run-id": run_id}),
-            ChainStep("step07", "steps.step07_decision.main", {"--db": db, "--run-id": run_id}),
-            ChainStep(
-                "step08",
-                "steps.step08_classifier.main",
-                {"--db": db, "--run-id": run_id, "--model-name": model_name},
-            ),
-        ]
+        request_json = self.write_prototype_handoff(run_seed=True, run_policy=True)
+        return [ChainStep("handoff", "tools.handoff", {"--request-json": request_json, "--action": "prototype"})]
 
     def run_prototype_chain(self) -> None:
         self.run_store.clear_log()

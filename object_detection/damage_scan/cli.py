@@ -19,6 +19,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Images with max(width,height) above this run fixed-grid tiling + a full pass. 0 = always full-image (default).")
     parser.add_argument("--tile-size", type=int, default=1024, help="Square tile size in px for tiled scan.")
     parser.add_argument("--tile-overlap", type=int, default=128, help="Overlap in px between adjacent tiles.")
+    parser.add_argument("--tile-batch-size", type=int, default=0,
+                        help="How many tiles/ROIs to run in one GDINO forward pass. 0 = engine/env default. Use 8-16 on A100.")
     parser.add_argument("--nms-iou", type=float, default=0.0,
                         help="Override per-class NMS IoU (recall). 0 = use each prompt spec's value (default).")
     parser.add_argument("--box-threshold", type=float, default=0.0,
@@ -34,7 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["name", "relative", "absolute"],
         help="How to store `images.path` in SQLite. Default: name. Use `relative` or `absolute` only when needed.",
     )
-    parser.add_argument("--save-overlays", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-overlays", action=argparse.BooleanOptionalAction, default=False,
+                        help="Save visual detection overlays. Off by default for the clean client pipeline.")
     parser.add_argument("--include-full-raw-in-overlay", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     return parser
@@ -54,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         tiled_threshold=int(args.tiled_threshold),
         tile_size=int(args.tile_size),
         tile_overlap=int(args.tile_overlap),
+        tile_batch_size=int(args.tile_batch_size),
         nms_iou_override=float(args.nms_iou),
         box_threshold_override=float(args.box_threshold),
         image_workers=int(args.image_workers),

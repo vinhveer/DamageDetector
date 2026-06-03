@@ -5,7 +5,7 @@ from typing import Any
 from ..paths import default_export_dir, default_image_root, default_resemi_db
 
 
-LABELS = ["crack", "mold", "spall", "stain", "reject"]
+LABELS = ["crack", "mold", "spall", "reject"]
 PROTOTYPE_LABELS = ["crack", "mold", "spall", "reject"]
 DEFAULT_RUN_ID = "myrun"
 DEFAULT_MODEL_NAME = "facebook/dinov2-giant"
@@ -36,4 +36,12 @@ def migrate_settings(raw: dict[str, Any]) -> dict[str, Any]:
         migrated["image_root"] = migrated.pop("imageRootPath")
     if str(migrated.get("model_name") or "").strip() == "facebook/dinov2-small":
         migrated["model_name"] = DEFAULT_MODEL_NAME
+    migrated["labels"] = [label for label in migrated.get("labels", LABELS) if label in LABELS]
+    if not migrated["labels"]:
+        migrated["labels"] = LABELS
+    migrated["prototype_labels"] = [
+        label for label in migrated.get("prototype_labels", PROTOTYPE_LABELS) if label in PROTOTYPE_LABELS
+    ]
+    if not migrated["prototype_labels"]:
+        migrated["prototype_labels"] = PROTOTYPE_LABELS
     return migrated

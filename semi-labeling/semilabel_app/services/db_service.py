@@ -296,6 +296,7 @@ def list_cleaned(
     final_label: str = "",
     decision_type: str = "",
     limit: int = 0,
+    offset: int = 0,
 ) -> dict[str, Any]:
     conn = connect_ro(db_path)
     try:
@@ -308,7 +309,9 @@ def list_cleaned(
             clauses.append("decision_type = ?")
             params.append(decision_type)
         safe_limit = max(0, int(limit or 0))
+        safe_offset = max(0, int(offset or 0))
         limit_sql = f" LIMIT {safe_limit}" if safe_limit > 0 else ""
+        offset_sql = f" OFFSET {safe_offset}" if safe_limit > 0 and safe_offset > 0 else ""
         rows = conn.execute(
             f"""
             SELECT result_id, image_rel_path, crop_path, final_label, export_label,
@@ -316,7 +319,7 @@ def list_cleaned(
                    x1, y1, x2, y2, self_training_run_id, decision_policy_run_id
             FROM cleaned_labels
             WHERE {' AND '.join(clauses)}
-            ORDER BY result_id ASC{limit_sql}
+            ORDER BY result_id ASC{limit_sql}{offset_sql}
             """,
             params,
         ).fetchall()
@@ -343,7 +346,18 @@ def list_cleaned(
         total = conn.execute(
             "SELECT COUNT(*) n FROM cleaned_labels WHERE run_id = ?", (run_id,)
         ).fetchone()["n"]
-        return {"items": items, "total": int(total), "filtered": len(items)}
+        filtered_total = conn.execute(
+            f"SELECT COUNT(*) n FROM cleaned_labels WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchone()["n"]
+        return {
+            "items": items,
+            "total": int(total),
+            "filtered_total": int(filtered_total),
+            "filtered": len(items),
+            "limit": safe_limit,
+            "offset": safe_offset,
+        }
     finally:
         conn.close()
 

@@ -11,13 +11,8 @@ from ..paths import repo_root, semi_labeling_dir
 
 
 STEP_MODULES = {
-    "step04": "steps.step04_core.main",
-    "step05": "steps.step05_proto.main",
-    "step06": "steps.step06_reliability.main",
-    "step07": "steps.step07_decision.main",
-    "step08": "steps.step08_classifier.main",
-    "step09": "steps.step09_self_train.main",
     "export_dataset": "tools.export_dataset",
+    "handoff": "tools.handoff",
 }
 
 

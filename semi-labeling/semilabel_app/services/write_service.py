@@ -12,8 +12,9 @@ EXPORT_MAP = {
     "crack": "crack",
     "mold": "mold",
     "spall": "spall",
-    "stain": "stain",
-    "efflorescence": "stain",
+    "other": "reject",
+    "stain": "reject",
+    "efflorescence": "reject",
     "shadow": "reject",
     "edge": "reject",
     "background": "reject",
@@ -66,6 +67,29 @@ def build_review_decisions(edits: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _apply_cleaned_label_update(conn, *, run_id: str, result_id: int, action: str, new_label: str) -> None:
+    final_label = "reject" if action == "manual_reject" else str(new_label or "").strip().lower()
+    if not final_label:
+        return
+    decision_type = "reject" if action == "manual_reject" else "manual_accept"
+    conn.execute(
+        """
+        UPDATE cleaned_labels
+        SET final_label = ?, export_label = ?, decision_type = ?
+        WHERE run_id = ? AND result_id = ?
+        """,
+        (final_label, export_label(final_label), decision_type, run_id, int(result_id)),
+    )
+    conn.execute(
+        """
+        UPDATE semantic_decisions
+        SET final_label = ?, decision_type = ?
+        WHERE run_id = ? AND result_id = ?
+        """,
+        (final_label, decision_type, run_id, int(result_id)),
+    )
 
 
 def commit_session(
@@ -131,30 +155,6 @@ def commit_session(
         conn.close()
 
 
-def update_cleaned_label(db_path: str, run_id: str, result_id: int, new_label: str) -> dict[str, Any]:
-    final_label = str(new_label or "").strip().lower()
-    if not final_label:
-        return {"error": "Invalid newLabel"}
-    conn = connect_rw(db_path)
-    try:
-        cur = conn.execute(
-            """
-            UPDATE cleaned_labels SET final_label = ?, export_label = ?
-            WHERE run_id = ? AND result_id = ?
-            """,
-            (final_label, export_label(final_label), run_id, int(result_id)),
-        )
-        conn.commit()
-        if not cur.rowcount:
-            return {"updated": False, "error": "Row not found"}
-        return {"updated": True, "finalLabel": final_label, "exportLabel": export_label(final_label)}
-    except Exception as exc:
-        conn.rollback()
-        return {"error": str(exc)}
-    finally:
-        conn.close()
-
-
 def commit_corrections(
     db_path: str,
     run_id: str,
@@ -201,6 +201,13 @@ def commit_corrections(
                     row["note"],
                     now,
                 ),
+            )
+            _apply_cleaned_label_update(
+                conn,
+                run_id=run_id,
+                result_id=int(row["resultId"]),
+                action=str(row["action"]),
+                new_label=str(row["newLabel"]),
             )
         conn.commit()
         return {"committed": True, "reviewSessionId": session_id, "decisionCount": len(rows), "committedAtUtc": now}

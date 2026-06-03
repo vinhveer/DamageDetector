@@ -375,7 +375,7 @@ def _has_conflict(reasons: set[str]) -> bool:
 
 
 def _low_damage_similarity(row: sqlite3.Row, *, config: DecisionPolicyConfig) -> bool:
-    damage_labels = {"crack", "mold", "spall", "stain", "efflorescence"}
+    damage_labels = {"crack", "mold", "spall"}
     prototype_class = str(row["prototype_class"] or "")
     prototype_similarity = row["prototype_similarity"]
     nearest_core_similarity = row["nearest_core_similarity"]

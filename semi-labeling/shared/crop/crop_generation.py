@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -43,6 +44,12 @@ DEFAULT_VIEW_SPECS: tuple[CropViewSpec, ...] = (
     CropViewSpec("pad25", 0.25),
     CropViewSpec("context", 0.75),
 )
+
+
+def default_crop_workers() -> int:
+    """Conservative default for image decode/crop/encode threads."""
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(8, cpu_count - 2 if cpu_count > 2 else cpu_count))
 
 
 def parse_view_specs(raw: str) -> tuple[CropViewSpec, ...]:

@@ -21,8 +21,10 @@ PROMPT_SPECS: dict[str, PromptSpec] = {
     "crack": PromptSpec(
         key="crack",
         prompt=(
-            "crack, wall crack, concrete crack, thin crack, long crack, "
-            "hairline crack, irregular crack, fracture line, dark crack line"
+            "crack, wall crack, concrete crack, plaster crack, surface crack, "
+            "thin crack, long crack, hairline crack, irregular crack, jagged crack, "
+            "linear crack, fracture line, fissure, wall fissure, concrete fissure, "
+            "dark crack line, vertical crack, horizontal crack, diagonal crack, branching crack"
         ),
         box_threshold=0.10,
         text_threshold=0.20,
@@ -36,8 +38,10 @@ PROMPT_SPECS: dict[str, PromptSpec] = {
     "mold": PromptSpec(
         key="mold",
         prompt=(
-            "mold, wall mold, black mold, green mold, mildew, moss, algae, stain, "
-            "water stain, dirty stain, discoloration, dark patch, green patch, damp area, moisture stain"
+            "mold, wall mold, black mold, green mold, mildew, mildew stain, "
+            "moss, moss patch, algae, algae patch, stain, flat stain, water stain, "
+            "dirty stain, dirty patch, discoloration, dark patch, green patch, brown stain, "
+            "damp area, damp stain, humidity stain, moisture stain"
         ),
         box_threshold=0.10,
         text_threshold=0.20,
@@ -51,8 +55,10 @@ PROMPT_SPECS: dict[str, PromptSpec] = {
     "spall": PromptSpec(
         key="spall",
         prompt=(
-            "spalling, concrete spalling, broken concrete, chipped concrete, peeling paint, "
-            "flaking paint, exposed concrete, rough damaged surface, hole, cavity, surface loss, "
+            "spalling, concrete spalling, concrete damage, broken concrete, chipped concrete, "
+            "chipped wall, broken plaster, delamination, peeling paint, plaster peeling, "
+            "flaking paint, flaked surface, exposed concrete, exposed aggregate, "
+            "rough damaged surface, hole, cavity, surface loss, material loss, "
             "crumbling wall, missing material"
         ),
         box_threshold=0.20,

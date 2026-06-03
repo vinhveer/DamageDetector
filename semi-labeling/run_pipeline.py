@@ -15,19 +15,17 @@ Usage:
 
 Layout:
   resemi/lib/    pure logic (no CLI)
-  resemi/steps/  the 9 steps, one file each (the real CLIs)
-  resemi/tools/  schema_audit, review_commit, render_bbox_overlays
+  resemi/steps/  internal technical steps
+  resemi/tools/  handoff, export_dataset, schema_audit
 
 Step order (mandatory = must run; optional = on demand):
   step01 Semantic Init       (mandatory)
   step02 Crop Generation     (mandatory)
-  step03 DINOv2 Embedding    (mandatory)  ← gate for step04-09
+  step03 DINOv2 Embedding    (mandatory)  ← gate for review/prototype
   step04 Core Mining         (optional)
   step05 Prototype Bank      (optional)   ← human picks prototypes
   step06 Reliability Scoring (optional)
   step07 Decision Policy     (optional)   ← splits auto_accept vs review_queue
-  step08 Classifier          (optional)
-  step09 Self-Training       (optional)   ← human audits before --apply-promotions
 """
 from __future__ import annotations
 
@@ -40,6 +38,7 @@ from shared.runtime import bootstrap
 
 bootstrap.ensure_on_path()
 
+from shared.db.schema import connect_output  # noqa: E402
 from shared.runtime.paths import default_resemi_db  # noqa: E402
 
 
@@ -97,13 +96,22 @@ STEPS: list[dict] = [
         "depends_on": ["step03"],
     },
     {
+        "name": "seed",
+        "label": "Detector+DINOv2 Seed Vote",
+        "module": "tools.relabel_semantic_seed",
+        "optional": True,
+        "check_sql": "SELECT COUNT(*) FROM semantic_decisions WHERE run_id = ? AND score_components_json LIKE '%seed_label_source%'",
+        "check_label": "seed_relabels",
+        "depends_on": ["step04", "step05"],
+    },
+    {
         "name": "step06",
         "label": "Reliability Scoring",
         "module": "steps.step06_reliability.main",
         "optional": True,
         "check_sql": "SELECT COUNT(*) FROM reliability_scoring_runs WHERE run_id = ?",
         "check_label": "reliability_scoring_runs",
-        "depends_on": ["step04", "step05"],
+        "depends_on": ["seed"],
     },
     {
         "name": "step07",
@@ -113,24 +121,6 @@ STEPS: list[dict] = [
         "check_sql": "SELECT COUNT(*) FROM decision_policy_runs WHERE run_id = ?",
         "check_label": "decision_policy_runs",
         "depends_on": ["step06"],
-    },
-    {
-        "name": "step08",
-        "label": "Lightweight Classifier",
-        "module": "steps.step08_classifier.main",
-        "optional": True,
-        "check_sql": "SELECT COUNT(*) FROM classifier_runs WHERE run_id = ?",
-        "check_label": "classifier_runs",
-        "depends_on": ["step07"],
-    },
-    {
-        "name": "step09",
-        "label": "Self-Training",
-        "module": "steps.step09_self_train.main",
-        "optional": True,
-        "check_sql": "SELECT COUNT(*) FROM self_training_runs WHERE run_id = ?",
-        "check_label": "self_training_runs",
-        "depends_on": ["step08"],
     },
 ]
 
@@ -142,9 +132,7 @@ STEP_BY_NAME = {s["name"]: s for s in STEPS}
 # ---------------------------------------------------------------------------
 
 def _open_db(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return connect_output(db_path)
 
 
 def _step_count(conn: sqlite3.Connection, step: dict, run_id: str) -> int:
@@ -273,8 +261,15 @@ def _invoke_step(step: dict, run_id: str, db: str, extra_args: list[str]) -> int
     argv = list(extra_args)
     if "--run-id" not in argv and run_id:
         argv = ["--run-id", run_id] + argv
-    # step01 uses --output-db, everything else uses --db
-    if "--db" not in argv and "--output-db" not in argv and db and step["name"] != "step01":
+    if step["name"] == "seed" and "--apply" not in argv:
+        argv = ["--apply"] + argv
+    # step01 has separate source/output flags; clean runs use the same DB.
+    if step["name"] == "step01" and db:
+        if "--source-db" not in argv:
+            argv = ["--source-db", db] + argv
+        if "--output-db" not in argv:
+            argv = ["--output-db", db] + argv
+    elif "--db" not in argv and "--output-db" not in argv and db:
         argv = ["--db", db] + argv
     return mod.main(argv)
 
@@ -298,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list-runs", help="List all runs in the DB.")
 
     p_run = sub.add_parser("run", help="Run a step or 'all' mandatory steps.")
-    p_run.add_argument("step", help="step01..step09 or 'all'.")
+    p_run.add_argument("step", help="step01..step07, seed, or 'all'. Prefer client_pipeline for normal use.")
     p_run.add_argument("--run-id", default="", help="Resemi run_id to pass to the step.")
 
     return parser

@@ -19,19 +19,23 @@ def _resolve_lab_root() -> Path:
 
 LAB_ROOT = _resolve_lab_root()
 
-# Inputs come from the existing pipeline artifacts under infer_results/.
+# Legacy inputs can still be read from infer_results, but clean runs write every
+# stage into one SQLite artifact under model_with_inference/semi_labeling.
 SEMI_RESULTS = LAB_ROOT / "infer_results" / "semi-labeling"
 
-# resemi v2 writes its own consolidated output here (fresh runs).
 RESEMI_OUTPUT_DIR = LAB_ROOT / "model_with_inference" / "semi_labeling"
 
 
+def default_pipeline_db() -> Path:
+    return RESEMI_OUTPUT_DIR / "pipeline.sqlite3"
+
+
 def default_resemi_db() -> Path:
-    return RESEMI_OUTPUT_DIR / "resemi.sqlite3"
+    return default_pipeline_db()
 
 
 def default_source_db() -> Path:
-    return SEMI_RESULTS / "step2_sematic" / "damage_scan.sqlite3"
+    return default_pipeline_db()
 
 
 def default_dedup_db() -> Path:

@@ -40,6 +40,21 @@ class ReviewWorkspace(QtWidgets.QWidget):
         toolbar.add_separator()
         self.count_chip = Chip("0 mục", self)
         toolbar.add(self.count_chip)
+        self.prev_page_btn = QtWidgets.QPushButton("Prev", self)
+        self.prev_page_btn.setFixedWidth(58)
+        toolbar.add(self.prev_page_btn)
+        self.page_chip = Chip("0/0", self)
+        toolbar.add(self.page_chip)
+        self.next_page_btn = QtWidgets.QPushButton("Next", self)
+        self.next_page_btn.setFixedWidth(58)
+        toolbar.add(self.next_page_btn)
+        toolbar.add_label("Page size")
+        self.page_size = QtWidgets.QSpinBox(self)
+        self.page_size.setRange(50, 5000)
+        self.page_size.setSingleStep(50)
+        self.page_size.setValue(500)
+        self.page_size.setFixedWidth(86)
+        toolbar.add(self.page_size)
         toolbar.add_separator()
         self.show_others = QtWidgets.QCheckBox("Hiện box khác", self)
         self.show_others.setChecked(True)
@@ -109,6 +124,9 @@ class ReviewWorkspace(QtWidgets.QWidget):
         QtGui.QShortcut(QtGui.QKeySequence("Space"), self).activated.connect(self.controller.next_item)
         QtGui.QShortcut(QtGui.QKeySequence("Backspace"), self).activated.connect(self.controller.prev_item)
         self.load_btn.clicked.connect(self._load)
+        self.prev_page_btn.clicked.connect(self._prev_cleaned_page)
+        self.next_page_btn.clicked.connect(self._next_cleaned_page)
+        self.page_size.valueChanged.connect(self._reset_cleaned_page_size)
         self.commit_btn.clicked.connect(self._commit)
         self.store.queueChanged.connect(self._on_queue_changed)
         self.store.cleanedChanged.connect(self._on_cleaned_changed)
@@ -124,10 +142,15 @@ class ReviewWorkspace(QtWidgets.QWidget):
         # per-image cache so re-selecting an item doesn't re-hit the DB.
         self._boxes_for: object = None
         self._boxes_cache: dict[str, list] = {}
+        self._cleaned_offset = 0
+        self._cleaned_limit = 500
+        self._render_pager()
 
     def _on_mode_changed(self, text: str) -> None:
-        self.queue_type.setEnabled(text == "Queue")
-        self.sample.setEnabled(text == "Queue")
+        is_queue = text == "Queue"
+        self.queue_type.setEnabled(is_queue)
+        self.sample.setEnabled(is_queue)
+        self._render_pager()
 
     def _on_queue_changed(self) -> None:
         self.grid.set_items(self.store.queue_items)
@@ -135,18 +158,80 @@ class ReviewWorkspace(QtWidgets.QWidget):
 
     def _on_cleaned_changed(self) -> None:
         self.grid.set_items(self.store.cleaned_items)
-        self._update_count(len(self.store.cleaned_items))
+        self._update_cleaned_count()
+        self._render_pager()
 
     def _update_count(self, count: int) -> None:
         self.count_chip.setText(f"{count} mục")
         self._grid_stack.setCurrentWidget(self.grid if count else self.empty)
+
+    def _update_cleaned_count(self) -> None:
+        loaded = len(self.store.cleaned_items)
+        total = int(self.store.cleaned_filtered_total or loaded)
+        if loaded and total:
+            start = int(self.store.cleaned_offset) + 1
+            end = int(self.store.cleaned_offset) + loaded
+            self.count_chip.setText(f"{start}-{end} / {total}")
+        else:
+            self.count_chip.setText("0 / 0")
+        self._grid_stack.setCurrentWidget(self.grid if loaded else self.empty)
 
     def _load(self) -> None:
         if self.mode.currentText() == "Queue":
             qt = self.queue_type.currentText()
             self.controller.load_queue("" if qt == "all" else qt, self.sample.value())
         else:
-            self.controller.load_cleaned(limit=500)
+            self._cleaned_offset = 0
+            self._load_cleaned_page()
+
+    def _load_cleaned_page(self) -> None:
+        self._cleaned_limit = int(self.page_size.value())
+        self.controller.load_cleaned(limit=self._cleaned_limit, offset=self._cleaned_offset)
+
+    def _prev_cleaned_page(self) -> None:
+        self._cleaned_limit = int(self.page_size.value())
+        self._cleaned_offset = max(0, self._cleaned_offset - self._cleaned_limit)
+        self._load_cleaned_page()
+
+    def _next_cleaned_page(self) -> None:
+        loaded = len(self.store.cleaned_items)
+        total = int(self.store.cleaned_filtered_total or 0)
+        if loaded <= 0:
+            return
+        self._cleaned_limit = int(self.page_size.value())
+        next_offset = self._cleaned_offset + self._cleaned_limit
+        if total and next_offset >= total:
+            return
+        self._cleaned_offset = next_offset
+        self._load_cleaned_page()
+
+    def _reset_cleaned_page_size(self, _value: int) -> None:
+        if self.mode.currentText() != "Cleaned" or not self.store.cleaned_items:
+            self._render_pager()
+            return
+        self._cleaned_offset = 0
+        self._load_cleaned_page()
+
+    def _render_pager(self) -> None:
+        if self.mode.currentText() != "Cleaned":
+            self.page_chip.setText("0/0")
+            self.prev_page_btn.setEnabled(False)
+            self.next_page_btn.setEnabled(False)
+            self.page_size.setEnabled(False)
+            return
+        loaded = len(self.store.cleaned_items)
+        total = int(self.store.cleaned_filtered_total or loaded)
+        offset = int(self.store.cleaned_offset or self._cleaned_offset)
+        limit = int(self.store.cleaned_limit or self.page_size.value())
+        if loaded and total:
+            page = (offset // max(1, limit)) + 1
+            pages = ((total - 1) // max(1, limit)) + 1
+            self.page_chip.setText(f"{page}/{pages}")
+        else:
+            self.page_chip.setText("0/0")
+        self.prev_page_btn.setEnabled(offset > 0)
+        self.next_page_btn.setEnabled(bool(total and offset + loaded < total))
+        self.page_size.setEnabled(True)
 
     def _select_item(self, item: object) -> None:
         items = self.store.queue_items if self.mode.currentText() == "Queue" else self.store.cleaned_items
@@ -202,7 +287,7 @@ class ReviewWorkspace(QtWidgets.QWidget):
             return
         if self.store.mode == "cleaned":
             self.controller.update_cleaned(item, label)
-            self.controller.load_cleaned(limit=500)
+            self.controller.next_item()
         else:
             self.controller.decide_current(label)
             self.controller.next_item()

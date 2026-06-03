@@ -14,8 +14,8 @@ class DecisionConfig:
     low_margin_threshold: float = 0.03
     strong_margin_threshold: float = 0.10
     detector_conflict_penalty: float = 0.08
-    labels: tuple[str, ...] = ("crack", "spall", "mold", "stain", "efflorescence")
-    reject_labels: tuple[str, ...] = ("reject", "unknown", "background", "shadow", "edge", "object")
+    labels: tuple[str, ...] = ("crack", "mold", "spall")
+    reject_labels: tuple[str, ...] = ("reject", "other", "unknown", "background", "shadow", "edge", "object")
 
 
 @dataclass(frozen=True)
@@ -42,14 +42,19 @@ class SemanticDecision:
 
 def decide(detection: SourceDetection, config: DecisionConfig, agreement: SemanticAgreement | None = None) -> SemanticDecision:
     ranked = sorted(detection.scores.items(), key=lambda item: item[1], reverse=True)
-    top_label = str(ranked[0][0]) if ranked else detection.initial_label
-    top_score = float(ranked[0][1]) if ranked else float(detection.initial_probability)
+    openclip_top_label = str(ranked[0][0]) if ranked else detection.initial_label
+    openclip_top_score = float(ranked[0][1]) if ranked else float(detection.initial_probability)
+    detector_seed_label = _detector_seed_label(detection.detector_label, detection.prompt_key, config.labels)
+    top_label = detector_seed_label or openclip_top_label
+    top_score = float(detection.scores.get(top_label, openclip_top_score))
     second_score = float(ranked[1][1]) if len(ranked) > 1 else 0.0
     margin = max(0.0, top_score - second_score)
 
     detector_agrees = _label_matches_detector(top_label, detection.detector_label, detection.prompt_key)
     detector_component = 1.0 if detector_agrees else 0.0
-    reliability = (0.65 * top_score) + (0.25 * min(1.0, margin / max(config.strong_margin_threshold, 1e-6))) + (0.10 * detector_component)
+    openclip_agrees = top_label == openclip_top_label
+    openclip_component = 1.0 if openclip_agrees else 0.0
+    reliability = (0.45 * top_score) + (0.25 * min(1.0, margin / max(config.strong_margin_threshold, 1e-6))) + (0.20 * detector_component) + (0.10 * openclip_component)
     if not detector_agrees:
         reliability -= float(config.detector_conflict_penalty)
     agreement_ratio = 1.0 if agreement is None else float(agreement.agreement_ratio)
@@ -69,6 +74,10 @@ def decide(detection: SourceDetection, config: DecisionConfig, agreement: Semant
         reason_codes.append("low_margin")
     if not detector_agrees:
         reason_codes.append("detector_semantic_conflict")
+    if detector_seed_label is not None:
+        reason_codes.append("detector_seed_label")
+    if not openclip_agrees:
+        reason_codes.append("openclip_seed_conflict")
     if agreement is not None and agreement_ratio >= 0.75:
         reason_codes.append("model_agreement_high")
     if agreement is not None and agreement_ratio <= 0.50:
@@ -104,6 +113,10 @@ def decide(detection: SourceDetection, config: DecisionConfig, agreement: Semant
 
     components: dict[str, float | str | bool] = {
         "semantic_confidence": top_score,
+        "openclip_top_label": openclip_top_label,
+        "openclip_confidence": openclip_top_score,
+        "openclip_agrees": openclip_agrees,
+        "detector_seed_label": detector_seed_label or "",
         "top1_top2_margin": margin,
         "detector_prompt_agreement": detector_component,
         "detector_agrees": detector_agrees,
@@ -136,7 +149,19 @@ def _label_matches_detector(label: str, detector_label: str, prompt_key: str) ->
         "spall": ("spall", "spalling", "delamination", "flaking"),
         "mold": ("mold", "mould", "stain", "moisture", "dirty"),
         "crack": ("crack", "fracture", "fissure"),
-        "stain": ("stain", "mold", "mould", "moisture"),
-        "efflorescence": ("efflorescence", "salt", "white"),
     }
     return any(alias in haystack for alias in aliases.get(normalized, (normalized,)))
+
+
+def _detector_seed_label(detector_label: str, prompt_key: str, labels: tuple[str, ...]) -> str | None:
+    haystack = f"{detector_label} {prompt_key}".lower()
+    allowed = {str(label).lower().strip() for label in labels}
+    aliases = {
+        "spall": ("spall", "spalling", "delamination", "flaking"),
+        "mold": ("mold", "mould", "stain", "moisture", "dirty"),
+        "crack": ("crack", "fracture", "fissure"),
+    }
+    for label, terms in aliases.items():
+        if label in allowed and any(term in haystack for term in terms):
+            return label
+    return None

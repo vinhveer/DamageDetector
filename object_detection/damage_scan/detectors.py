@@ -174,6 +174,7 @@ class GroundingDinoDetector(DamageDetector):
         image_width: int,
         image_height: int,
         roi_boxes: list[Box],
+        tile_batch_size: int = 0,
         log_fn: Callable[[str], None] | None = None,
     ) -> list[Detection]:
         """Detect over many ROIs of one image, batching forward passes on the
@@ -195,6 +196,8 @@ class GroundingDinoDetector(DamageDetector):
             "device": self.device,
             "output_dir": self.output_dir,
         }
+        if int(tile_batch_size or 0) > 0:
+            params["recursive_tile_batch_size"] = int(tile_batch_size)
         result = self._service.call(
             "predict_rois_batch",
             {

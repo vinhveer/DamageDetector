@@ -16,7 +16,7 @@ def semi_labeling_dir() -> Path:
 
 
 def default_resemi_db() -> Path:
-    return lab_root() / "model_with_inference" / "semi_labeling" / "resemi.sqlite3"
+    return lab_root() / "model_with_inference" / "semi_labeling" / "pipeline.sqlite3"
 
 
 def default_image_root() -> Path:

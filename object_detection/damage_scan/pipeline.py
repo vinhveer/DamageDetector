@@ -33,6 +33,7 @@ class DamageScanConfig:
     tiled_threshold: int = 0
     tile_size: int = 1024
     tile_overlap: int = 128
+    tile_batch_size: int = 0
     # Optional recall overrides. 0.0 = keep each prompt spec's own value (default repo
     # behavior). The semi-labeling pipeline passes these to widen recall.
     nms_iou_override: float = 0.0
@@ -352,6 +353,7 @@ class DamageScanPipeline:
                     image_width=image.width,
                     image_height=image.height,
                     roi_boxes=tiles,
+                    tile_batch_size=int(self.config.tile_batch_size or 0),
                     log_fn=log_fn,
                 )
             )

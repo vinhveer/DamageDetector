@@ -21,7 +21,7 @@ from shared.runtime import bootstrap
 
 bootstrap.ensure_on_path()
 
-from shared.crop.crop_generation import DEFAULT_VIEW_SPECS, generate_crop_views, parse_crop_encoding, parse_view_specs  # noqa: E402
+from shared.crop.crop_generation import DEFAULT_VIEW_SPECS, default_crop_workers, generate_crop_views, parse_crop_encoding, parse_view_specs  # noqa: E402
 from shared.runtime.paths import default_image_root, default_resemi_db  # noqa: E402
 from steps.step01_semantic.pipeline import ResemiPipeline  # noqa: E402
 from shared.db.schema import connect_output  # noqa: E402
@@ -64,8 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Override view list (tight,pad10,pad25,context). Default: from run options.")
     parser.add_argument("--limit", type=int, default=0,
                         help="Process first N detections only (debug).")
-    parser.add_argument("--num-workers", type=int, default=0,
-                        help="Parallel threads for crop decode/encode (PNG encode is the bottleneck). 0 = sequential (default).")
+    parser.add_argument("--num-workers", type=int, default=default_crop_workers(),
+                        help="Parallel threads for crop decode/encode (PNG encode is the bottleneck). 0 = sequential.")
     parser.add_argument("--crop-format", default="png", choices=["png", "jpeg"],
                         help="Crop file format. png=lossless (default). jpeg=~11x faster encode + ~40%% file size, but LOSSY.")
     parser.add_argument("--crop-compress-level", type=int, default=1,
@@ -109,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"image_root={image_root}")
         print(f"crop_dir={crop_dir}")
         print(f"views={view_names}")
+        print(f"num_workers={int(args.num_workers)}")
 
         if bool(args.dry_run):
             print("dry_run=True — skipping crop generation")

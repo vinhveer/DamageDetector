@@ -145,8 +145,6 @@ def infer_detector_label(detection: SourceDetection) -> str | None:
         "crack": ("crack", "fracture", "fissure"),
         "spall": ("spall", "spalling", "delamination", "flaking", "broken", "chipped"),
         "mold": ("mold", "mould", "mildew", "moss"),
-        "stain": ("stain", "dirty", "discoloration", "moisture"),
-        "efflorescence": ("efflorescence", "salt", "white"),
     }
     for label, words in aliases.items():
         if any(word in haystack for word in words):

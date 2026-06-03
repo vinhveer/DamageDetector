@@ -14,6 +14,10 @@ class ReviewStore(QtCore.QObject):
         super().__init__(parent)
         self.queue_items: list[object] = []
         self.cleaned_items: list[object] = []
+        self.cleaned_total = 0
+        self.cleaned_filtered_total = 0
+        self.cleaned_offset = 0
+        self.cleaned_limit = 0
         self.current_index = 0
         self.pending_decisions: dict[int, dict] = {}
         self.pending_corrections: dict[int, dict] = {}
@@ -25,8 +29,20 @@ class ReviewStore(QtCore.QObject):
         self.queueChanged.emit()
         self.selectionChanged.emit()
 
-    def set_cleaned(self, items: list[object]) -> None:
+    def set_cleaned(
+        self,
+        items: list[object],
+        *,
+        total: int = 0,
+        filtered_total: int | None = None,
+        offset: int = 0,
+        limit: int = 0,
+    ) -> None:
         self.cleaned_items = list(items)
+        self.cleaned_total = int(total or 0)
+        self.cleaned_filtered_total = int(filtered_total if filtered_total is not None else len(items))
+        self.cleaned_offset = max(0, int(offset or 0))
+        self.cleaned_limit = max(0, int(limit or 0))
         self.current_index = 0
         self.cleanedChanged.emit()
         self.selectionChanged.emit()

@@ -20,7 +20,7 @@ from shared.runtime import bootstrap
 
 bootstrap.ensure_on_path()
 
-from shared.crop.crop_generation import parse_view_specs  # noqa: E402
+from shared.crop.crop_generation import default_crop_workers, parse_crop_encoding, parse_view_specs  # noqa: E402
 from shared.runtime.paths import default_dedup_db, default_image_root, default_resemi_db, default_source_db  # noqa: E402
 from steps.step01_semantic.pipeline import ResemiConfig, ResemiPipeline  # noqa: E402
 
@@ -59,11 +59,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--crop-dir", default="",
                         help="Crop cache dir. Default: output DB parent/crops/run_id.")
     parser.add_argument("--crop-views", default="tight,pad10,pad25,context")
+    parser.add_argument("--crop-num-workers", type=int, default=default_crop_workers(),
+                        help="Parallel crop decode/encode workers when --generate-crops is enabled. 0 = sequential.")
+    parser.add_argument("--crop-format", default="png", choices=["png", "jpeg"],
+                        help="Crop file format when --generate-crops is enabled.")
+    parser.add_argument("--crop-compress-level", type=int, default=1,
+                        help="PNG compression level 0-9 when --crop-format png.")
+    parser.add_argument("--jpeg-quality", type=int, default=95,
+                        help="JPEG quality 1-100 when --crop-format jpeg.")
     parser.add_argument("--generate-crops", action=argparse.BooleanOptionalAction, default=False,
                         help="Generate multi-crop PNGs in this step. Default off — use step02 instead.")
     parser.add_argument("--taxonomy-version-id", default="label_taxonomy_v1")
-    parser.add_argument("--stain-export-label", default="stain",
-                        choices=["stain", "mold", "reject"])
+    parser.add_argument("--stain-export-label", default="reject",
+                        choices=["stain", "mold", "reject"],
+                        help="Deprecated compatibility option. Non crack/mold/spall labels export as reject.")
     parser.add_argument("--accept-threshold", type=float, default=0.75)
     parser.add_argument("--suspect-threshold", type=float, default=0.50)
     parser.add_argument("--low-margin-threshold", type=float, default=0.03)
@@ -89,6 +98,12 @@ def main(argv: list[str] | None = None) -> int:
         crop_dir=Path(args.crop_dir).expanduser().resolve() if str(args.crop_dir or "").strip() else None,
         crop_view_specs=parse_view_specs(str(args.crop_views)),
         generate_crops=bool(args.generate_crops),
+        crop_num_workers=int(args.crop_num_workers),
+        crop_encoding=parse_crop_encoding(
+            fmt=str(args.crop_format),
+            compress_level=int(args.crop_compress_level),
+            jpeg_quality=int(args.jpeg_quality),
+        ),
         taxonomy_version_id=str(args.taxonomy_version_id),
         stain_export_label=str(args.stain_export_label),
         accept_threshold=float(args.accept_threshold),

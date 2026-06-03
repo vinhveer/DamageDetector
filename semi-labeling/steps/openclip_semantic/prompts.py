@@ -3,25 +3,32 @@ from __future__ import annotations
 
 POS_PROMPTS: dict[str, list[str]] = {
     "crack": [
-        "a close-up photo of a thin narrow crack line on concrete surface",
-        "a long dark fracture line with sharp edges on a wall",
-        "a fine irregular hairline crack on plaster or concrete",
-        "a linear split with clear boundaries in building material",
-        "a jagged crack line running across a surface",
+        "a close-up photo of an open crack line on a concrete surface",
+        "one or more visible narrow open lines splitting the surface",
+        "a long dark fissure line with clear edges on concrete or plaster",
+        "multiple hairline cracks running across a building surface",
+        "a jagged linear opening on a wall, slab, or concrete surface",
     ],
     "mold": [
-        "a close-up photo of a mold stain patch on a wall surface",
-        "a dark or green mold area with blurry edges",
-        "a dirty discoloration patch without sharp lines",
-        "mildew or moss growing on concrete surface",
-        "an irregular stain area with soft boundaries",
+        "a flat dirty stained patch on a wall or concrete surface",
+        "a flat mold or mildew discoloration area without broken material",
+        "green moss or algae on a flat building surface",
+        "dark dirt or water stain on a flat concrete or plaster surface",
+        "a flat discolored patch with soft blurry edges and no rough breakage",
     ],
     "spall": [
-        "a close-up photo of broken concrete surface with missing material",
-        "a chipped concrete area with rough texture",
-        "spalling damage exposing inner material",
-        "a hole or flaked region on concrete surface",
-        "a damaged surface with pieces falling off",
+        "a close-up photo of chipped concrete with missing surface material",
+        "a broken or flaked concrete area with rough uneven texture",
+        "spalling damage with exposed inner material and jagged edges",
+        "a rough damaged patch where the surface has peeled or broken off",
+        "a bumpy uneven concrete surface with visible material loss",
+    ],
+    "other": [
+        "an undamaged building surface with no crack mold or spalling damage",
+        "a normal wall or concrete area that does not belong to crack mold or spall",
+        "a shadow edge object joint tile line or background area that is not damage",
+        "a blurry crop or irrelevant object not showing building surface damage",
+        "a flat clean surface or ordinary texture without open lines stains or broken material",
     ],
 }
 
@@ -50,13 +57,18 @@ NEGATIVE_ANCHORS: dict[str, list[str]] = {
     ],
     "mold": [
         "a clean dry concrete surface",
-        "a paint stain or watermark that is not mold",
-        "a smooth shadow on the wall",
+        "a rough broken concrete patch with missing material",
+        "a thin open crack line",
     ],
     "spall": [
         "an intact smooth concrete surface with no missing material",
-        "a shallow surface stain without missing material",
+        "a flat surface stain without missing material",
         "a dark patch or shadow on concrete",
+    ],
+    "other": [
+        "a clear crack line on concrete",
+        "a flat mold or dirty stain patch",
+        "a rough chipped spalling concrete patch",
     ],
 }
 
@@ -64,4 +76,5 @@ NEGATIVE_ALPHA: dict[str, float] = {
     "crack": 1.0,
     "mold": 1.0,
     "spall": 1.0,
+    "other": 0.5,
 }

@@ -10,7 +10,6 @@ from .workspaces.distribution_ws import DistributionWorkspace
 from .workspaces.export_ws import ExportWorkspace
 from .workspaces.prototype_ws import PrototypeWorkspace
 from .workspaces.review_ws import ReviewWorkspace
-from .workspaces.runsteps_ws import RunStepsWorkspace
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -19,7 +18,6 @@ class MainWindow(QtWidgets.QMainWindow):
         ("prototype", "Prototype", "SP_FileDialogContentsView"),
         ("review", "Đánh giá", "SP_FileDialogListView"),
         ("distribution", "Phân bố / QA", "SP_FileDialogInfoView"),
-        ("runsteps", "Chạy bước", "SP_MediaPlay"),
         ("export", "Xuất dữ liệu", "SP_DialogSaveButton"),
     ]
 
@@ -106,12 +104,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._settings,
                 self._workspaces,
             ),
-            "runsteps": RunStepsWorkspace(
-                self._run_store,
-                self._run_controller,
-                self._settings,
-                self._workspaces,
-            ),
             "export": ExportWorkspace(
                 self._run_store,
                 self._export_controller,
@@ -169,7 +161,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._model_edit = QtWidgets.QLineEdit(str(self._settings.get("model_name") or ""), bar)
         self._run_edit.setMaximumWidth(120)
         self._model_edit.setMaximumWidth(220)
-        self._db_edit.setPlaceholderText("resemi.sqlite3")
+        self._db_edit.setPlaceholderText("pipeline.sqlite3")
         self._image_root_edit.setPlaceholderText("data/HinhAnh")
 
         layout.addWidget(QtWidgets.QLabel("CSDL", bar))
