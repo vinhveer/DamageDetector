@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Review loop (R2/R3/R5/R6/R4)
   listCleaned: (payload) => ipcRenderer.invoke('labeling:list-cleaned', payload),
+  cleanedDistribution: (payload) => ipcRenderer.invoke('labeling:cleaned-distribution', payload),
   updateCleanedLabel: (payload) => ipcRenderer.invoke('labeling:update-cleaned', payload),
   commitCorrections: (payload) => ipcRenderer.invoke('labeling:commit-corrections', payload),
   getSessionDecisions: (payload) => ipcRenderer.invoke('labeling:session-decisions', payload),

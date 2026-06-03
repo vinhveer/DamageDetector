@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   labelingDefaults, listRuns, listQueue, commitSession,
   getRunResources, listSessions, listSelfTrainingRuns,
-  listCleaned, updateCleanedLabel, commitCorrections,
+  listCleaned, cleanedDistribution, updateCleanedLabel, commitCorrections,
   getSessionDecisions, getSelfTrainingPromotions, getRunMetrics,
   listPrototypeCandidates, latestPrototype,
   runStep, bridgeInfo,
@@ -80,6 +80,7 @@ ipcMain.handle('labeling:list-sessions', (_event, payload) => listSessions(paylo
 ipcMain.handle('labeling:list-selftrain', (_event, payload) => listSelfTrainingRuns(payload));
 ipcMain.handle('labeling:bridge-info', () => bridgeInfo());
 ipcMain.handle('labeling:list-cleaned', (_event, payload) => listCleaned(payload));
+ipcMain.handle('labeling:cleaned-distribution', (_event, payload) => cleanedDistribution(payload));
 ipcMain.handle('labeling:update-cleaned', (_event, payload) => updateCleanedLabel(payload));
 ipcMain.handle('labeling:commit-corrections', (_event, payload) => commitCorrections(payload));
 ipcMain.handle('labeling:session-decisions', (_event, payload) => getSessionDecisions(payload));

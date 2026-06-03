@@ -26,6 +26,7 @@ Requires-Dist: fsspec
 Requires-Dist: h5py
 Requires-Dist: hf-xet
 Requires-Dist: huggingface-hub
+Requires-Dist: hypothesis==6.155.1
 Requires-Dist: icecream
 Requires-Dist: idna
 Requires-Dist: imageio

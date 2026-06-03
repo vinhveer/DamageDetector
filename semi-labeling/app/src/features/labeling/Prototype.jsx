@@ -11,9 +11,11 @@ export default function Prototype({ dbPath, onChangeDbPath, onDataChanged }) {
   const [imageRoot, setImageRoot] = useState('');
   const [runs, setRuns] = useState([]);
   const [runId, setRunId] = useState('');
-  const [classLabels, setClassLabels] = useState(['crack', 'mold', 'spall', 'stain']);
+  const [classLabels, setClassLabels] = useState(['crack', 'mold', 'spall', 'reject']);
   const [activeClass, setActiveClass] = useState('crack');
-  const [perClass, setPerClass] = useState(60);
+  const [perBand, setPerBand] = useState(200);
+  const [rejectBelow, setRejectBelow] = useState(0.5);
+  const [groupMode, setGroupMode] = useState('score'); // 'score' | 'domain'
   const [items, setItems] = useState([]);
   const [modelName, setModelName] = useState('facebook/dinov2-small');
   // picks: resultId -> { label, isReject }
@@ -56,7 +58,7 @@ export default function Prototype({ dbPath, onChangeDbPath, onDataChanged }) {
     setError('');
     try {
       const [res, proto] = await Promise.all([
-        api().listPrototypeCandidates({ resemiDbPath: dbPath, runId, imageRootPath: imageRoot, label: 'all', perClass }),
+        api().listPrototypeCandidates({ resemiDbPath: dbPath, runId, imageRootPath: imageRoot, label: 'all', perBand, rejectBelow }),
         api().latestPrototype({ resemiDbPath: dbPath, runId }),
       ]);
       setItems(res.items || []);
@@ -68,16 +70,18 @@ export default function Prototype({ dbPath, onChangeDbPath, onDataChanged }) {
     } finally {
       setLoading(false);
     }
-  }, [dbPath, runId, imageRoot, perClass]);
+  }, [dbPath, runId, imageRoot, perBand, rejectBelow]);
 
   const togglePick = useCallback((item, isReject) => {
+    // a box living in the reject tab is a reject pick even on the main click
+    const reject = isReject || item.label === 'reject';
     setPicks((prev) => {
       const next = { ...prev };
       const cur = next[item.resultId];
-      if (cur && cur.isReject === isReject) {
+      if (cur && cur.isReject === reject) {
         delete next[item.resultId]; // toggle off
       } else {
-        next[item.resultId] = { label: isReject ? 'reject' : item.label, isReject };
+        next[item.resultId] = { label: reject ? 'reject' : item.label, isReject: reject };
       }
       return next;
     });
@@ -96,6 +100,43 @@ export default function Prototype({ dbPath, onChangeDbPath, onDataChanged }) {
     () => items.filter((it) => it.label === activeClass),
     [items, activeClass],
   );
+
+  // Group the visible candidates either by reliability-score band (≥90%, 80–90%,
+  // …) or by step04 core cluster (= domain). Each entry: { key, title, items }.
+  const groups = useMemo(() => {
+    if (groupMode === 'domain') {
+      const m = new Map();
+      for (const it of visible) {
+        const k = it.domainIndex == null ? -1 : it.domainIndex;
+        if (!m.has(k)) m.set(k, { key: k, sort: k < 0 ? 999 : k, clusterSize: it.clusterSize || 0, items: [] });
+        m.get(k).items.push(it);
+      }
+      return [...m.values()]
+        .sort((a, b) => a.sort - b.sort)
+        .map((g) => ({
+          key: `dom-${g.key}`,
+          title: g.key < 0 ? 'Khác (ngoài cụm)' : `Domain ${g.key + 1}`,
+          sub: g.key < 0 ? '' : `cụm ${g.clusterSize} mẫu`,
+          items: g.items,
+        }));
+    }
+    // score bands: 90–100, 80–90, …, <50 lumped at 40
+    const m = new Map();
+    for (const it of visible) {
+      const pct = Math.round((it.reliabilityScore || 0) * 100);
+      const band = pct >= 90 ? 90 : pct >= 50 ? Math.floor(pct / 10) * 10 : 40;
+      if (!m.has(band)) m.set(band, []);
+      m.get(band).push(it);
+    }
+    return [...m.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([band, list]) => ({
+        key: `score-${band}`,
+        title: band === 90 ? '≥ 90%' : band === 40 ? '< 50%' : `${band}–${band + 10}%`,
+        sub: '',
+        items: list,
+      }));
+  }, [visible, groupMode]);
 
   const runStep05 = useCallback(async () => {
     const entries = Object.entries(picks);
@@ -151,7 +192,7 @@ export default function Prototype({ dbPath, onChangeDbPath, onDataChanged }) {
                 <Button onClick={async () => { const f = await api().browsePath('directory'); if (f) setImageRoot(f); }}>Browse</Button>
               </div>
             </Field>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-3">
               <Field label="DINOv2 model (phải khớp step03)">
                 <SelectControl value={modelName} onChange={(e) => setModelName(e.currentTarget.value)}>
                   <option value="facebook/dinov2-small">dinov2-small</option>
@@ -159,8 +200,11 @@ export default function Prototype({ dbPath, onChangeDbPath, onDataChanged }) {
                   <option value="facebook/dinov2-giant">dinov2-giant</option>
                 </SelectControl>
               </Field>
-              <Field label="Số ứng viên / lớp">
-                <TextInput type="number" min={10} max={400} value={perClass} onChange={(e) => setPerClass(Number(e.currentTarget.value))} />
+              <Field label="Số box / dải điểm">
+                <TextInput type="number" min={10} max={2000} value={perBand} onChange={(e) => setPerBand(Number(e.currentTarget.value))} />
+              </Field>
+              <Field label="Reject nếu điểm < (0–1)">
+                <TextInput type="number" min={0} max={1} step={0.05} value={rejectBelow} onChange={(e) => setRejectBelow(Number(e.currentTarget.value))} />
               </Field>
             </div>
             <div className="flex items-center gap-2">
@@ -200,9 +244,26 @@ export default function Prototype({ dbPath, onChangeDbPath, onDataChanged }) {
               {lab} <span className="text-[var(--accent)]">{countByClass[lab] || 0}</span>
             </button>
           ))}
-          <span className="ml-1 text-[var(--text-muted)]">reject <span className="text-[var(--accent)]">{countByClass.reject || 0}</span></span>
         </div>
         <span className="text-[var(--text-subtle)]">{visible.length} ứng viên {activeClass}</span>
+        <div className="ml-2 flex items-center gap-1">
+          <span className="text-[var(--text-subtle)]">Nhóm:</span>
+          {[['score', 'Điểm'], ['domain', 'Domain']].map(([mode, lab]) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setGroupMode(mode)}
+              className={cn(
+                'rounded-[5px] border px-2 py-1 text-[12px]',
+                groupMode === mode
+                  ? 'border-[var(--accent)] bg-[var(--active)] text-[var(--text)]'
+                  : 'border-[var(--border)] text-[var(--text-muted)] hover:bg-[var(--hover)]',
+              )}
+            >
+              {lab}
+            </button>
+          ))}
+        </div>
         <div className="ml-auto flex items-center gap-2">
           {existing && <span className="text-[var(--text-muted)]">bank hiện tại: {existing.item_count} mẫu</span>}
           <Button variant="primary" onClick={runStep05} disabled={running || Object.keys(picks).length === 0}>
@@ -214,44 +275,57 @@ export default function Prototype({ dbPath, onChangeDbPath, onDataChanged }) {
       {error && <div className="px-4 pt-2"><ErrorMessage>{error}</ErrorMessage></div>}
 
       <div className="min-h-0 flex-1 overflow-auto p-3">
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2">
-          {visible.map((it) => {
-            const pick = picks[it.resultId];
-            return (
-              <div
-                key={it.resultId}
-                className={cn(
-                  'group relative overflow-hidden rounded-[6px] border bg-[var(--surface-2)]',
-                  pick?.isReject ? 'border-[var(--danger,#ef4444)]'
-                    : pick ? 'border-[var(--accent)]'
-                      : 'border-[var(--border-muted)]',
-                )}
-              >
-                <button type="button" onClick={() => togglePick(it, false)} className="block w-full">
-                  {it.cropUri ? (
-                    <img src={it.cropUri} alt={`#${it.resultId}`} className="h-[110px] w-full object-cover" draggable={false} />
-                  ) : (
-                    <div className="flex h-[110px] items-center justify-center text-[11px] text-[var(--text-subtle)]">no crop</div>
-                  )}
-                </button>
-                <div className="flex items-center justify-between px-1.5 py-1 text-[10px]">
-                  <span className="text-[var(--text-muted)]">#{it.resultId} · {it.reliabilityScore.toFixed(2)}</span>
-                  <button
-                    type="button"
-                    onClick={() => togglePick(it, true)}
-                    className={cn('rounded px-1', pick?.isReject ? 'bg-[var(--danger,#ef4444)] text-white' : 'text-[var(--text-subtle)] hover:text-[var(--danger,#ef4444)]')}
-                    title="đánh dấu reject"
+        {groups.length === 0 && (
+          <div className="py-10 text-center text-[12px] text-[var(--text-subtle)]">Không có ứng viên cho {activeClass}.</div>
+        )}
+        {groups.map((d) => (
+          <div key={d.key} className="mb-4">
+            <div className="mb-1.5 flex items-center gap-2 text-[12px]">
+              <span className="font-semibold text-[var(--text)]">{d.title}</span>
+              {d.sub && <span className="text-[var(--text-muted)]">· {d.sub}</span>}
+              <span className="text-[var(--text-subtle)]">· {d.items.length} ứng viên</span>
+              <div className="h-px flex-1 bg-[var(--border-muted)]" />
+            </div>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2">
+              {d.items.map((it) => {
+                const pick = picks[it.resultId];
+                return (
+                  <div
+                    key={it.resultId}
+                    className={cn(
+                      'group relative overflow-hidden rounded-[6px] border bg-[var(--surface-2)]',
+                      pick?.isReject ? 'border-[var(--danger,#ef4444)]'
+                        : pick ? 'border-[var(--accent)]'
+                          : 'border-[var(--border-muted)]',
+                    )}
                   >
-                    ✕
-                  </button>
-                </div>
-                {pick && !pick.isReject && (
-                  <div className="absolute left-1 top-1 rounded bg-[var(--accent)] px-1 text-[10px] text-white">✓ {pick.label}</div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+                    <button type="button" onClick={() => togglePick(it, false)} className="block w-full">
+                      {it.cropUri ? (
+                        <img src={it.cropUri} alt={`#${it.resultId}`} loading="lazy" className="h-[110px] w-full object-cover" draggable={false} />
+                      ) : (
+                        <div className="flex h-[110px] items-center justify-center text-[11px] text-[var(--text-subtle)]">no crop</div>
+                      )}
+                    </button>
+                    <div className="flex items-center justify-between px-1.5 py-1 text-[10px]">
+                      <span className="text-[var(--text-muted)]">#{it.resultId} · {it.reliabilityScore.toFixed(2)}</span>
+                      <button
+                        type="button"
+                        onClick={() => togglePick(it, true)}
+                        className={cn('rounded px-1', pick?.isReject ? 'bg-[var(--danger,#ef4444)] text-white' : 'text-[var(--text-subtle)] hover:text-[var(--danger,#ef4444)]')}
+                        title="đánh dấu reject"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    {pick && !pick.isReject && (
+                      <div className="absolute left-1 top-1 rounded bg-[var(--accent)] px-1 text-[10px] text-white">✓ {pick.label}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
       </div>
 
       {log && (

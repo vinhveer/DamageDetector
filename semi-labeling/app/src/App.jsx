@@ -9,6 +9,7 @@ import {
   IconHistory,
   IconChecklist,
   IconChartLine,
+  IconChartPie,
   IconDownload,
   IconStar,
 } from '@tabler/icons-react';
@@ -16,6 +17,7 @@ import { IconButton } from './components/ui/index.js';
 import { cn } from './components/ui/cn.js';
 import Labeling from './features/labeling/Labeling.jsx';
 import CleanedLabels from './features/labeling/CleanedLabels.jsx';
+import Distribution from './features/labeling/Distribution.jsx';
 import Prototype from './features/labeling/Prototype.jsx';
 import RunSteps from './features/labeling/RunSteps.jsx';
 import Versions from './features/labeling/Versions.jsx';
@@ -28,6 +30,7 @@ const NAV_MAIN = [
   { label: 'Prototype', value: 'prototype', icon: IconStar },
   { label: 'Labeling', value: 'labeling', icon: IconTag },
   { label: 'Cleaned', value: 'cleaned', icon: IconChecklist },
+  { label: 'Phân bố', value: 'distribution', icon: IconChartPie },
   { label: 'Chạy bước', value: 'run-steps', icon: IconPlayerPlay },
   { label: 'Phiên bản', value: 'versions', icon: IconHistory },
   { label: 'Chỉ số', value: 'metrics', icon: IconChartLine },

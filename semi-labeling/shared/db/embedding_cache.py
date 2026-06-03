@@ -71,16 +71,23 @@ def load_embeddings(
         requested = [int(item) for item in result_ids]
         if not requested:
             return np.empty((0, dim), dtype=np.float32), [], run
-        placeholders = ", ".join("?" for _ in requested)
-        rows = conn.execute(
-            f"""
-            SELECT result_id, embedding_blob
-            FROM crop_embeddings
-            WHERE embedding_run_id = ? AND view_name = ? AND result_id IN ({placeholders})
-            """,
-            [embedding_run_id, view_name, *requested],
-        ).fetchall()
-        by_id = {int(row["result_id"]): row for row in rows}
+        # Chunk the IN(...) list: a single clause with all ids blows past
+        # SQLite's variable limit (~999) once result_ids reaches the tens of
+        # thousands ("too many SQL variables").
+        by_id: dict[int, sqlite3.Row] = {}
+        chunk_size = 900
+        for start in range(0, len(requested), chunk_size):
+            chunk = requested[start : start + chunk_size]
+            placeholders = ", ".join("?" for _ in chunk)
+            for row in conn.execute(
+                f"""
+                SELECT result_id, embedding_blob
+                FROM crop_embeddings
+                WHERE embedding_run_id = ? AND view_name = ? AND result_id IN ({placeholders})
+                """,
+                [embedding_run_id, view_name, *chunk],
+            ).fetchall():
+                by_id[int(row["result_id"])] = row
         rows = [by_id[item] for item in requested if item in by_id]
     ids = [int(row["result_id"]) for row in rows]
     vectors = [_decode_embedding(bytes(row["embedding_blob"]), dim=dim, result_id=int(row["result_id"])) for row in rows]

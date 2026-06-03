@@ -30,7 +30,7 @@ DATASET_MAP = {
 # Maps model tag → how to find its summary JSON dataset_label
 DATASET_LABEL_MAP = {
     "crack500": "crack500_test",
-    "volker": "crack_segmentation_dataset_volker_test",
+    "volker": "volker_test",
     "deepcrack": "deepcrack_test",
 }
 
@@ -41,6 +41,11 @@ MODEL_TYPES = {
     "sam_b1_lora_only": "sam_finetune",
     "sam_b2_lora_hq": "sam_finetune",
     "sam_b3_full": "sam_finetune",
+    # Full directory names
+    "unet_v1_baseline_b16_img512": "unet",
+    "unet_v2_cldice_centerline_ema_b16_img512": "unet",
+    "sam_ablation_b1_lora_only_coarse": "sam_finetune",
+    "sam_ablation_b2_lora_hq_coarse": "sam_finetune",
 }
 
 # Map model tag → actual directory name under MODEL_ROOT
@@ -51,6 +56,11 @@ MODEL_DIR_MAP = {
     "sam_b1_lora_only": "sam_b1_lora_only",
     "sam_b2_lora_hq": "sam_b2_lora_hq",
     "sam_b3_full": "sam_b3_full",
+    # Full directory names map to themselves
+    "unet_v1_baseline_b16_img512": "unet_v1_baseline_b16_img512",
+    "unet_v2_cldice_centerline_ema_b16_img512": "unet_v2_cldice_centerline_ema_b16_img512",
+    "sam_ablation_b1_lora_only_coarse": "sam_ablation_b1_lora_only_coarse",
+    "sam_ablation_b2_lora_hq_coarse": "sam_ablation_b2_lora_hq_coarse",
 }
 
 
@@ -68,22 +78,30 @@ def _iter_images(dataset_root: Path) -> list[tuple[Path, str]]:
 def _get_best_threshold(eval_root: Path, model: str, dataset: str) -> float:
     """Read best_threshold from metrics_summary.json."""
     label = DATASET_LABEL_MAP[dataset]
-    summary_path = eval_root / model / f"{label}_metrics_summary.json"
+    summary_path = eval_root / model / "eval" / f"{label}_metrics_summary.json"
     if summary_path.exists():
         data = json.loads(summary_path.read_text())
         return float(data["best_threshold"])
-    # Fallback: try to find any summary
-    for f in (eval_root / model).glob("*metrics_summary.json"):
-        data = json.loads(f.read_text())
-        if data.get("dataset_label") == label:
+    # Try with _test_sam suffix for SAM deepcrack
+    if dataset == "deepcrack":
+        summary_path_sam = eval_root / model / "eval" / f"deepcrack_test_sam_metrics_summary.json"
+        if summary_path_sam.exists():
+            data = json.loads(summary_path_sam.read_text())
             return float(data["best_threshold"])
+    # Fallback: try to find any summary
+    eval_dir = eval_root / model / "eval"
+    if eval_dir.exists():
+        for f in eval_dir.glob("*metrics_summary.json"):
+            data = json.loads(f.read_text())
+            if data.get("dataset_label") == label or (dataset == "deepcrack" and "deepcrack" in f.name):
+                return float(data["best_threshold"])
     raise FileNotFoundError(f"No summary for {model}/{dataset}")
 
 
 def predict_unet(model_path: Path, images: list[tuple[Path, str]],
                  threshold: float, output_dir: Path, device: str,
-                 tta: bool = True, gaussian_weight: bool = True,
-                 multiscale: tuple = (0.75, 1.0, 1.25)):
+                 tta: bool = False, gaussian_weight: bool = False,
+                 multiscale: tuple = None):
     """Predict binary masks. Default ON: TTA + Gaussian + Multi-scale (match eval QW)."""
     from segmentation.unet.model_io import load_model_from_checkpoint
     from segmentation.unet.predict_lib.inference import predict_probabilities

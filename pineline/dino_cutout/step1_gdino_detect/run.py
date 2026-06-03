@@ -60,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="0 = no limit. Debug: --limit 5.")
     parser.add_argument("--source-run-id", type=str, default="",
                         help="Override run_id (append into a specific run). Empty = new timestamp.")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Skip images already present in the DB for the selected run_id.")
     args = parser.parse_args(argv)
 
     ensure_dirs()
@@ -86,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         max_box_area_ratio=args.max_box_area_ratio,
         limit=args.limit,
         source_run_id=(args.source_run_id or None),
+        skip_existing=args.skip_existing,
     )
     print(res, flush=True)
     return 0

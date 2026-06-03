@@ -312,6 +312,7 @@ export const listCleaned = (payload = {}) => {
   const imageRoot = String(payload.imageRootPath || '').trim();
   const finalLabel = String(payload.finalLabel || '').trim();
   const decisionType = String(payload.decisionType || '').trim();
+  const limit = Math.max(0, Number(payload.limit) || 0); // 0 = all
 
   const db = connectRo(dbPath);
   try {
@@ -319,13 +320,14 @@ export const listCleaned = (payload = {}) => {
     const params = [runId];
     if (finalLabel && finalLabel !== 'all') { clauses.push('final_label = ?'); params.push(finalLabel); }
     if (decisionType && decisionType !== 'all') { clauses.push('decision_type = ?'); params.push(decisionType); }
+    const limitSql = limit > 0 ? ` LIMIT ${limit}` : '';
     const rows = db.prepare(`
       SELECT result_id, image_rel_path, crop_path, final_label, export_label,
              decision_type, reliability_score, reason_codes_json,
              x1, y1, x2, y2, self_training_run_id, decision_policy_run_id
       FROM cleaned_labels
       WHERE ${clauses.join(' AND ')}
-      ORDER BY result_id ASC
+      ORDER BY result_id ASC${limitSql}
     `).all(...params);
 
     const items = rows.map((row) => {
@@ -354,6 +356,28 @@ export const listCleaned = (payload = {}) => {
     // total = all cleaned rows for the run (ignoring filters)
     const total = db.prepare('SELECT COUNT(*) n FROM cleaned_labels WHERE run_id = ?').get(runId).n;
     return { items, total, filtered: items.length };
+  } finally {
+    db.close();
+  }
+};
+
+// ── Distribution: per-class % + decision-type breakdown of cleaned_labels ───
+export const cleanedDistribution = (payload = {}) => {
+  const dbPath = cleanPath(payload.resemiDbPath, 'resemiDbPath');
+  const runId = cleanPath(payload.runId, 'runId');
+  const db = connectRo(dbPath);
+  try {
+    const labelRows = db.prepare(
+      'SELECT final_label AS k, COUNT(*) n FROM cleaned_labels WHERE run_id = ? GROUP BY final_label ORDER BY n DESC',
+    ).all(runId);
+    const typeRows = db.prepare(
+      'SELECT decision_type AS k, COUNT(*) n FROM cleaned_labels WHERE run_id = ? GROUP BY decision_type ORDER BY n DESC',
+    ).all(runId);
+    const total = labelRows.reduce((s, r) => s + Number(r.n || 0), 0);
+    const shape = (rows) => rows.map((r) => ({
+      key: String(r.k || ''), count: Number(r.n || 0), pct: total ? Number(r.n || 0) / total : 0,
+    }));
+    return { total, byLabel: shape(labelRows), byDecisionType: shape(typeRows) };
   } finally {
     db.close();
   }
@@ -576,8 +600,13 @@ export const listPrototypeCandidates = (payload = {}) => {
   const dbPath = cleanPath(payload.resemiDbPath, 'resemiDbPath');
   const runId = cleanPath(payload.runId, 'runId');
   const imageRoot = String(payload.imageRootPath || '').trim();
-  const label = String(payload.label || '').trim();
-  const perClass = Math.max(1, Math.min(400, Number(payload.perClass) || 60));
+  // max boxes shown PER score band (per tab) — reliability_score saturates at
+  // 1.0 (tens of thousands of boxes), so a plain top-N would only ever show the
+  // 100% band. Stratifying by band guarantees every band has samples to browse.
+  const perBand = Math.max(10, Math.min(2000, Number(payload.perBand) || 200));
+  // boxes scoring below this reliability are pooled into the "reject" tab
+  let rejectBelow = Number(payload.rejectBelow);
+  if (!Number.isFinite(rejectBelow)) rejectBelow = 0.5;
 
   const db = connectRo(dbPath);
   try {
@@ -588,35 +617,84 @@ export const listPrototypeCandidates = (payload = {}) => {
     `).get(runId);
     const embRunId = embRow ? embRow.embedding_run_id : '';
 
-    const labelClause = label && label !== 'all' ? 'AND sd.final_label = ?' : '';
-    const params = [embRunId, runId, runId];
-    if (label && label !== 'all') params.push(label);
+    // latest step04 core-mining run (optional): clusters are the visual domains.
+    const coreRow = db.prepare(`
+      SELECT core_mining_run_id FROM core_mining_runs
+      WHERE run_id = ? ORDER BY created_at_utc DESC, rowid DESC LIMIT 1
+    `).get(runId);
+    const coreRunId = coreRow ? coreRow.core_mining_run_id : '';
 
-    // rank by reliability desc within each class, cap perClass via window-less
-    // approach: fetch all qualifying then trim per label in JS.
+    // Core-cluster membership is loaded SEPARATELY (cheap: ~tens of k rows) and
+    // attached in JS. Joining it inside the big candidate query was catastrophic
+    // (un-indexed LEFT JOIN -> minutes) — that was the real cause of slow loads.
+    const sizeByCluster = new Map();
+    const clusterByResult = new Map(); // result_id -> { clusterId, similarity }
+    if (coreRunId) {
+      for (const r of db.prepare('SELECT core_cluster_id, member_count FROM core_clusters WHERE core_mining_run_id = ?').all(coreRunId)) {
+        sizeByCluster.set(r.core_cluster_id, Number(r.member_count || 0));
+      }
+      for (const r of db.prepare('SELECT result_id, core_cluster_id, similarity FROM core_cluster_members WHERE core_mining_run_id = ?').all(coreRunId)) {
+        clusterByResult.set(Number(r.result_id), { clusterId: r.core_cluster_id, similarity: Number(r.similarity || 0) });
+      }
+    }
+
+    // Effective label: crack/mold/spall when reliable, else 'reject'. Ranking is
+    // done IN SQL (window fn) and capped PER score band so every band has samples
+    // to browse (reliability_score saturates at 1.0; a plain top-N would only
+    // ever fill the 100% band). No core join here -> fast.
     const rows = db.prepare(`
-      SELECT sd.result_id, sd.final_label, sd.reliability_score, sd.model_agreement,
-             cv.crop_path, cv.image_rel_path, cv.x1, cv.y1, cv.x2, cv.y2
-      FROM semantic_decisions sd
-      JOIN crop_views cv ON cv.run_id = sd.run_id AND cv.result_id = sd.result_id AND cv.view_name = 'tight'
-      JOIN crop_embeddings ce ON ce.embedding_run_id = ? AND ce.result_id = sd.result_id AND ce.view_name = 'tight'
-      WHERE sd.run_id = ?
-        AND sd.final_label IN ('crack','mold','spall','stain')
-        AND sd.run_id = ?
-        ${labelClause}
-      ORDER BY sd.final_label ASC, sd.reliability_score DESC, sd.result_id ASC
-    `).all(...params);
+      WITH cand AS (
+        SELECT sd.result_id, sd.final_label, sd.reliability_score, sd.model_agreement,
+               cv.crop_path, cv.image_rel_path, cv.x1, cv.y1, cv.x2, cv.y2,
+               CASE WHEN sd.reliability_score < ? THEN 'reject' ELSE sd.final_label END AS eff_label,
+               CASE WHEN sd.reliability_score >= 0.9 THEN 90
+                    WHEN sd.reliability_score >= 0.5 THEN CAST(sd.reliability_score * 10 AS INT) * 10
+                    ELSE 40 END AS band
+        FROM semantic_decisions sd
+        JOIN crop_views cv ON cv.run_id = sd.run_id AND cv.result_id = sd.result_id AND cv.view_name = 'tight'
+        JOIN crop_embeddings ce ON ce.embedding_run_id = ? AND ce.result_id = sd.result_id AND ce.view_name = 'tight'
+        WHERE sd.run_id = ? AND sd.final_label IN ('crack','mold','spall')
+      ),
+      ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY eff_label, band
+          ORDER BY reliability_score DESC, result_id ASC
+        ) AS rn
+        FROM cand
+      )
+      SELECT * FROM ranked WHERE rn <= ? ORDER BY eff_label ASC, band DESC, rn ASC
+    `).all(rejectBelow, embRunId, runId, perBand);
 
-    const byLabel = {};
-    const items = [];
-    for (const row of rows) {
-      const lab = String(row.final_label || '');
-      byLabel[lab] = (byLabel[lab] || 0) + 1;
-      if (byLabel[lab] > perClass) continue;
+    // Per-(effective)label domain index over the clusters that actually appear
+    // among the returned candidates; clusters ordered by member_count desc.
+    const domainIndexByCluster = new Map();
+    const domains = {};
+    {
+      const byLabelClusters = new Map();
+      for (const row of rows) {
+        const info = clusterByResult.get(Number(row.result_id));
+        if (!info) continue;
+        const lab = String(row.eff_label || '');
+        if (!byLabelClusters.has(lab)) byLabelClusters.set(lab, new Set());
+        byLabelClusters.get(lab).add(info.clusterId);
+      }
+      for (const [lab, set] of byLabelClusters) {
+        const ordered = [...set].sort((a, b) => (sizeByCluster.get(b) || 0) - (sizeByCluster.get(a) || 0));
+        domains[lab] = ordered.map((cid, idx) => {
+          domainIndexByCluster.set(cid, idx);
+          return { clusterId: String(cid), domainIndex: idx, size: sizeByCluster.get(cid) || 0 };
+        });
+      }
+    }
+
+    const items = rows.map((row) => {
       const cropOk = row.crop_path && fs.existsSync(row.crop_path);
-      items.push({
+      const info = clusterByResult.get(Number(row.result_id));
+      const cid = info ? info.clusterId : null;
+      return {
         resultId: Number(row.result_id),
-        label: lab,
+        label: String(row.eff_label || ''),
+        predictedLabel: String(row.final_label || ''),
         reliabilityScore: Number(row.reliability_score || 0),
         modelAgreement: Number(row.model_agreement || 0),
         cropUri: cropOk ? fileUri(row.crop_path) : '',
@@ -624,9 +702,16 @@ export const listPrototypeCandidates = (payload = {}) => {
         box: row.x1 == null ? null : {
           x1: Number(row.x1), y1: Number(row.y1), x2: Number(row.x2), y2: Number(row.y2),
         },
-      });
-    }
-    return { items, labels: ['crack', 'mold', 'spall', 'stain'], embeddingRunId: embRunId };
+        clusterId: cid == null ? '' : String(cid),
+        domainIndex: cid == null ? null : (domainIndexByCluster.get(cid) ?? null),
+        clusterSize: cid == null ? 0 : (sizeByCluster.get(cid) || 0),
+        centroidSimilarity: info ? info.similarity : null,
+      };
+    });
+    return {
+      items, labels: ['crack', 'mold', 'spall', 'reject'],
+      embeddingRunId: embRunId, coreMiningRunId: coreRunId, domains, rejectBelow, perBand,
+    };
   } finally {
     db.close();
   }

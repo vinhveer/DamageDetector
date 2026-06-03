@@ -7,6 +7,7 @@ export {
   listSessions,
   listSelfTrainingRuns,
   listCleaned,
+  cleanedDistribution,
   updateCleanedLabel,
   commitCorrections,
   getSessionDecisions,

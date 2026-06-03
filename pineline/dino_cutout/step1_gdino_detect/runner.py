@@ -117,6 +117,7 @@ def run_step1(
     max_box_area_ratio: float = 0.50,
     limit: int = 0,
     source_run_id: str | None = None,
+    skip_existing: bool = False,
     write_overlays: bool = True,
     log: Callable[[str], None] | None = None,
     stop_checker: Callable[[], bool] | None = None,
@@ -150,12 +151,23 @@ def run_step1(
     summary_rows: list[dict] = []
     image_rows: list[dict] = []
     detection_count = 0
+    stored_image_count = 0
+    stored_detection_count = 0
 
     conn = sqlite3.connect(str(db_path))
     service = get_dino_service()
     try:
         ensure_schema(conn)
         insert_prompt_groups(conn, run_id, prompt_groups)
+        existing_image_ids: set[str] = set()
+        if skip_existing:
+            existing_image_ids = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT image_id FROM images WHERE run_id = ?",
+                    (run_id,),
+                ).fetchall()
+            }
 
         for idx, img_path in enumerate(images, start=1):
             if stop_checker is not None and stop_checker():
@@ -164,6 +176,9 @@ def run_step1(
 
             rel_path = str(img_path.relative_to(input_dir))
             image_id = _image_id_for(rel_path)
+            if image_id in existing_image_ids:
+                log(f"[{idx}/{len(images)}] {rel_path}: already in DB; skipped.")
+                continue
             rgb_path = rgb_dir / f"{image_id}.png"
 
             # 1. RGBA -> RGB, cropped to the valid (alpha>0) bbox so empty
@@ -296,6 +311,15 @@ def run_step1(
                 f"matched={len(rows)} drop_large={drop_too_large} (image size {w}x{h})"
             )
 
+        stored_image_count = conn.execute(
+            "SELECT COUNT(*) FROM images WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()[0]
+        stored_detection_count = conn.execute(
+            "SELECT COUNT(*) FROM detections WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()[0]
+
         insert_run_info(
             conn,
             {
@@ -308,8 +332,8 @@ def run_step1(
                 "text_threshold": float(text_threshold),
                 "tile_scales": json.dumps(list(tile_scales)),
                 "max_dets": int(max_dets),
-                "image_count": len(image_rows),
-                "detection_count": detection_count,
+                "image_count": int(stored_image_count),
+                "detection_count": int(stored_detection_count),
             },
         )
     finally:
@@ -321,14 +345,35 @@ def run_step1(
 
     if summary_csv is not None:
         summary_csv.parent.mkdir(parents=True, exist_ok=True)
+        if skip_existing:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                summary_rows = [
+                    dict(zip(_SUMMARY_FIELDS, row))
+                    for row in conn.execute(
+                        """
+                        SELECT i.image_rel_path, d.image_id, d.det_idx,
+                               d.group_name, d.label, d.query_label,
+                               d.x1, d.y1, d.x2, d.y2, d.score
+                        FROM detections d
+                        JOIN images i
+                          ON i.run_id = d.run_id AND i.image_id = d.image_id
+                        WHERE d.run_id = ?
+                        ORDER BY i.image_rel_path, d.det_idx
+                        """,
+                        (run_id,),
+                    ).fetchall()
+                ]
+            finally:
+                conn.close()
         with summary_csv.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=_SUMMARY_FIELDS)
             writer.writeheader()
             writer.writerows(summary_rows)
 
     log(
-        f"step1 done. run_id={run_id} images={len(image_rows)} "
-        f"dets={detection_count} db={db_path}"
+        f"step1 done. run_id={run_id} images={stored_image_count} "
+        f"dets={stored_detection_count} db={db_path}"
     )
     return {
         "run_id": run_id,
@@ -336,6 +381,6 @@ def run_step1(
         "rgb_dir": str(rgb_dir),
         "overlay_dir": str(overlay_dir) if (write_overlays and overlay_dir) else None,
         "summary_csv": str(summary_csv) if summary_csv is not None else None,
-        "image_count": len(image_rows),
-        "detection_count": detection_count,
+        "image_count": stored_image_count,
+        "detection_count": stored_detection_count,
     }
