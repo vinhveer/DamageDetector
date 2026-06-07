@@ -54,7 +54,9 @@ def decide(detection: SourceDetection, config: DecisionConfig, agreement: Semant
     detector_component = 1.0 if detector_agrees else 0.0
     openclip_agrees = top_label == openclip_top_label
     openclip_component = 1.0 if openclip_agrees else 0.0
-    reliability = (0.45 * top_score) + (0.25 * min(1.0, margin / max(config.strong_margin_threshold, 1e-6))) + (0.20 * detector_component) + (0.10 * openclip_component)
+    # Detector prompt is the seed label.  OpenCLIP score/margin is only an
+    # auxiliary hint and must not dominate initial reliability.
+    reliability = (0.25 * top_score) + (0.15 * min(1.0, margin / max(config.strong_margin_threshold, 1e-6))) + (0.45 * detector_component) + (0.05 * openclip_component)
     if not detector_agrees:
         reliability -= float(config.detector_conflict_penalty)
     agreement_ratio = 1.0 if agreement is None else float(agreement.agreement_ratio)

@@ -4,22 +4,42 @@ from __future__ import annotations
 #   positive → điểm DƯƠNG cho SAM (thuộc nhà)
 #   negative → điểm ÂM cho SAM   (KHÔNG thuộc nhà: cửa sổ / cửa đi)
 DEFAULT_POSITIVE_QUERIES: tuple[str, ...] = (
-    "house",
-    "building",
-    "residential building",
-    "facade",
+    "whole house",
+    "entire house",
+    "house facade",
+    "building facade",
+    "residential building facade",
+    "front of house",
+    "exterior wall",
+    "concrete wall facade",
 )
 
 DEFAULT_NEGATIVE_QUERIES: tuple[str, ...] = (
     "window",
-    "door",
+    "windows",
     "glass window",
+    "window frame",
+    "window opening",
+    "door",
+    "doors",
     "glass door",
+    "door frame",
+    "door opening",
+    "entrance door",
+    "balcony door",
+    "glass pane",
 )
 
 # Từ khoá phân loại một GDINO label về vai trò negative. Bất kỳ label nào khớp
 # (substring) sẽ được xem là negative; còn lại là positive (house).
-_NEGATIVE_KEYWORDS: tuple[str, ...] = ("window", "door")
+_NEGATIVE_KEYWORDS: tuple[str, ...] = (
+    "window",
+    "door",
+    "glass",
+    "entrance",
+    "opening",
+    "pane",
+)
 
 
 def normalize_queries(values, fallback: tuple[str, ...]) -> list[str]:

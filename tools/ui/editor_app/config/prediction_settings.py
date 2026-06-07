@@ -42,6 +42,11 @@ DEFAULT_EDITOR_SETTINGS = {
     "dino_parent_contain_threshold": 0.7,
     "dino_recursive_min_box_px": 48,
     "dino_recursive_max_depth": 3,
+    "dino_tile_batch_size": 2,
+    "dino_service_workers": 1,
+    "dino_service_queue_size": 2,
+    "dino_service_batch_size": 1,
+    "dino_service_device_ids": "",
     "predict_use_tiled_dino": True,
     "predict_tile_trigger_px": 512,
     "device": "auto",
@@ -95,6 +100,16 @@ def migrate_editor_settings(payload: dict | None) -> dict:
         settings["predict_use_tiled_dino"] = True
     if "predict_tile_trigger_px" not in settings:
         settings["predict_tile_trigger_px"] = 512
+    if "dino_tile_batch_size" not in settings:
+        settings["dino_tile_batch_size"] = 2
+    if "dino_service_workers" not in settings:
+        settings["dino_service_workers"] = 1
+    if "dino_service_queue_size" not in settings:
+        settings["dino_service_queue_size"] = 2
+    if "dino_service_batch_size" not in settings:
+        settings["dino_service_batch_size"] = 1
+    if "dino_service_device_ids" not in settings:
+        settings["dino_service_device_ids"] = ""
     if "isolate_use_tiled_dino" not in settings:
         settings["isolate_use_tiled_dino"] = False
     if "isolate_tile_trigger_px" not in settings:

@@ -18,26 +18,72 @@ except Exception:  # pragma: no cover - exercised only on machines without PySid
 
 
 PROTOTYPE_CANDIDATE_SQL = """
-WITH cand AS (
+WITH damage_base AS (
   SELECT sd.result_id, sd.final_label, sd.reliability_score, sd.model_agreement,
          cv.crop_path, cv.image_rel_path, cv.x1, cv.y1, cv.x2, cv.y2,
-         CASE WHEN sd.reliability_score < ? THEN 'reject' ELSE sd.final_label END AS eff_label,
-         CASE WHEN sd.reliability_score >= 0.9 THEN 90
-              WHEN sd.reliability_score >= 0.5 THEN CAST(sd.reliability_score * 10 AS INT) * 10
-              ELSE 40 END AS band
+         cm.core_cluster_id, cm.similarity,
+         sd.final_label AS eff_label
   FROM semantic_decisions sd
   JOIN crop_views cv ON cv.run_id = sd.run_id AND cv.result_id = sd.result_id AND cv.view_name = 'tight'
   JOIN crop_embeddings ce ON ce.embedding_run_id = ? AND ce.result_id = sd.result_id AND ce.view_name = 'tight'
+  JOIN core_cluster_members cm ON cm.run_id = sd.run_id AND cm.result_id = sd.result_id
   WHERE sd.run_id = ? AND sd.final_label IN ('crack','mold','spall')
 ),
-ranked AS (
+damage_image_ranked AS (
   SELECT *, ROW_NUMBER() OVER (
-    PARTITION BY eff_label, band
-    ORDER BY reliability_score DESC, result_id ASC
-  ) AS rn
-  FROM cand
+    PARTITION BY eff_label, core_cluster_id, image_rel_path
+    ORDER BY similarity DESC, result_id ASC
+  ) AS rn_per_image
+  FROM damage_base
+),
+damage_ranked AS (
+  SELECT *, ROW_NUMBER() OVER (
+    PARTITION BY eff_label, core_cluster_id
+    ORDER BY similarity DESC, result_id ASC
+  ) AS rn_per_domain
+  FROM damage_image_ranked
+  WHERE rn_per_image <= 2
+),
+reject_base AS (
+  SELECT sd.result_id, sd.final_label, sd.reliability_score, sd.model_agreement,
+         cv.crop_path, cv.image_rel_path, cv.x1, cv.y1, cv.x2, cv.y2,
+         NULL AS core_cluster_id, NULL AS similarity,
+         'reject' AS eff_label
+  FROM semantic_decisions sd
+  JOIN crop_views cv ON cv.run_id = sd.run_id AND cv.result_id = sd.result_id AND cv.view_name = 'tight'
+  JOIN crop_embeddings ce ON ce.embedding_run_id = ? AND ce.result_id = sd.result_id AND ce.view_name = 'tight'
+  WHERE sd.run_id = ?
+    AND sd.final_label IN ('crack','mold','spall')
+    AND (
+      sd.decision_type IN ('suspect','reject','relabel_candidate')
+      OR sd.reliability_score < 0.50
+      OR COALESCE(sd.reason_codes_json, '') LIKE '%conflict%'
+      OR COALESCE(sd.reason_codes_json, '') LIKE '%low_margin%'
+    )
+),
+reject_image_ranked AS (
+  SELECT *, ROW_NUMBER() OVER (
+    PARTITION BY image_rel_path
+    ORDER BY result_id ASC
+  ) AS rn_per_image
+  FROM reject_base
+),
+reject_ranked AS (
+  SELECT *, ROW_NUMBER() OVER (
+    ORDER BY image_rel_path ASC, result_id ASC
+  ) AS rn_reject
+  FROM reject_image_ranked
+  WHERE rn_per_image <= 2
 )
-SELECT * FROM ranked WHERE rn <= ? ORDER BY eff_label ASC, band DESC, rn ASC
+SELECT result_id, final_label, reliability_score, model_agreement, crop_path, image_rel_path,
+       x1, y1, x2, y2, eff_label
+FROM damage_ranked
+UNION ALL
+SELECT result_id, final_label, reliability_score, model_agreement, crop_path, image_rel_path,
+       x1, y1, x2, y2, eff_label
+FROM reject_ranked
+WHERE rn_reject <= ?
+ORDER BY eff_label ASC, result_id ASC
 """
 
 
@@ -159,6 +205,8 @@ def list_queue(
     image_root: str,
     queue_type: str = "",
     sample_ratio: float = 0.0,
+    limit: int = 0,
+    offset: int = 0,
 ) -> dict[str, Any]:
     conn = connect_ro(db_path)
     try:
@@ -182,6 +230,10 @@ def list_queue(
         params: list[Any] = [run_id, latest_clf_id, latest_st_id, run_id]
         if type_clause:
             params.append(queue_type)
+        safe_limit = max(0, int(limit or 0))
+        safe_offset = max(0, int(offset or 0))
+        limit_sql = f" LIMIT {safe_limit}" if safe_limit > 0 else ""
+        offset_sql = f" OFFSET {safe_offset}" if safe_limit > 0 and safe_offset > 0 else ""
         rows = conn.execute(
             f"""
             SELECT q.result_id, q.image_rel_path, q.crop_path, q.initial_label, q.suggested_label,
@@ -201,10 +253,20 @@ def list_queue(
             LEFT JOIN self_training_promotions stp
               ON stp.self_training_run_id = ? AND stp.result_id = q.result_id AND stp.action = 'defer_review'
             WHERE q.run_id = ? {type_clause}
-            ORDER BY q.reliability_score ASC, q.result_id ASC
+            ORDER BY q.reliability_score ASC, q.result_id ASC{limit_sql}{offset_sql}
             """,
             params,
         ).fetchall()
+
+        count_params: list[Any] = [run_id]
+        if type_clause:
+            count_params.append(queue_type)
+        filtered_total = int(
+            conn.execute(
+                f"SELECT COUNT(*) n FROM review_queue q WHERE q.run_id = ? {type_clause}",
+                count_params,
+            ).fetchone()["n"]
+        )
 
         selected_ids: set[int] | None = None
         ratio = float(sample_ratio or 0)
@@ -282,8 +344,10 @@ def list_queue(
             "items": items,
             "counts": counts,
             "total": len(items),
-            "queue_total": len(all_items),
+            "queue_total": filtered_total,
             "sampled": selected_ids is not None,
+            "limit": safe_limit,
+            "offset": safe_offset,
         }
     finally:
         conn.close()
@@ -392,6 +456,98 @@ def list_image_boxes(db_path: str | Path, run_id: str, image_rel_path: str) -> l
         conn.close()
 
 
+def list_image_overview(
+    db_path: str | Path,
+    run_id: str,
+    image_root: str,
+    source: str = "all",
+    limit: int = 1000,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Image-level QA rows with all boxes per image.
+
+    source: all | cleaned | review.  The returned boxes are lightweight dicts
+    compatible with BoxImage.set_overlay_boxes().
+    """
+    mode = str(source or "all").strip().lower()
+    if mode not in {"all", "cleaned", "review"}:
+        mode = "all"
+    safe_limit = max(1, min(5000, int(limit or 1000)))
+    safe_offset = max(0, int(offset or 0))
+    conn = connect_ro(db_path)
+    try:
+        cleaned_sql = """
+            SELECT image_rel_path, result_id, final_label AS label, reliability_score, x1, y1, x2, y2, 'cleaned' AS source
+            FROM cleaned_labels WHERE run_id = ? AND x1 IS NOT NULL
+        """
+        review_sql = """
+            SELECT q.image_rel_path, q.result_id, COALESCE(q.suggested_label, q.initial_label, '') AS label,
+                   q.reliability_score, cv.x1, cv.y1, cv.x2, cv.y2, 'review' AS source
+            FROM review_queue q
+            LEFT JOIN crop_views cv ON cv.run_id = q.run_id AND cv.result_id = q.result_id AND cv.view_name = 'tight'
+            WHERE q.run_id = ? AND cv.x1 IS NOT NULL
+        """
+        if mode == "cleaned":
+            union_sql = cleaned_sql
+            params: list[Any] = [run_id]
+        elif mode == "review":
+            union_sql = review_sql
+            params = [run_id]
+        else:
+            union_sql = f"{cleaned_sql} UNION ALL {review_sql}"
+            params = [run_id, run_id]
+
+        total = int(conn.execute(f"SELECT COUNT(*) n FROM (SELECT image_rel_path FROM ({union_sql}) GROUP BY image_rel_path)", params).fetchone()["n"])
+        image_rows = conn.execute(
+            f"""
+            SELECT image_rel_path, COUNT(*) AS box_count,
+                   SUM(CASE WHEN source='cleaned' THEN 1 ELSE 0 END) AS cleaned_count,
+                   SUM(CASE WHEN source='review' THEN 1 ELSE 0 END) AS review_count
+            FROM ({union_sql})
+            GROUP BY image_rel_path
+            ORDER BY box_count DESC, image_rel_path ASC
+            LIMIT {safe_limit} OFFSET {safe_offset}
+            """,
+            params,
+        ).fetchall()
+        rels = [str(row["image_rel_path"] or "") for row in image_rows]
+        boxes_by_rel: dict[str, list[dict[str, Any]]] = {rel: [] for rel in rels}
+        if rels:
+            placeholders = ",".join("?" for _ in rels)
+            box_rows = conn.execute(
+                f"""
+                SELECT * FROM ({union_sql})
+                WHERE image_rel_path IN ({placeholders})
+                ORDER BY image_rel_path ASC, source ASC, reliability_score ASC, result_id ASC
+                """,
+                [*params, *rels],
+            ).fetchall()
+            for row in box_rows:
+                rel = str(row["image_rel_path"] or "")
+                boxes_by_rel.setdefault(rel, []).append({
+                    "result_id": int(row["result_id"]),
+                    "label": str(row["label"] or ""),
+                    "source": str(row["source"] or ""),
+                    "score": float(row["reliability_score"] or 0),
+                    "box": (float(row["x1"]), float(row["y1"]), float(row["x2"]), float(row["y2"])),
+                })
+        items = []
+        for row in image_rows:
+            rel = str(row["image_rel_path"] or "")
+            items.append({
+                "image_rel_path": rel,
+                "image_path": _resolve_image_path(image_root, rel),
+                "image_uri": _file_uri(_resolve_image_path(image_root, rel)),
+                "box_count": int(row["box_count"] or 0),
+                "cleaned_count": int(row["cleaned_count"] or 0),
+                "review_count": int(row["review_count"] or 0),
+                "boxes": boxes_by_rel.get(rel, []),
+            })
+        return {"items": items, "total": total, "limit": safe_limit, "offset": safe_offset, "source": mode}
+    finally:
+        conn.close()
+
+
 def cleaned_distribution(db_path: str | Path, run_id: str) -> ClassDist:
     conn = connect_ro(db_path)
     try:
@@ -487,7 +643,8 @@ def list_prototype_candidates(
 ) -> dict[str, Any]:
     conn = connect_ro(db_path)
     try:
-        safe_per_band = max(10, min(2000, int(per_band or 200)))
+        safe_per_domain = max(5, min(300, int(per_band or 80)))
+        safe_reject_limit = max(50, min(2000, safe_per_domain * 8))
         safe_reject = float(reject_below) if reject_below is not None else 0.5
         emb_row = conn.execute(
             """
@@ -528,11 +685,14 @@ def list_prototype_candidates(
                 }
 
         rows = conn.execute(
-            PROTOTYPE_CANDIDATE_SQL, (safe_reject, emb_run_id, run_id, safe_per_band)
+            PROTOTYPE_CANDIDATE_SQL,
+            (emb_run_id, run_id, emb_run_id, run_id, safe_reject_limit),
         ).fetchall()
 
         by_label_clusters: dict[str, set[Any]] = {}
         for row in rows:
+            if str(row["eff_label"] or "") == "reject":
+                continue
             info = cluster_by_result.get(int(row["result_id"]))
             if info is None:
                 continue
@@ -552,7 +712,8 @@ def list_prototype_candidates(
         items: list[Candidate] = []
         for row in rows:
             crop_path = _resolve_crop_path(row["crop_path"])
-            info = cluster_by_result.get(int(row["result_id"]))
+            is_reject_candidate = str(row["eff_label"] or "") == "reject"
+            info = None if is_reject_candidate else cluster_by_result.get(int(row["result_id"]))
             cid = info["cluster_id"] if info else None
             items.append(
                 Candidate(
@@ -568,6 +729,7 @@ def list_prototype_candidates(
                     cluster_size=0 if cid is None else size_by_cluster.get(cid, 0),
                     centroid_similarity=None if info is None else float(info["similarity"]),
                     model_agreement=float(row["model_agreement"] or 0),
+                    image_rel_path=str(row["image_rel_path"] or ""),
                 )
             )
         return {
@@ -577,7 +739,8 @@ def list_prototype_candidates(
             "coreMiningRunId": core_run_id,
             "domains": domains,
             "rejectBelow": safe_reject,
-            "perBand": safe_per_band,
+            "perDomain": safe_per_domain,
+            "rejectLimit": safe_reject_limit,
         }
     finally:
         conn.close()

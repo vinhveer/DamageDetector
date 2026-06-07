@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 
 from .models import Box, Detection, Tile
@@ -25,6 +26,24 @@ def box_iou(a: Box, b: Box) -> float:
     inter = iw * ih
     union = float(a.area) + float(b.area) - inter
     return inter / union if union > 0.0 else 0.0
+
+
+def box_intersection(a: Box, b: Box) -> float:
+    iw = max(0.0, min(float(a.x2), float(b.x2)) - max(float(a.x1), float(b.x1)))
+    ih = max(0.0, min(float(a.y2), float(b.y2)) - max(float(a.y1), float(b.y1)))
+    return iw * ih
+
+
+def box_containment(a: Box, b: Box) -> float:
+    """Intersection over the smaller box area."""
+    small = min(float(a.area), float(b.area))
+    return box_intersection(a, b) / small if small > 0.0 else 0.0
+
+
+def box_area_ratio(a: Box, b: Box) -> float:
+    large = max(float(a.area), float(b.area))
+    small = min(float(a.area), float(b.area))
+    return small / large if large > 0.0 else 0.0
 
 
 def expand_box(box: Box, *, ratio: float, width: int, height: int) -> Box | None:
@@ -68,6 +87,161 @@ def nms_detections(detections: list[Detection], *, iou_threshold: float, max_det
         if int(max_dets) > 0 and len(kept) >= int(max_dets):
             break
     return kept
+
+
+@dataclass(frozen=True)
+class AdaptiveDuplicateConfig:
+    iou_threshold: float = 0.0
+    containment_threshold: float = 0.0
+    min_area_ratio: float = 0.0
+
+
+def adaptive_duplicate_thresholds(detections: list[Detection], config: AdaptiveDuplicateConfig) -> tuple[float, float, float]:
+    """Infer overlap thresholds from the current image instead of relying only
+    on fixed constants.  Explicit positive config values override inference.
+    """
+    ious: list[float] = []
+    contains: list[float] = []
+    ratios: list[float] = []
+    for idx, det in enumerate(detections):
+        for other in detections[idx + 1:]:
+            iou_value = box_iou(det.box, other.box)
+            contain_value = box_containment(det.box, other.box)
+            ratio_value = box_area_ratio(det.box, other.box)
+            if iou_value > 0.02:
+                ious.append(iou_value)
+            if contain_value > 0.50:
+                contains.append(contain_value)
+                ratios.append(ratio_value)
+
+    if float(config.iou_threshold) > 0.0:
+        iou_threshold = float(config.iou_threshold)
+    elif ious:
+        iou_threshold = _clip(_quantile(ious, 0.72), 0.38, 0.62)
+    else:
+        iou_threshold = 0.50
+
+    if float(config.containment_threshold) > 0.0:
+        containment_threshold = float(config.containment_threshold)
+    elif contains:
+        containment_threshold = _clip(_quantile(contains, 0.80), 0.82, 0.94)
+    else:
+        containment_threshold = 0.88
+
+    if float(config.min_area_ratio) > 0.0:
+        min_area_ratio = float(config.min_area_ratio)
+    elif ratios:
+        min_area_ratio = _clip(_quantile(ratios, 0.35), 0.25, 0.55)
+    else:
+        min_area_ratio = 0.35
+    return iou_threshold, containment_threshold, min_area_ratio
+
+
+def adaptive_duplicate_filter(
+    detections: list[Detection],
+    *,
+    image_width: int,
+    image_height: int,
+    config: AdaptiveDuplicateConfig | None = None,
+    max_dets_per_class: int = 0,
+) -> list[Detection]:
+    """Remove duplicate GDINO boxes across prompts/classes.
+
+    This is intentionally conservative: high-overlap boxes compete by a visual
+    quality prior (score + class/shape fit + source precision + size prior),
+    while small boxes inside much larger boxes are usually kept because they may
+    be real fine defects inside broader damage/stain regions.
+    """
+    if len(detections) <= 1:
+        return list(detections)
+    cfg = config or AdaptiveDuplicateConfig()
+    iou_threshold, containment_threshold, min_area_ratio = adaptive_duplicate_thresholds(detections, cfg)
+    image_area = max(1.0, float(image_width) * float(image_height))
+    ordered = sorted(
+        detections,
+        key=lambda item: _duplicate_quality(item, image_area=image_area),
+        reverse=True,
+    )
+    kept: list[Detection] = []
+    kept_by_label: dict[str, int] = {}
+    for det in ordered:
+        label = str(det.label or det.prompt_key or "")
+        if int(max_dets_per_class) > 0 and kept_by_label.get(label, 0) >= int(max_dets_per_class):
+            continue
+        duplicate_of: Detection | None = None
+        duplicate_reason = ""
+        for existing in kept:
+            iou_value = box_iou(det.box, existing.box)
+            contain_value = box_containment(det.box, existing.box)
+            ratio_value = box_area_ratio(det.box, existing.box)
+            same_label = str(det.label) == str(existing.label)
+            if same_label and (iou_value >= iou_threshold or (contain_value >= containment_threshold and ratio_value >= min_area_ratio)):
+                duplicate_of = existing
+                duplicate_reason = "same_label_overlap"
+                break
+            if not same_label and iou_value >= max(0.42, iou_threshold):
+                duplicate_of = existing
+                duplicate_reason = "cross_label_iou"
+                break
+            if not same_label and contain_value >= containment_threshold and ratio_value >= max(0.45, min_area_ratio):
+                duplicate_of = existing
+                duplicate_reason = "cross_label_containment"
+                break
+        if duplicate_of is not None:
+            continue
+        kept.append(
+            replace(
+                det,
+                raw={
+                    **dict(det.raw or {}),
+                    "adaptive_duplicate_filter": {
+                        "kept": True,
+                        "iou_threshold": iou_threshold,
+                        "containment_threshold": containment_threshold,
+                        "min_area_ratio": min_area_ratio,
+                    },
+                },
+            )
+        )
+        kept_by_label[label] = kept_by_label.get(label, 0) + 1
+    return sorted(kept, key=lambda item: (str(item.prompt_key), -float(item.score), float(item.box.x1), float(item.box.y1)))
+
+
+def _duplicate_quality(det: Detection, *, image_area: float) -> float:
+    score = _clip(float(det.score), 0.0, 1.0)
+    width = max(float(det.box.width), 1e-6)
+    height = max(float(det.box.height), 1e-6)
+    area_ratio = _clip(float(det.box.area) / max(float(image_area), 1.0), 0.0, 1.0)
+    elong = max(width / height, height / width)
+    label = str(det.label or det.prompt_key or "").lower()
+    if label == "crack":
+        shape = _clip(math.log(max(elong, 1.0)) / math.log(10.0), 0.0, 1.0)
+        size_prior = 1.0 - _clip(area_ratio / 0.06, 0.0, 1.0)
+    elif label in {"mold", "spall"}:
+        shape = 1.0 - _clip((elong - 1.0) / 8.0, 0.0, 1.0)
+        size_prior = 1.0 - _clip(area_ratio / 0.20, 0.0, 1.0)
+    else:
+        shape = 0.5
+        size_prior = 1.0 - _clip(area_ratio / 0.20, 0.0, 1.0)
+    source_prior = 1.0 if str(det.source) == "tile" else 0.92
+    return (0.68 * score) + (0.14 * shape) + (0.10 * size_prior) + (0.08 * source_prior)
+
+
+def _quantile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(v) for v in values)
+    pos = (len(ordered) - 1) * _clip(float(q), 0.0, 1.0)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return ordered[lo]
+    frac = pos - lo
+    return ordered[lo] * (1.0 - frac) + ordered[hi] * frac
+
+
+def _clip(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(float(lo), min(float(hi), float(value)))
 
 
 def fuse_detections(detections: list[Detection], *, iou_threshold: float, max_dets: int = 0) -> list[Detection]:

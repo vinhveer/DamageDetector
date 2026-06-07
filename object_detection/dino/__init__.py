@@ -1,4 +1,4 @@
-from .client import get_dino_service
+from .client import close_dino_service, get_dino_service
 from .engine import DinoParams, DinoRunner
 
-__all__ = ["DinoParams", "DinoRunner", "get_dino_service"]
+__all__ = ["DinoParams", "DinoRunner", "close_dino_service", "get_dino_service"]

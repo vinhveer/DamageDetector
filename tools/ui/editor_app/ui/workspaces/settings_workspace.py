@@ -194,6 +194,11 @@ class SettingsWorkspace(QtWidgets.QWidget):
         self._add_row(form, 3, "Recursive max depth", self._spin("dino_recursive_max_depth", minimum=0, maximum=16))
         self._add_row(form, 4, "Predict: tile large images", self._checkbox("predict_use_tiled_dino"))
         self._add_row(form, 5, "Predict tile trigger px", self._spin("predict_tile_trigger_px", minimum=128, maximum=16384))
+        self._add_row(form, 6, "DINO tile batch size", self._spin("dino_tile_batch_size", minimum=1, maximum=16))
+        self._add_row(form, 7, "DINO service workers", self._spin("dino_service_workers", minimum=0, maximum=16))
+        self._add_row(form, 8, "DINO service queue", self._spin("dino_service_queue_size", minimum=0, maximum=128))
+        self._add_row(form, 9, "DINO service batch", self._spin("dino_service_batch_size", minimum=0, maximum=512))
+        self._add_row(form, 10, "DINO CUDA ids", self._line("dino_service_device_ids"))
         return group
 
     def _build_isolate_group(self, parent: QtWidgets.QWidget) -> QtWidgets.QGroupBox:

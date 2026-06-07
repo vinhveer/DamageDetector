@@ -33,7 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prototype-min-sim", type=float, default=0.70)
     parser.add_argument("--relabel-margin", type=float, default=0.05)
     parser.add_argument("--ambiguous-margin", type=float, default=0.03)
-    parser.add_argument("--allow-low-priority-cleaned", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--allow-low-priority-cleaned", action=argparse.BooleanOptionalAction, default=False,
+                        help="Export uncertain low-priority items as cleaned. Default is off: uncertain items stay in review_queue.")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 

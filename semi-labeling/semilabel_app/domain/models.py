@@ -63,6 +63,7 @@ class Candidate:
     cluster_size: int
     centroid_similarity: float | None
     model_agreement: float = 0.0
+    image_rel_path: str = ""
 
 
 @dataclass(frozen=True)

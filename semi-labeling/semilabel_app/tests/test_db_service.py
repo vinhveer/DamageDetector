@@ -74,11 +74,12 @@ class DbServiceTest(unittest.TestCase):
         scores = [item.reliability_score for item in queue["items"]]
         self.assertEqual(scores, sorted(scores))
 
-    def test_prototype_query_is_stratified_without_core_join(self) -> None:
+    def test_prototype_query_is_domain_first(self) -> None:
         sql = db_service.PROTOTYPE_CANDIDATE_SQL.lower()
-        self.assertNotIn("core_cluster_members", sql)
-        self.assertNotIn("core_clusters", sql)
-        self.assertIn("partition by eff_label, band", sql)
+        self.assertIn("core_cluster_members", sql)
+        self.assertIn("partition by eff_label, core_cluster_id", sql)
+        self.assertNotIn("partition by eff_label, band", sql)
+        self.assertNotIn("rn_per_domain <= ?", sql)
 
         payload = db_service.list_runs(self.db_path)
         if RUN_ID not in {row["run_id"] for row in payload["runs"]}:
@@ -93,6 +94,7 @@ class DbServiceTest(unittest.TestCase):
         self.assertEqual(payload["labels"], ["crack", "mold", "spall", "reject"])
         self.assertGreater(len(payload["items"]), 0)
         self.assertTrue(payload["embeddingRunId"])
+        self.assertIn("perDomain", payload)
 
     def test_sampling_farthest_point_per_label(self) -> None:
         rows = [

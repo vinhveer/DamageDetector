@@ -35,6 +35,13 @@ DEFAULT_DAMAGE_PROMPT_GROUPS: list[tuple[str, tuple[str, ...]]] = [
             "surface contamination", "blackish patch on concrete",
         ),
     ),
+    (
+        "spall",
+        (
+            "spall", "spalling", "concrete spalling", "surface spall",
+            "flaked concrete", "chipped concrete", "delamination",
+        ),
+    ),
 ]
 
 
@@ -117,6 +124,7 @@ def match_group_for_label(label: str, groups: list[PromptGroup]) -> tuple[int, s
                  "lichen", "biological"),
         "stain": ("stain", "stains", "discoloration", "discolouration",
                   "damp", "rust", "contamination"),
+        "spall": ("spall", "spalling", "flaked", "chipped", "delamination"),
     }
     name_to_group = {g.name.strip().lower(): g.group_id for g in groups}
     tokens = set(text.replace("-", " ").split())

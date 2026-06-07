@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--source", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--names", nargs="+", default=["crack", "spall", "mold"])
+    parser.add_argument("--names", nargs="+", default=["crack", "mold", "spall"])
     parser.add_argument("--prototype-dir", default="")
     parser.add_argument("--dinov2-checkpoint", default="")
     parser.add_argument("--semantic-threshold", type=float, default=0.75)

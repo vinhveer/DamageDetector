@@ -5,11 +5,11 @@ Goal: **input = image folder**, **output = clean YOLO/COCO dataset**.
 The client-facing pipeline has only one supported path:
 
 ```text
-1. Detect   -> GDINO candidate boxes
-2. Filter   -> OpenCLIP + taxonomy + initial clean/review queue
-3. Prepare  -> crop thumbnails + DINOv2 embeddings + core clusters
-4. Review   -> app/manual review + prototype/reject picks -> JSON handoff
-5. Clean    -> apply prototype/review handoff + seed/policy refresh
+1. Detect   -> GDINO candidate boxes + seed labels
+2. Evidence -> OpenCLIP auxiliary scoring + taxonomy bookkeeping
+3. Prepare  -> crop thumbnails + DINOv2 embeddings + visual domains/core clusters
+4. Review   -> app/manual review + domain-first prototype/reject picks -> JSON handoff
+5. Clean    -> apply prototype/review handoff + detector/prototype/core vote + strict policy
 6. Export   -> YOLO/COCO dataset
 ```
 
@@ -80,7 +80,7 @@ RUN=myrun
 This runs:
 
 ```text
-Detect -> Filter -> Prepare
+Detect -> Evidence -> Prepare
 ```
 
 ```bash
@@ -125,7 +125,73 @@ Important defaults:
 --box-threshold 0.12
 --nms-iou 0.45
 --final-max-dets-per-class 400
+--adaptive-duplicate-filter on
+--duplicate-iou-threshold 0.0
+--duplicate-containment-threshold 0.0
+--duplicate-min-area-ratio 0.0
 ```
+
+For duplicate filtering, `0.0` means **auto-infer from the current image**. The
+pipeline now uses the image's own overlap distribution to suppress same/cross
+class duplicate boxes by IoU/containment. Score is only one part of the quality
+ranking; shape/source/box-size priors are also used. Small boxes inside much
+larger boxes are preserved when they may be real fine damage.
+
+To compare with the old fixed NMS-only behavior:
+
+```bash
+python -m client_pipeline detect \
+  --input-dir $IMG \
+  --output-dir $OUT \
+  --device cuda \
+  --no-adaptive-duplicate-filter
+```
+
+### Migrate an existing GDINO run without rerunning Colab/GDINO
+
+If Step 1 already produced many `final` boxes and you only want the newer
+duplicate filtering / box fusion logic, do **not** rerun GDINO. Reprocess the
+existing SQLite DB:
+
+Dry-run first:
+
+```bash
+python -m tools.migrate_gdino_final_boxes \
+  --db $OUT/pipeline.sqlite3 \
+  --output-db $OUT/pipeline_migrated.sqlite3 \
+  --source-run-id latest \
+  --semantic-run-id none
+```
+
+Apply to a new DB only, leaving the original DB untouched:
+
+```bash
+python -m tools.migrate_gdino_final_boxes \
+  --db $OUT/pipeline.sqlite3 \
+  --output-db $OUT/pipeline_migrated.sqlite3 \
+  --source-run-id latest \
+  --semantic-run-id none \
+  --apply
+```
+
+If OpenCLIP has already been run and you want downstream Step01 to read only the
+kept/fused boxes without rerunning OpenCLIP, clone the semantic run too:
+
+```bash
+python -m tools.migrate_gdino_final_boxes \
+  --db $OUT/pipeline.sqlite3 \
+  --output-db $OUT/pipeline_migrated.sqlite3 \
+  --source-run-id latest \
+  --semantic-run-id latest \
+  --apply
+```
+
+The tool is audit-safe: raw rows remain, duplicate final rows are moved to
+`final_dropped_migrated`, representatives are optionally WBF/box-voting fused,
+and audit rows are written to `gdino_box_migration_*` tables.
+
+If you want zero coordinate changes so existing crops/embeddings remain usable,
+add `--disable-wbf`.
 
 Overlay images are **off by default**. Only enable for debugging:
 
@@ -173,7 +239,7 @@ tiles in one GDINO forward pass.
 
 ---
 
-### Step 2 - Filter with OpenCLIP + taxonomy
+### Step 2 - Auxiliary semantic evidence with OpenCLIP + taxonomy
 
 ```bash
 python -m client_pipeline filter \
@@ -186,11 +252,15 @@ python -m client_pipeline filter \
 What it does internally:
 
 ```text
-OpenCLIP semantic scoring
-Semantic Init
+OpenCLIP semantic scoring as auxiliary evidence only
+Semantic Init with GDINO seed labels as primary labels
 Taxonomy mapping: crack / mold / spall / reject
 Initial cleaned_labels + review_queue
 ```
+
+Important: OpenCLIP score is **not ground truth** and should not be used as the
+only reason to accept/reject an item. The later DINOv2 domain/core + human
+prototype steps are the main quality gate.
 
 Default OpenCLIP model:
 
@@ -266,6 +336,21 @@ spall
 reject
 ```
 
+Prototype selection is **domain-first**. The app groups candidates by DINOv2
+visual domain/core cluster and spreads candidates across images. Score values are
+shown only for audit/ranking hints; do not treat OpenCLIP/reliability score as
+truth. Prefer a few clean examples per domain over many near-duplicate examples
+from the same image.
+
+Recommended first pass:
+
+```text
+crack: 50-70 clean prototypes, spread across domains
+mold : 70-90 clean prototypes, spread across domains
+spall: 60-80 clean prototypes, spread across domains
+reject: 100-120 true negatives/false positives, spread across images
+```
+
 #### JSON handoff rule
 
 When the app commits review/prototype choices, it first creates a JSON request in:
@@ -288,12 +373,18 @@ Prototype JSON example:
   "model_name": "facebook/dinov2-giant",
   "view_name": "tight",
   "prototypes": [
-    {"resultId": 101, "label": "crack"},
-    {"resultId": 205, "label": "mold"},
-    {"resultId": 333, "label": "spall"}
+    {
+      "resultId": 101,
+      "label": "crack",
+      "domainIndex": 0,
+      "clusterId": "core_myrun_emb_ea96_tight_crack_000",
+      "imageRelPath": "DSC0001.png"
+    },
+    {"resultId": 205, "label": "mold", "domainIndex": 1},
+    {"resultId": 333, "label": "spall", "domainIndex": 2}
   ],
   "rejects": [
-    {"resultId": 404, "label": "reject", "isReject": true}
+    {"resultId": 404, "label": "reject", "isReject": true, "imageRelPath": "DSC0002.png"}
   ],
   "run_seed": true,
   "run_policy": true
@@ -351,6 +442,11 @@ python -m client_pipeline clean \
   --run-id $RUN \
   --seed --policy
 ```
+
+Clean is strict by default: low-priority/uncertain items remain in
+`review_queue` instead of being exported as cleaned labels. The seed vote uses
+detector + human prototype + DINOv2 core evidence; OpenCLIP `other/reject` does
+not auto-reject unless explicitly enabled in the internal seed tool.
 
 ---
 

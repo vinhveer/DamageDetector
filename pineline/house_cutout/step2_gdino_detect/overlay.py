@@ -4,19 +4,42 @@ from pathlib import Path
 from typing import Iterable
 
 import cv2
-import numpy as np
 
 
-# BGR per group_name; fallback white
-_PALETTE = {
-    "crack": (0, 0, 255),
-    "mold":  (0, 200, 0),
-    "stain": (0, 255, 255),
+# BGR per detector; label text still carries the damage class.
+_MODEL_PALETTE = {
+    "gdino": (255, 255, 0),       # cyan
+    "yolo": (255, 0, 255),        # magenta
+    "stabledino": (0, 165, 255),  # orange
 }
 
 
-def _color_for(name: str) -> tuple[int, int, int]:
-    return _PALETTE.get(str(name or "").lower(), (255, 255, 255))
+def _detector_name(det: dict) -> str:
+    raw = str(det.get("detector_name") or "").strip().lower()
+    if raw:
+        return raw
+    label = str(det.get("label") or "")
+    if ":" in label:
+        return label.split(":", 1)[0].strip().lower()
+    return "unknown"
+
+
+def _color_for_detector(name: str) -> tuple[int, int, int]:
+    return _MODEL_PALETTE.get(str(name or "").lower(), (255, 255, 255))
+
+
+def _draw_legend(img, *, font_scale: float, thickness: int) -> None:
+    x, y = 12, 12
+    pad = 6
+    line_h = max(18, int(24 * font_scale))
+    width = 260
+    height = line_h * (len(_MODEL_PALETTE) + 1) + pad * 2
+    cv2.rectangle(img, (x, y), (x + width, y + height), (0, 0, 0), -1)
+    cv2.putText(img, "Detector colors", (x + pad, y + line_h), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    for idx, (name, color) in enumerate(_MODEL_PALETTE.items(), start=1):
+        yy = y + line_h * (idx + 1)
+        cv2.rectangle(img, (x + pad, yy - line_h + 4), (x + pad + 28, yy - 4), color, -1)
+        cv2.putText(img, name, (x + pad + 38, yy - 5), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA)
 
 
 def write_overlay(
@@ -31,6 +54,7 @@ def write_overlay(
     h, w = img.shape[:2]
     thickness = max(2, int(round(min(h, w) / 400)))
     font_scale = max(0.5, min(h, w) / 1500.0)
+    _draw_legend(img, font_scale=font_scale, thickness=thickness)
 
     for det in detections:
         box = det.get("box")
@@ -46,11 +70,11 @@ def write_overlay(
         y2 = max(0, min(h - 1, y2))
         if x2 <= x1 or y2 <= y1:
             continue
-        color = _color_for(det.get("group_name"))
+        detector_name = _detector_name(det)
+        color = _color_for_detector(detector_name)
         cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness)
-        # One-word label only (crack / mold / stain) + score.
         name = str(det.get("group_name", "?")).lower()
-        text = f"{name} {float(det.get('score', 0)):.2f}"
+        text = f"{detector_name}:{name} {float(det.get('score', 0)):.2f}"
         (tw, th), bl = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
         ty = max(th + 2, y1)
         cv2.rectangle(img, (x1, ty - th - bl), (x1 + tw + 4, ty + 2), (0, 0, 0), -1)
@@ -59,3 +83,23 @@ def write_overlay(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), img)
+
+
+def write_detector_overlays(
+    *,
+    image_path: Path,
+    detections: Iterable[dict],
+    out_dir: Path,
+    image_id: str,
+) -> dict[str, str]:
+    grouped: dict[str, list[dict]] = {}
+    for det in detections:
+        grouped.setdefault(_detector_name(det), []).append(dict(det))
+    written: dict[str, str] = {}
+    for detector_name, rows in grouped.items():
+        if not rows:
+            continue
+        out_path = out_dir / detector_name / f"{image_id}.png"
+        write_overlay(image_path=image_path, detections=rows, out_path=out_path)
+        written[detector_name] = str(out_path)
+    return written

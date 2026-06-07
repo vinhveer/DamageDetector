@@ -7,8 +7,8 @@
 >   riêng phần **nhà** ra thành cutout RGBA (nền trong suốt).
 >   - Positive prompt: **house** → box vùng nhà → điểm dương cho SAM.
 >   - Negative prompt: **window, door** → điểm âm cho SAM (mask nhà tự loại trừ cửa / cửa sổ).
-> - **Step 2:** Nhận cutout RGBA của step 1, chạy GDINO tiled-detect crack / mold / stain.
->   Logic y hệt `dino_cutout/step1_gdino_detect`.
+> - **Step 2:** Nhận cutout RGBA của step 1, chạy `GDINO + YOLO + StableDINO` để lấy box,
+>   lưu SQLite, rồi route segmentation theo label.
 
 ---
 
@@ -19,7 +19,7 @@
 | Input | thư mục ảnh (bridge) | thư mục cutout RGBA có sẵn | **thư mục ảnh gốc, gồm `.tif`** |
 | Cắt đối tượng | bridge (step1+2) | *không* (cutout có sẵn) | **house** (step1, GDINO+SAM) |
 | Negative cho SAM | *không* | — | **window, door** (điểm âm) |
-| Detect damage | step3 | step1 | **step2** (copy từ dino_cutout) |
+| Detect damage | step3 | step1 | **step2** (`GDINO + YOLO + StableDINO`) |
 | TIF lớn | không tối ưu | — | **convert + downscale "working RGB"** |
 
 Khác biệt cốt lõi so với `sam_gdino/step2_sam_bridge_crop`:
@@ -51,18 +51,18 @@ DamageDetector/pineline/house_cutout/
 │   ├── sam_crop.py               ← SAM mask (pos+neg points) → RGBA cutout
 │   ├── overlay.py                ← vẽ box + mask + crop bbox
 │   └── store.py                  ← SQLite (run_info, images, detections, crops)
-└── step2_gdino_detect/           ← copy logic dino_cutout/step1_gdino_detect
+└── step2_gdino_detect/           ← multi-model detect + routed segmentation
     ├── __init__.py
     ├── run.py
     ├── runner.py
-    ├── prompts.py                ← crack/mold/stain (copy)
+    ├── prompts.py                ← crack/mold/stain/spall groups
     ├── rgb_export.py             ← RGBA→RGB crop alpha bbox (copy)
     ├── overlay.py                ← vẽ box damage (copy)
-    └── store.py                  ← schema detections (copy)
+    └── store.py                  ← schema detections + segmentation_results
 ```
 
-> **Reuse:** các file step2 copy gần như y hệt `dino_cutout/step1_gdino_detect`, chỉ đổi
-> import path sang `pineline.house_cutout.step2_gdino_detect`. Không import chéo pipeline khác.
+> **Reuse:** step2 dùng chung `pineline.common.multi_model` với `dino_cutout/step1_gdino_detect`
+> để chạy các model detection/segmentation; phần path/store/CLI vẫn tách riêng từng pipeline.
 
 ---
 
@@ -72,7 +72,7 @@ Dùng `_repo_root()` động (tìm thư mục chứa `object_detection/` và `in
 hardcode đường dẫn macOS** như `sam_gdino`. `LAB_ROOT = repo_root().parent`.
 
 ```python
-RESULTS_ROOT = LAB_ROOT / "infer_results" / "pineline" / "house_cutout"
+RESULTS_ROOT = LAB_ROOT / "model_with_inference" / "infer_results" / "pineline" / "house_cutout"
 
 # Step 1 — cắt nhà
 STEP1_DIR         = RESULTS_ROOT / "step1_sam_house_crop"
@@ -83,7 +83,7 @@ STEP1_MASKS_DIR   = STEP1_DIR / "masks"       # mask nhị phân
 STEP1_OVERLAY_DIR = STEP1_DIR / "overlays"
 STEP1_SUMMARY_CSV = STEP1_DIR / "summary.csv"
 
-# Step 2 — detect damage (giống dino_cutout)
+# Step 2 — detect + segment damage (giống dino_cutout)
 STEP2_DIR         = RESULTS_ROOT / "step2_gdino_detect"
 STEP2_DB          = STEP2_DIR / "detections.sqlite3"
 STEP2_RGB_DIR     = STEP2_DIR / "rgb"
@@ -203,23 +203,64 @@ CREATE TABLE crops (                   -- cutout nhà tạo ra
 
 ---
 
-## 5. Step 2 — detect damage (`step2_gdino_detect`)
+## 5. Step 2 — detect + segment damage (`step2_gdino_detect`)
 
-Copy nguyên `dino_cutout/step1_gdino_detect` (runner/prompts/overlay/rgb_export/store), chỉ:
+Step này dùng chung model orchestration trong `pineline.common.multi_model` với
+`dino_cutout/step1_gdino_detect`, chỉ khác default input/output path:
 - Đổi import → `pineline.house_cutout.step2_gdino_detect.*`
 - `--input-dir` mặc định = `STEP1_CUTOUTS_DIR` (cutout nhà của step1)
 - Output → `RESULTS_ROOT/step2_gdino_detect/`
 
-Hành vi giữ nguyên: RGBA→RGB crop theo alpha bbox, tiled `recursive_detect` (ảnh rộng),
-lọc box theo group crack/mold/stain + `max_box_area_ratio`, lưu DB/overlay/CSV, map box về
-khung cutout gốc qua `offset_x/offset_y`.
+Luồng xử lý:
+
+```text
+for each RGBA cutout:
+    1. RGBA -> RGB-on-black, crop theo alpha bbox
+    2. chạy tất cả detector được cấu hình: GDINO, YOLO, StableDINO
+    3. lọc/match box theo prompt group crack/mold/stain/spall...
+    4. lưu box vào SQLite table detections
+    5. với mỗi box:
+       - label == crack -> chạy UNet và SAM finetune ViT-B
+       - label != crack -> chạy SAM ViT-B
+    6. lưu kết quả mask/area/overlay vào SQLite table segmentation_results
+```
+
+Default model paths:
+
+```text
+Object detection:
+- GDINO: auto từ object_detection.dino.engine.default_gdino_checkpoint()
+- YOLO: ../model_with_inference/semi_labeling_training/myrun_yolo26x_img768_b16_100ep/weights/best.pt
+- StableDINO: ../model_with_inference/semi_labeling_training/myrun_stabledino_r50_img768_b16_28600it/model_best.pth
+
+Segmentation:
+- Other damage: DamageDetector/models/sam/sam_vit_b_01ec64.pth (SAM ViT-B)
+- Crack UNet: ../model_with_inference/crack_segmentation/unet_v2_cldice_centerline_ema_b16_img512/best_model.pth
+- Crack SAM finetune ViT-B: base DamageDetector/models/sam/sam_vit_b_01ec64.pth + delta ../model_with_inference/crack_segmentation/sam_ablation_b2_lora_hq_coarse/best_model.pth
+```
+
+SQLite chính:
+
+```sql
+CREATE TABLE detections (
+    run_id, image_id, det_idx, detector_name,
+    group_id, group_name, label, query_label,
+    x1, y1, x2, y2, score
+);
+
+CREATE TABLE segmentation_results (
+    run_id, image_id, detector_name, det_idx,
+    segmenter_name, task_group, label,
+    mask_path, overlay_path, mask_area_px, mask_count, score, extra_json
+);
+```
 
 ---
 
 ## 6. Output
 
 ```
-infer_results/pineline/house_cutout/
+model_with_inference/infer_results/pineline/house_cutout/
 ├── step1_sam_house_crop/
 │   ├── house_crops.sqlite3
 │   ├── work/        <id>.png         ← working RGB (tif đã convert/downscale)
@@ -231,6 +272,7 @@ infer_results/pineline/house_cutout/
     ├── detections.sqlite3
     ├── rgb/         <id>.png
     ├── overlays/    <id>.png
+    ├── segments/    sam_vit_b/ unet/ sam_finetune_vit_b/
     └── summary.csv
 ```
 
@@ -245,7 +287,7 @@ cd DamageDetector
 python -m pineline.house_cutout.step1_sam_house_crop.run \
   --input-dir "../data/HinhAnhThucTe" --limit 1 --device auto
 
-# B2: detect damage trên cutout vừa tạo
+# B2: detect + segment damage trên cutout vừa tạo
 python -m pineline.house_cutout.step2_gdino_detect.run --device auto
 
 # Hoặc chạy cả hai một lệnh
@@ -256,7 +298,7 @@ python -m pineline.house_cutout.run_pipeline --input-dir "../data/HinhAnhThucTe"
 
 ## 8. Không làm trong lần này
 
-- OpenCLIP semantic / DINOv2 dedup / SAM-LoRA segment (như dino_cutout §8).
+- OpenCLIP semantic / DINOv2 dedup (như dino_cutout §8).
 - Multi-house tách riêng từng cutout: hiện **union** mọi house box thành 1 cutout/ảnh.
 - Batch resume nâng cao: gián đoạn thì chạy lại tạo `run_id` mới (có `--skip-existing`).
 

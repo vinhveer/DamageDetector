@@ -33,8 +33,30 @@ def write_stable_dino_dataset_yaml(*, coco_root: str | Path, output_path: str | 
 def ensure_stable_dino_dataset_yaml(coco_root: str | Path, output_path: str | Path | None = None) -> dict[str, Any]:
     dataset = discover_coco_dataset(coco_root)
     target = Path(output_path).expanduser().resolve() if output_path else dataset.root / "stable_dino_dataset.yaml"
-    if target.is_file():
+    if target.is_file() and _stable_yaml_matches_current_root(target, dataset.root):
         return {"dataset_yaml": str(target), "reused": True}
     payload = write_stable_dino_dataset_yaml(coco_root=dataset.root, output_path=target)
     payload["reused"] = False
     return payload
+
+
+def _stable_yaml_matches_current_root(path: Path, root: Path) -> bool:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return False
+    configured_root = Path(str(data.get("path") or "")).expanduser()
+    if not configured_root.is_absolute():
+        configured_root = (path.parent / configured_root).resolve()
+    if configured_root.resolve() != root.resolve():
+        return False
+    for split in ("train", "val", "test"):
+        value = data.get(split)
+        if not value:
+            continue
+        split_path = Path(str(value)).expanduser()
+        if not split_path.is_absolute():
+            split_path = (configured_root / split_path).resolve()
+        if not split_path.exists():
+            return False
+    return True

@@ -362,3 +362,13 @@ def get_dino_service(
         _DINO = DinoServicePool(module="object_detection.dino.worker", config=config)
         _DINO_CONFIG = config
     return _DINO
+
+
+def close_dino_service() -> None:
+    global _DINO, _DINO_CONFIG
+    if _DINO is not None:
+        try:
+            _DINO.close()
+        finally:
+            _DINO = None
+            _DINO_CONFIG = None

@@ -15,7 +15,7 @@ class DecisionPolicyConfig:
     relabel_margin: float = 0.05
     ambiguous_margin: float = 0.03
     view_name: str = "tight"
-    allow_low_priority_cleaned: bool = True
+    allow_low_priority_cleaned: bool = False
 
     @property
     def thresholds(self) -> dict[str, float | bool | str]:

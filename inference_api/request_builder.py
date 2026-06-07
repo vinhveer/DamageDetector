@@ -46,6 +46,9 @@ def build_prediction_request(
         params["sam"] = _build_sam_params(settings, output_dir=out_dir, roi_box=roi_box, task_group=resolved.task_group)
     if resolved.detection_model == DETECTION_DINO:
         params["dino"] = _build_dino_params(settings, output_dir=out_dir, roi_box=roi_box, task_group=resolved.task_group)
+        dino_service = _build_dino_service_config(settings)
+        if dino_service:
+            params["dino_service"] = dino_service
         if resolved.segmentation_model in {SEGMENTATION_SAM, SEGMENTATION_SAM_LORA}:
             params["use_tiled_dino"] = bool(settings.get("predict_use_tiled_dino") if settings.get("predict_use_tiled_dino") is not None else True)
             params["tile_trigger_px"] = _int_value(settings, "predict_tile_trigger_px", 512)
@@ -133,6 +136,9 @@ def build_isolate_request(
         )
         dino_params["text_queries"] = _split_queries(prompt) or _queries_for_task_group(TASK_GROUP_MORE_DAMAGE, settings)
         params["dino"] = dino_params
+        dino_service = _build_dino_service_config(settings)
+        if dino_service:
+            params["dino_service"] = dino_service
         detection_model = DETECTION_DINO
         detection_model_label = "DINO"
         resolved_detection_model = DETECTION_DINO
@@ -177,6 +183,13 @@ def _int_value(settings: dict[str, Any], key: str, default: int) -> int:
     value = settings.get(key)
     if value in (None, ""):
         return int(default)
+    return int(value)
+
+
+def _optional_int_value(settings: dict[str, Any], key: str) -> int | None:
+    value = settings.get(key)
+    if value in (None, ""):
+        return None
     return int(value)
 
 
@@ -315,7 +328,7 @@ def _build_dino_params(
     roi_box: tuple[int, int, int, int] | None,
     task_group: str,
 ) -> dict[str, Any]:
-    return {
+    params = {
         "gdino_checkpoint": str(settings.get("dino_checkpoint") or "").strip(),
         "gdino_config_id": str(settings.get("dino_config_id") or "").strip(),
         "text_queries": _queries_for_task_group(task_group, settings),
@@ -330,3 +343,23 @@ def _build_dino_params(
         "recursive_min_box_px": _int_value(settings, "dino_recursive_min_box_px", 48),
         "recursive_max_depth": _int_value(settings, "dino_recursive_max_depth", 3),
     }
+    tile_batch_size = _optional_int_value(settings, "dino_tile_batch_size")
+    if tile_batch_size is not None:
+        params["recursive_tile_batch_size"] = max(1, int(tile_batch_size))
+    return params
+
+
+def _build_dino_service_config(settings: dict[str, Any]) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    for key, output_key in (
+        ("dino_service_workers", "num_workers"),
+        ("dino_service_queue_size", "queue_size"),
+        ("dino_service_batch_size", "batch_size"),
+    ):
+        value = _optional_int_value(settings, key)
+        if value is not None:
+            config[output_key] = int(value)
+    device_ids = str(settings.get("dino_service_device_ids") or "").strip()
+    if device_ids:
+        config["device_ids"] = device_ids
+    return config

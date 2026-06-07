@@ -9,7 +9,7 @@ from typing import Callable
 from PIL import Image
 
 from .detectors import DamageDetector, GroundingDinoDetector
-from .geometry import GeoInput, compute_box_geometry, nms_detections
+from .geometry import AdaptiveDuplicateConfig, GeoInput, adaptive_duplicate_filter, compute_box_geometry, nms_detections
 from .models import Box, Detection, ImageInfo
 from .overlay import save_overlay
 from .prompts import PROMPT_ORDER, PROMPT_SPECS, PromptSpec
@@ -39,6 +39,10 @@ class DamageScanConfig:
     nms_iou_override: float = 0.0
     box_threshold_override: float = 0.0
     max_box_fraction_of_image: float = 0.92
+    adaptive_duplicate_filter: bool = True
+    duplicate_iou_threshold: float = 0.0
+    duplicate_containment_threshold: float = 0.0
+    duplicate_min_area_ratio: float = 0.0
     save_overlays: bool = True
     include_full_raw_in_overlay: bool = False
     image_workers: int = 1
@@ -212,17 +216,33 @@ class DamageScanPipeline:
     ) -> None:
         overlay_items: list[Detection] = []
         final_items: list[Detection] = []
-        persisted_items: list[Detection] = []
+        raw_items: list[Detection] = []
         for prompt_key in PROMPT_ORDER:
             spec = PROMPT_SPECS[prompt_key]
             raw, final = self._run_full_prompt(image=image, spec=spec, log_fn=log_fn)
-            persisted_items.extend(raw)
-            persisted_items.extend(final)
+            raw_items.extend(raw)
             overlay_items.extend(raw)
             final_items.extend(final)
             if status_log_fn is not None:
                 status_log_fn(f"  {prompt_key}: raw={len(raw)} final={len(final)}")
 
+        if bool(self.config.adaptive_duplicate_filter):
+            before = len(final_items)
+            final_items = adaptive_duplicate_filter(
+                final_items,
+                image_width=int(image.width),
+                image_height=int(image.height),
+                config=AdaptiveDuplicateConfig(
+                    iou_threshold=float(self.config.duplicate_iou_threshold),
+                    containment_threshold=float(self.config.duplicate_containment_threshold),
+                    min_area_ratio=float(self.config.duplicate_min_area_ratio),
+                ),
+                max_dets_per_class=int(self.config.final_max_dets_per_class),
+            )
+            if status_log_fn is not None:
+                status_log_fn(f"  adaptive_duplicate_filter: final={before}->{len(final_items)}")
+
+        persisted_items = [*raw_items, *final_items]
         self.store.insert_detections_bulk(run_id=run_id, image_id=image_id, detections=persisted_items)
 
         boxes = self.store.fetch_image_boxes(run_id=run_id, image_id=image_id)

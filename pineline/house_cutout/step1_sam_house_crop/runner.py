@@ -69,6 +69,62 @@ def _iter_images(input_path: Path) -> tuple[Path, list[Path]]:
     return input_path, images
 
 
+def _box_mask(shape: tuple[int, int], box: tuple[float, float, float, float]) -> np.ndarray:
+    h, w = shape
+    x1, y1, x2, y2 = [int(round(float(v))) for v in box]
+    x1 = max(0, min(w, x1))
+    x2 = max(0, min(w, x2))
+    y1 = max(0, min(h, y1))
+    y2 = max(0, min(h, y2))
+    out = np.zeros((h, w), dtype=bool)
+    if x2 > x1 and y2 > y1:
+        out[y1:y2, x1:x2] = True
+    return out
+
+
+def _subtract_negative_regions(
+    predictor,
+    house_mask: np.ndarray,
+    neg_boxes: list[dict],
+    *,
+    image_w: int,
+    image_h: int,
+    points_per_box: int,
+) -> tuple[np.ndarray, int]:
+    """Khoet cua/kinh ra khoi mask nha bang SAM mask rieng cho moi negative box."""
+    if house_mask.size == 0 or not house_mask.any() or not neg_boxes:
+        return house_mask, 0
+
+    neg_masks: list[np.ndarray] = []
+    for nb in neg_boxes:
+        box = nb.get("box")
+        if not box or len(box) != 4:
+            continue
+        neg_points = sample_points_in_box(
+            box, image_w=image_w, image_h=image_h,
+            points_per_box=max(1, int(points_per_box)),
+        )
+        if not neg_points:
+            continue
+        try:
+            neg_mask = predict_mask_with_points(
+                predictor, neg_points, [], multimask_output=True,
+            )
+        except Exception:
+            continue
+        if neg_mask.shape != house_mask.shape or not neg_mask.any():
+            continue
+        # Gioi han mask am trong GDINO box de tranh SAM an lan sang tuong nha.
+        neg_mask = neg_mask & _box_mask(house_mask.shape, box) & house_mask
+        if neg_mask.any():
+            neg_masks.append(neg_mask)
+
+    if not neg_masks:
+        return house_mask, 0
+    neg_union = union_masks(neg_masks)
+    return house_mask & ~neg_union, int(neg_union.sum())
+
+
 def resolve_gdino_checkpoint(raw: str | None) -> str:
     ckpt = str(raw or "").strip() or str(default_gdino_checkpoint() or "").strip()
     if not ckpt:
@@ -261,8 +317,13 @@ def run_step1(
             has_cutout = 0
             crop_bbox = None
             union = None
+            neg_removed_px = 0
             if masks:
                 union = union_masks(masks)
+                union, neg_removed_px = _subtract_negative_regions(
+                    predictor, union, neg_boxes,
+                    image_w=ww, image_h=wh, points_per_box=points_per_box,
+                )
                 crop_bbox = mask_bbox(union, pad_px=pad_px)
 
             if crop_bbox is not None:
@@ -316,6 +377,7 @@ def run_step1(
             log(
                 f"[{idx}/{len(images)}] {rel_path}: house={len(house_boxes)} "
                 f"neg={len(neg_boxes)} masks={len(masks)} cutout={'yes' if has_cutout else 'no'} "
+                f"neg_removed_px={neg_removed_px} "
                 f"(work {ww}x{wh}, scale={work.scale:.3f})"
             )
 

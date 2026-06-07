@@ -3,6 +3,14 @@ from __future__ import annotations
 from PySide6 import QtCore, QtWidgets
 
 
+LABEL_BUTTON_STYLE: dict[str, tuple[str, str]] = {
+    "crack": ("#4a90d9", "Crack [1]"),
+    "mold": ("#27ae60", "Mold [2]"),
+    "spall": ("#f39c12", "Spall [3]"),
+    "reject": ("#e74c3c", "Reject [4]"),
+}
+
+
 def primary_button(text: str, parent: QtWidgets.QWidget | None = None) -> QtWidgets.QPushButton:
     """Accent-filled call-to-action button."""
     btn = QtWidgets.QPushButton(text, parent)
@@ -35,6 +43,16 @@ class Chip(QtWidgets.QLabel):
         super().__init__(text, parent)
         self.setObjectName("Chip")
         self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+
+class KeyboardHint(QtWidgets.QLabel):
+    """Compact key hint used in action captions."""
+
+    def __init__(self, text: str = "", parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.setObjectName("KeyboardHint")
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.setMinimumWidth(24)
 
 
 class Toolbar(QtWidgets.QFrame):
@@ -173,6 +191,64 @@ class PickedList(QtWidgets.QListWidget):
         self.removeRequested.emit(int(item.data(QtCore.Qt.ItemDataRole.UserRole)))
 
 
+class DecisionBar(QtWidgets.QFrame):
+    """Horizontal decision/action strip that emits action ids."""
+
+    decided = QtCore.Signal(str)
+
+    def __init__(
+        self,
+        actions: list[tuple[str, str, str]],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("DecisionBar")
+        self._buttons: dict[str, QtWidgets.QPushButton] = {}
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
+        self._row = QtWidgets.QHBoxLayout()
+        self._row.setContentsMargins(0, 0, 0, 0)
+        self._row.setSpacing(8)
+        root.addLayout(self._row)
+        self.caption = QtWidgets.QLabel("", self)
+        self.caption.setObjectName("DecisionCaption")
+        self.caption.setWordWrap(True)
+        root.addWidget(self.caption)
+        for action_id, text, color in actions:
+            button = QtWidgets.QPushButton(text, self)
+            button.setCheckable(True)
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            button.setMinimumHeight(34)
+            button.setProperty("decisionColor", color)
+            button.setStyleSheet(
+                "QPushButton {"
+                f"background: {color}22; border: 1px solid {color}; color: #1f2a33;"
+                "font-weight: 600; padding: 6px 10px; border-radius: 6px;"
+                "}"
+                "QPushButton:hover { background: rgba(255, 255, 255, 0.75); }"
+                "QPushButton:checked {"
+                f"background: {color}; color: white; border-color: {color};"
+                "}"
+            )
+            button.clicked.connect(lambda _checked=False, value=action_id: self.decided.emit(value))
+            self._buttons[action_id] = button
+            self._row.addWidget(button)
+        self._row.addStretch(1)
+
+    def set_current(self, action_id: str) -> None:
+        for key, button in self._buttons.items():
+            button.setChecked(bool(action_id) and key == action_id)
+
+    def set_button_text(self, action_id: str, text: str) -> None:
+        button = self._buttons.get(action_id)
+        if button is not None:
+            button.setText(text)
+
+    def set_caption(self, text: str) -> None:
+        self.caption.setText(str(text or ""))
+
+
 class PercentBar(QtWidgets.QWidget):
     """Table cell widget: a label with a proportional background bar."""
 
@@ -181,6 +257,11 @@ class PercentBar(QtWidgets.QWidget):
         self._fraction = max(0.0, min(1.0, float(fraction)))
         self._text = str(text)
         self.setMinimumHeight(22)
+
+    def set_value(self, fraction: float, text: str) -> None:
+        self._fraction = max(0.0, min(1.0, float(fraction)))
+        self._text = str(text)
+        self.update()
 
     def paintEvent(self, _event) -> None:  # noqa: ANN001
         from PySide6 import QtGui

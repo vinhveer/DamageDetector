@@ -82,8 +82,25 @@ def _guess_coco_image_dir(root: Path, split_name: str) -> Path:
 
 
 def _guess_label_dir(image_dir: Path) -> Path | None:
+    # Standard YOLO layout: images/<split> -> labels/<split>.
+    if image_dir.parent.name == "images":
+        candidate = image_dir.parent.parent / "labels" / image_dir.name
+        if candidate.is_dir():
+            return candidate
+    # Flat layout: images -> labels.
     if image_dir.name == "images":
-        return image_dir.parent / "labels"
+        candidate = image_dir.parent / "labels"
+        if candidate.is_dir():
+            return candidate
+    # Generic fallback: replace the last 'images' segment with 'labels'.
+    parts = list(image_dir.parts)
+    if "images" in parts:
+        idx = len(parts) - 1 - parts[::-1].index("images")
+        parts[idx] = "labels"
+        candidate = Path(*parts)
+        if candidate.is_dir():
+            return candidate
+    # Last resort: sibling 'labels' directory next to the image dir.
     return image_dir.parent / "labels"
 
 

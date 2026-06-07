@@ -79,6 +79,10 @@ def cmd_detect(args: argparse.Namespace) -> int:
         "--nms-iou", str(args.nms_iou),
         "--box-threshold", str(args.box_threshold),
         "--final-max-dets-per-class", str(args.final_max_dets_per_class),
+        "--adaptive-duplicate-filter" if bool(args.adaptive_duplicate_filter) else "--no-adaptive-duplicate-filter",
+        "--duplicate-iou-threshold", str(args.duplicate_iou_threshold),
+        "--duplicate-containment-threshold", str(args.duplicate_containment_threshold),
+        "--duplicate-min-area-ratio", str(args.duplicate_min_area_ratio),
         "--image-workers", str(args.image_workers),
         "--service-workers", str(args.service_workers),
         "--service-queue-size", str(args.service_queue_size or max(16, int(args.image_workers) * 4)),
@@ -266,6 +270,14 @@ def add_detect_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--nms-iou", type=float, default=0.45)
     parser.add_argument("--box-threshold", type=float, default=0.12)
     parser.add_argument("--final-max-dets-per-class", type=int, default=400)
+    parser.add_argument("--adaptive-duplicate-filter", action=argparse.BooleanOptionalAction, default=True,
+                        help="Adaptive same/cross-class duplicate suppression after GDINO. Default on.")
+    parser.add_argument("--duplicate-iou-threshold", type=float, default=0.0,
+                        help="0=auto from current image; >0 forces duplicate IoU threshold.")
+    parser.add_argument("--duplicate-containment-threshold", type=float, default=0.0,
+                        help="0=auto from current image; >0 forces duplicate containment threshold.")
+    parser.add_argument("--duplicate-min-area-ratio", type=float, default=0.0,
+                        help="0=auto from current image; >0 forces containment small/large area ratio.")
     parser.add_argument("--image-workers", type=int, default=2,
                         help="Images processed concurrently. 2 overlaps CPU/IO with the GPU worker without changing results.")
     parser.add_argument("--service-workers", type=int, default=0,
@@ -313,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_detect_args(p)
     p.set_defaults(func=cmd_detect)
 
-    p = sub.add_parser("filter", help="Step 2: OpenCLIP semantic filter + initial clean/review tables.")
+    p = sub.add_parser("filter", help="Step 2: OpenCLIP auxiliary evidence + initial clean/review tables.")
     add_common_io(p, input_required=True)
     add_filter_args(p)
     p.set_defaults(func=cmd_filter)
@@ -323,7 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_prepare_args(p)
     p.set_defaults(func=cmd_prepare)
 
-    p = sub.add_parser("clean", help="Optional: apply seed vote and/or policy after prototype/review.")
+    p = sub.add_parser("clean", help="Apply detector+prototype+core seed vote and strict policy after prototype/review.")
     add_common_io(p, input_required=False)
     p.add_argument("--seed", action="store_true", help="Apply detector+prototype+core seed vote.")
     p.add_argument("--policy", action="store_true", help="Run reliability scoring + decision policy.")

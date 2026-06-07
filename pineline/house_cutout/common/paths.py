@@ -12,7 +12,7 @@ def _repo_root() -> Path:
 
 
 LAB_ROOT = _repo_root().parent
-RESULTS_ROOT = LAB_ROOT / "infer_results" / "pineline" / "house_cutout"
+RESULTS_ROOT = LAB_ROOT / "model_with_inference" / "infer_results" / "pineline" / "house_cutout"
 
 # ── Step 1: cắt nhà bằng GDINO + SAM ──────────────────────────────────────────
 STEP1_DIR = RESULTS_ROOT / "step1_sam_house_crop"

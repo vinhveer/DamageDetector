@@ -82,6 +82,7 @@ export default function FilterBar({
   onFiltersChange,
   onSortChange,
   onClear,
+  searchInputRef,
 }) {
   const [searchDraft, setSearchDraft] = useState(filters.search);
 
@@ -134,6 +135,7 @@ export default function FilterBar({
         <div className="flex h-7 min-w-[260px] flex-1 items-center gap-2 rounded-[5px] border border-[var(--border)] bg-[var(--surface-2)] px-2.5">
           <IconSearch size={14} className="text-[var(--text-muted)]" />
           <input
+            ref={searchInputRef}
             value={searchDraft}
             onChange={(event) => setSearchDraft(event.currentTarget.value)}
             placeholder="Search cluster, result, image path"

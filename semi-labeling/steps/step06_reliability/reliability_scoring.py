@@ -22,15 +22,17 @@ class ReliabilityConfig:
     @property
     def effective_weights(self) -> dict[str, float]:
         return self.weights or {
-            "semantic_confidence": 0.20,
-            "model_agreement": 0.18,
-            "top1_top2_margin": 0.14,
-            "prototype": 0.16,
-            "core": 0.14,
+            # OpenCLIP/semantic confidence is advisory only.  After the human
+            # prototype gate, DINOv2 prototype/core evidence should dominate.
+            "semantic_confidence": 0.08,
+            "model_agreement": 0.08,
+            "top1_top2_margin": 0.05,
+            "prototype": 0.28,
+            "core": 0.24,
             "multi_crop_consistency": 0.06,
             "geometry_prior": 0.08,
-            "detector_prompt_agreement": 0.04,
-            "outlier_penalty": 0.20,
+            "detector_prompt_agreement": 0.12,
+            "outlier_penalty": 0.25,
         }
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import shutil
 from pathlib import Path
 
@@ -98,6 +99,247 @@ def _assign_splits(image_rels: list[str], *, split: tuple[float, float, float], 
     return assignments
 
 
+def _target_counts(total: int, split: tuple[float, float, float]) -> dict[str, int]:
+    names = ["train", "val", "test"]
+    counts = {name: int(round(total * split[idx])) for idx, name in enumerate(names)}
+    diff = total - sum(counts.values())
+    if diff:
+        order = sorted(range(3), key=lambda idx: split[idx], reverse=diff > 0)
+        step = 1 if diff > 0 else -1
+        remaining = abs(diff)
+        cursor = 0
+        while remaining:
+            name = names[order[cursor % len(order)]]
+            if step > 0 or counts[name] > 0:
+                counts[name] += step
+                remaining -= 1
+            cursor += 1
+    return counts
+
+
+def _assign_splits_balanced(
+    by_image: dict[str, list[dict]],
+    *,
+    split: tuple[float, float, float],
+    random_state: int,
+) -> dict[str, str]:
+    """Image-level split balanced by image count, total boxes, and class boxes.
+
+    The old splitter shuffled images and sliced by count, which made 80/10/10
+    correct by image count but could skew box/class distribution. This greedy
+    splitter keeps every image in exactly one split while minimizing deviation
+    from requested ratios for images, total boxes, and per-class boxes.
+    """
+    names = ["train", "val", "test"]
+    image_rels = sorted(by_image)
+    if not image_rels:
+        return {}
+    rng = random.Random(int(random_state))
+    image_targets = _target_counts(len(image_rels), split)
+
+    total_boxes = sum(len(rows) for rows in by_image.values())
+    box_targets = {name: total_boxes * split[idx] for idx, name in enumerate(names)}
+    labels = sorted({str(row.get("export_label") or "") for rows in by_image.values() for row in rows})
+    total_by_label = {label: 0 for label in labels}
+    for rows in by_image.values():
+        for row in rows:
+            total_by_label[str(row.get("export_label") or "")] += 1
+    label_targets = {
+        name: {label: total_by_label[label] * split[idx] for label in labels}
+        for idx, name in enumerate(names)
+    }
+
+    image_label_counts: dict[str, dict[str, int]] = {}
+    for rel in image_rels:
+        counts = {label: 0 for label in labels}
+        for row in by_image[rel]:
+            counts[str(row.get("export_label") or "")] += 1
+        image_label_counts[rel] = counts
+
+    def build_stats(assignments: dict[str, str]) -> dict[str, dict[str, Any]]:
+        stats: dict[str, dict[str, Any]] = {
+            name: {"images": 0, "boxes": 0, "labels": {label: 0 for label in labels}}
+            for name in names
+        }
+        for rel, name in assignments.items():
+            stats[name]["images"] += 1
+            stats[name]["boxes"] += len(by_image[rel])
+            for label, count in image_label_counts[rel].items():
+                stats[name]["labels"][label] += count
+        return stats
+
+    def objective(assignments: dict[str, str]) -> float:
+        stats = build_stats(assignments)
+        value = 0.0
+        for name in names:
+            value += ((stats[name]["images"] - image_targets[name]) / max(1, image_targets[name])) ** 2 * 20.0
+            value += ((stats[name]["boxes"] - box_targets[name]) / max(1.0, box_targets[name])) ** 2 * 10.0
+            for label in labels:
+                target = max(1.0, label_targets[name][label])
+                value += ((stats[name]["labels"][label] - label_targets[name][label]) / target) ** 2 * 2.0
+        return value
+
+    def make_assignment(seed_offset: int) -> dict[str, str]:
+        rels = list(image_rels)
+        local_rng = random.Random(int(random_state) + seed_offset * 104729)
+        local_rng.shuffle(rels)
+        assignments: dict[str, str] = {}
+        cursor = 0
+        for name in names:
+            count = image_targets[name]
+            for rel in rels[cursor:cursor + count]:
+                assignments[rel] = name
+            cursor += count
+        for rel in rels[cursor:]:
+            assignments[rel] = names[0]
+        return assignments
+
+    best = make_assignment(0)
+    best_score = objective(best)
+    # Try many exact image-count splits and pick the best class/box balance.
+    # 1200 trials is cheap for ~1k images and avoids deterministic filename bias.
+    for attempt in range(1, 1200):
+        candidate = make_assignment(attempt)
+        score = objective(candidate)
+        if score < best_score:
+            best = candidate
+            best_score = score
+    return best
+
+
+def _infer_detection_source_id(image_rel_path: str) -> str:
+    """Infer source group for object-detection ROI images.
+
+    This mirrors the DataSAIL/data_split idea: multiple ROI crops from the same
+    original image/frame must stay in one split to avoid source leakage.  Common
+    names in this project look like `DSC01275__roi10.png`, where `DSC01275` is
+    the source and each `__roiN` is a crop from that source.
+    """
+    stem = Path(str(image_rel_path or "")).stem
+    stem = re.sub(r"_dup\d+$", "", stem)
+    match = re.match(r"^(?P<source>.+?)__roi\d+$", stem, flags=re.IGNORECASE)
+    if match:
+        return match.group("source")
+    match = re.match(r"^(?P<source>.+?)[_-]roi\d+$", stem, flags=re.IGNORECASE)
+    if match:
+        return match.group("source")
+    parts = stem.split("_")
+    if len(parts) > 4 and all(part.isdigit() for part in parts[-4:]):
+        return "_".join(parts[:-4])
+    if len(parts) > 2 and all(part.isdigit() for part in parts[-2:]):
+        return "_".join(parts[:-2])
+    return stem
+
+
+def _assign_splits_datasail_style(
+    by_image: dict[str, list[dict]],
+    *,
+    split: tuple[float, float, float],
+    random_state: int,
+) -> dict[str, str]:
+    """Source-group split inspired by DataSAIL anti-leakage constraints.
+
+    Unlike image-level stratification, this assigns entire source groups to one
+    split.  It optimizes image, box, class-box, and source-count ratios while
+    enforcing: source_id(image_a) == source_id(image_b) => same split.
+    """
+    names = ["train", "val", "test"]
+    source_to_images: dict[str, list[str]] = {}
+    for rel in sorted(by_image):
+        source_to_images.setdefault(_infer_detection_source_id(rel), []).append(rel)
+    sources = sorted(source_to_images)
+    if len(sources) < 3:
+        return _assign_splits_balanced(by_image, split=split, random_state=random_state)
+
+    labels = sorted({str(row.get("export_label") or "") for rows in by_image.values() for row in rows})
+    source_stats: dict[str, dict[str, object]] = {}
+    for source, rels in source_to_images.items():
+        label_counts = {label: 0 for label in labels}
+        box_count = 0
+        for rel in rels:
+            box_count += len(by_image[rel])
+            for row in by_image[rel]:
+                label_counts[str(row.get("export_label") or "")] += 1
+        source_stats[source] = {"images": len(rels), "boxes": box_count, "labels": label_counts}
+
+    total_images = sum(int(item["images"]) for item in source_stats.values())
+    total_boxes = sum(int(item["boxes"]) for item in source_stats.values())
+    total_labels = {label: 0 for label in labels}
+    for item in source_stats.values():
+        counts = item["labels"]  # type: ignore[assignment]
+        for label in labels:
+            total_labels[label] += int(counts[label])  # type: ignore[index]
+
+    image_targets = {name: total_images * split[idx] for idx, name in enumerate(names)}
+    box_targets = {name: total_boxes * split[idx] for idx, name in enumerate(names)}
+    source_targets = {name: len(sources) * split[idx] for idx, name in enumerate(names)}
+    label_targets = {
+        name: {label: total_labels[label] * split[idx] for label in labels}
+        for idx, name in enumerate(names)
+    }
+
+    def build_state(source_assignment: dict[str, str]) -> dict[str, dict[str, object]]:
+        state: dict[str, dict[str, object]] = {
+            name: {"sources": 0, "images": 0, "boxes": 0, "labels": {label: 0 for label in labels}}
+            for name in names
+        }
+        for source, part in source_assignment.items():
+            stats = source_stats[source]
+            state[part]["sources"] = int(state[part]["sources"]) + 1
+            state[part]["images"] = int(state[part]["images"]) + int(stats["images"])
+            state[part]["boxes"] = int(state[part]["boxes"]) + int(stats["boxes"])
+            counts = stats["labels"]  # type: ignore[assignment]
+            out_counts = state[part]["labels"]  # type: ignore[assignment]
+            for label in labels:
+                out_counts[label] += int(counts[label])  # type: ignore[index]
+        return state
+
+    def objective(source_assignment: dict[str, str]) -> float:
+        state = build_state(source_assignment)
+        value = 0.0
+        for name in names:
+            value += ((int(state[name]["images"]) - image_targets[name]) / max(1.0, image_targets[name])) ** 2 * 8.0
+            value += ((int(state[name]["boxes"]) - box_targets[name]) / max(1.0, box_targets[name])) ** 2 * 8.0
+            value += ((int(state[name]["sources"]) - source_targets[name]) / max(1.0, source_targets[name])) ** 2 * 1.5
+            counts = state[name]["labels"]  # type: ignore[assignment]
+            for label in labels:
+                target = max(1.0, label_targets[name][label])
+                value += ((int(counts[label]) - label_targets[name][label]) / target) ** 2 * 2.0  # type: ignore[index]
+        return value
+
+    def make_assignment(seed_offset: int) -> dict[str, str]:
+        local_rng = random.Random(int(random_state) + seed_offset * 130363)
+        ordered = list(sources)
+        local_rng.shuffle(ordered)
+        assignment: dict[str, str] = {}
+        source_targets_int = _target_counts(len(sources), split)
+        cursor = 0
+        for name in names:
+            count = source_targets_int[name]
+            for source in ordered[cursor:cursor + count]:
+                assignment[source] = name
+            cursor += count
+        for source in ordered[cursor:]:
+            assignment[source] = names[0]
+        return assignment
+
+    best = make_assignment(0)
+    best_score = objective(best)
+    for attempt in range(1, 5000):
+        candidate = make_assignment(attempt)
+        score = objective(candidate)
+        if score < best_score:
+            best = candidate
+            best_score = score
+
+    split_by_image: dict[str, str] = {}
+    for source, rels in source_to_images.items():
+        part = best[source]
+        for rel in rels:
+            split_by_image[rel] = part
+    return split_by_image
+
+
 def _safe_image_name(rel: str, used: set[str]) -> str:
     path = Path(rel)
     name = path.name
@@ -171,7 +413,7 @@ def export_dataset(
     by_image: dict[str, list[dict]] = {}
     for row in kept:
         by_image.setdefault(str(row["image_rel_path"]), []).append(row)
-    split_by_image = _assign_splits(list(by_image), split=split_tuple, random_state=int(random_state))
+    split_by_image = _assign_splits_datasail_style(by_image, split=split_tuple, random_state=int(random_state))
 
     used_image_names: dict[str, set[str]] = {"train": set(), "val": set(), "test": set()}
     exported_name_by_rel: dict[str, str] = {}

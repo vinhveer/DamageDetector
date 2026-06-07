@@ -58,6 +58,20 @@ class WorkflowContext:
         return service.call(method, params, log_fn=self.log, stop_checker=self.stop_checker)
 
 
+def _dino_service_getter(ctx: WorkflowContext) -> Callable[[], Any]:
+    config = dict(ctx.request.params.get("dino_service") or {})
+
+    def _get() -> Any:
+        return get_dino_service(
+            num_workers=config.get("num_workers"),
+            queue_size=config.get("queue_size"),
+            batch_size=config.get("batch_size"),
+            device_ids=config.get("device_ids"),
+        )
+
+    return _get
+
+
 def _with_b64_mask(det: dict[str, Any]) -> dict[str, Any]:
     out = dict(det)
     mask_path = str(out.get("mask_path") or "")
@@ -379,7 +393,7 @@ def _run_sam_dino_single(
         ctx.log(f"Large image detected ({max_dim}px). Using tiled DINO before SAM.")
         dino_res = ctx.call_service(
             "dino",
-            get_dino_service,
+            _dino_service_getter(ctx),
             "recursive_detect",
             {
                 "image_path": image_path,
@@ -392,7 +406,7 @@ def _run_sam_dino_single(
         partial_message = "Recursive DINO detections ready"
         empty_message = "No tiled DINO detections. Skipping SAM box prompting."
     else:
-        dino_res = ctx.call_service("dino", get_dino_service, "predict", {"image_path": image_path, "params": dino_params})
+        dino_res = ctx.call_service("dino", _dino_service_getter(ctx), "predict", {"image_path": image_path, "params": dino_params})
         partial_message = "DINO detections ready"
         empty_message = "No DINO detections. Skipping SAM box prompting."
     if isinstance(dino_res, dict) and dino_res.get("stopped"):
@@ -493,7 +507,7 @@ def _run_sam_dino_workflow(
     target_labels = [str(label).strip() for label in (ctx.request.params.get("target_labels") or dino_params.get("text_queries") or []) if str(label).strip()]
     crack_mask_model = str(ctx.request.params.get("crack_mask_model") or "off").strip().lower()
     ctx.log("Warming up DINO...")
-    ctx.call_service("dino", get_dino_service, "warmup", {"params": dino_params})
+    ctx.call_service("dino", _dino_service_getter(ctx), "warmup", {"params": dino_params})
     ctx.log(f"Warming up {sam_service_name}...")
     ctx.call_service(sam_service_name, sam_getter, "warmup", {"params": sam_params})
     if crack_mask_model == "sam_lora" and sam_service_name != "sam_finetune":
@@ -551,7 +565,7 @@ def _run_unet_dino_single(
     unet_params: dict[str, Any],
     dino_params: dict[str, Any],
 ) -> dict[str, Any]:
-    dino_res = ctx.call_service("dino", get_dino_service, "predict", {"image_path": image_path, "params": dino_params})
+    dino_res = ctx.call_service("dino", _dino_service_getter(ctx), "predict", {"image_path": image_path, "params": dino_params})
     if isinstance(dino_res, dict) and dino_res.get("stopped"):
         return {"stopped": True}
     detections = list(dino_res.get("detections") or [])
@@ -595,7 +609,7 @@ def _run_sam_tiled_single(
 ) -> dict[str, Any]:
     dino_res = ctx.call_service(
         "dino",
-        get_dino_service,
+        _dino_service_getter(ctx),
         "recursive_detect",
         {
             "image_path": image_path,
@@ -676,7 +690,7 @@ def _run_isolate_dino_single(
     crop_to_bbox: bool,
     action: str,
 ) -> dict[str, Any]:
-    dino_res = ctx.call_service("dino", get_dino_service, "predict", {"image_path": image_path, "params": dino_params})
+    dino_res = ctx.call_service("dino", _dino_service_getter(ctx), "predict", {"image_path": image_path, "params": dino_params})
     if isinstance(dino_res, dict) and dino_res.get("stopped"):
         return {"stopped": True}
     detections = list(dino_res.get("detections") or [])
@@ -728,7 +742,7 @@ def _run_isolate_dino_tiled_single(
     min_box_px = int(dino_params.get("recursive_min_box_px") or 48)
     dino_res = ctx.call_service(
         "dino",
-        get_dino_service,
+        _dino_service_getter(ctx),
         "recursive_detect",
         {
             "image_path": image_path,
@@ -777,7 +791,7 @@ def _run_unet_dino(ctx: WorkflowContext) -> InferenceResult:
     unet_params = dict(ctx.request.params.get("unet") or {})
     dino_params = dict(ctx.request.params.get("dino") or {})
     ctx.log("Warming up DINO...")
-    ctx.call_service("dino", get_dino_service, "warmup", {"params": dino_params})
+    ctx.call_service("dino", _dino_service_getter(ctx), "warmup", {"params": dino_params})
     ctx.log("Warming up UNet...")
     ctx.call_service("unet", get_unet_service, "warmup", {"params": unet_params})
 
@@ -824,7 +838,7 @@ def _run_sam_tiled(ctx: WorkflowContext) -> InferenceResult:
     max_depth = int(ctx.request.params.get("max_depth") or 3)
     min_box_px = int(ctx.request.params.get("min_box_px") or 48)
     ctx.log("Warming up DINO...")
-    ctx.call_service("dino", get_dino_service, "warmup", {"params": dino_params})
+    ctx.call_service("dino", _dino_service_getter(ctx), "warmup", {"params": dino_params})
     ctx.log("Warming up sam...")
     ctx.call_service("sam", get_sam_service, "warmup", {"params": sam_params})
     if ctx.request.image_paths:
@@ -875,7 +889,7 @@ def _run_isolate(ctx: WorkflowContext) -> InferenceResult:
     ctx.log(f"Isolate action: {action}")
     if isolate_mode == "dino_sam":
         ctx.log("Warming up dino...")
-        ctx.call_service("dino", get_dino_service, "warmup", {"params": dino_params})
+        ctx.call_service("dino", _dino_service_getter(ctx), "warmup", {"params": dino_params})
     ctx.log("Warming up sam...")
     ctx.call_service("sam", get_sam_service, "warmup", {"params": sam_params})
     if isolate_mode == "dino_sam":

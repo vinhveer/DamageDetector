@@ -10,6 +10,7 @@ import FilterBar from './FilterBar.jsx';
 const LABELS = ['crack', 'spall', 'mold'];
 const TABS = ['crack', 'spall', 'mold', 'excluded'];
 const SORT_OPTIONS = [
+  { value: 'domain_score_triplet', label: 'Domain score triplet' },
   { value: 'top_score', label: 'Top score' },
   { value: 'confidence_gap', label: 'Confidence gap' },
   { value: 'purity', label: 'Purity' },
@@ -22,6 +23,81 @@ const BATCH_DELAY = 80;
 const LABEL_FILTERS = ['crack', 'spall', 'mold'];
 
 const emptyBucket = () => ({ clusters: new Set(), images: new Set() });
+
+const SCORE_BAND_META = {
+  low: { label: 'Low', className: 'bg-red-600 text-white' },
+  mid: { label: 'Mid', className: 'bg-amber-500 text-white' },
+  high: { label: 'High', className: 'bg-green-600 text-white' },
+};
+
+const isTextEditingTarget = (target) => {
+  const tag = String(target?.tagName || '').toLowerCase();
+  if (tag === 'textarea') return true;
+  if (target?.isContentEditable) return true;
+  if (tag !== 'input') return false;
+  const type = String(target?.type || 'text').toLowerCase();
+  return !['button', 'checkbox', 'radio', 'range', 'submit', 'reset', 'file'].includes(type);
+};
+
+const domainForCandidate = (candidate) => String(candidate?.current_label || candidate?.recommended_label || 'unknown');
+
+const numericScore = (value, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+const rowScore = (row) => {
+  if (!row) return 0;
+  if (row.score != null) return numericScore(row.score);
+  if (row.top_score != null) return numericScore(row.top_score);
+  if (row.semantic_pct != null) {
+    const pct = numericScore(row.semantic_pct);
+    return pct > 1 ? pct / 100 : pct;
+  }
+  if (row.predicted_probability_pct != null) {
+    const pct = numericScore(row.predicted_probability_pct);
+    return pct > 1 ? pct / 100 : pct;
+  }
+  if (row.detector_score != null) return numericScore(row.detector_score);
+  if (row.confidence != null) return numericScore(row.confidence);
+  return 0;
+};
+
+const pickScoreTriplet = (items, scoreGetter) => {
+  const sorted = [...(items || [])].sort((a, b) => scoreGetter(a) - scoreGetter(b));
+  if (sorted.length === 0) return [];
+  const picks = [
+    { band: 'low', item: sorted[0] },
+    { band: 'mid', item: sorted[Math.floor((sorted.length - 1) / 2)] },
+    { band: 'high', item: sorted[sorted.length - 1] },
+  ];
+  const byKey = new Map();
+  for (const pick of picks) {
+    const key = String(pick.item?.cluster_key ?? pick.item?.result_id ?? `${pick.band}:${scoreGetter(pick.item)}`);
+    const existing = byKey.get(key);
+    if (existing) existing.score_bands = Array.from(new Set([...existing.score_bands, pick.band]));
+    else byKey.set(key, { ...pick.item, score_band: pick.band, score_bands: [pick.band] });
+  }
+  return Array.from(byKey.values());
+};
+
+const buildDomainScoreTriplets = (candidates) => {
+  const byDomain = new Map();
+  for (const candidate of candidates || []) {
+    const domain = domainForCandidate(candidate);
+    if (!byDomain.has(domain)) byDomain.set(domain, []);
+    byDomain.get(domain).push(candidate);
+  }
+  const out = [];
+  for (const domain of LABELS) {
+    out.push(...pickScoreTriplet(byDomain.get(domain) || [], (item) => numericScore(item?.top_score)));
+  }
+  for (const [domain, items] of byDomain.entries()) {
+    if (!LABELS.includes(domain)) out.push(...pickScoreTriplet(items, (item) => numericScore(item?.top_score)));
+  }
+  return out;
+};
+
 const defaultFilters = () => ({
   search: '',
   buckets: [...ALL_REVIEW_BUCKETS],
@@ -48,7 +124,7 @@ const BUCKET_BADGE_COLORS = {
 // state: 'unpicked' | 'picked' | 'picked-other' | 'excluded' | 'group-picked'
 // otherLabel?: string — label name when state is 'picked-other'
 
-function CroppedThumb({ row, size = 120, priority = 1, state = 'unpicked', otherLabel, onClick, onDoubleClick }) {
+function CroppedThumb({ row, size = 120, priority = 1, state = 'unpicked', otherLabel, scoreBand, onClick, onDoubleClick }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
@@ -105,20 +181,30 @@ function CroppedThumb({ row, size = 120, priority = 1, state = 'unpicked', other
           {otherLabel}
         </span>
       )}
+      {scoreBand && (
+        <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between gap-1">
+          <span className={cn('rounded px-1 py-0.5 text-[9px] font-semibold uppercase leading-none', SCORE_BAND_META[scoreBand]?.className || 'bg-gray-600 text-white')}>
+            {SCORE_BAND_META[scoreBand]?.label || scoreBand}
+          </span>
+          <span className="rounded bg-black/65 px-1 py-0.5 text-[9px] font-mono leading-none text-white">
+            {formatFloat(rowScore(row), 3)}
+          </span>
+        </div>
+      )}
     </button>
   );
 }
 
 // ── Gallery Row ───────────────────────────────────────────────────────────────
 
-function CandidateGalleryRow({ score, assignments, loadingRow, picked, excluded, activeLabel, selections, onAssignCluster, onUnassignCluster, onAssignImage, onUnassignImage, onRequestAssignments }) {
+function CandidateGalleryRow({ score, assignments, loadingRow, picked, excluded, focused, activeLabel, selections, onAssignCluster, onUnassignCluster, onAssignImage, onUnassignImage, onRequestAssignments, onFocusRow }) {
   const rowRef = useRef(null);
   const [thumbPriority, setThumbPriority] = useState(2);
   const isRelabel = score.current_label !== activeLabel;
 
   const visibleAssignments = useMemo(
-    () => (assignments || []),
-    [assignments]
+    () => pickScoreTriplet(assignments || score.thumbnails || [], rowScore),
+    [assignments, score.thumbnails]
   );
 
   useEffect(() => {
@@ -183,8 +269,9 @@ function CandidateGalleryRow({ score, assignments, loadingRow, picked, excluded,
   }, [selections, activeLabel, picked, score.cluster_key]);
 
   return (
-    <div ref={rowRef} className={cn(
+    <div ref={rowRef} onClick={onFocusRow} className={cn(
       'border-b border-[var(--border-muted)] px-6 py-3',
+      focused && 'bg-[var(--hover)] ring-1 ring-inset ring-[var(--primary)]',
       picked && 'bg-[var(--primary-bg)]',
       excluded && 'bg-[var(--danger-bg)] opacity-60'
     )}>
@@ -202,8 +289,13 @@ function CandidateGalleryRow({ score, assignments, loadingRow, picked, excluded,
         </button>
         <span className="text-[13px] font-semibold text-[var(--text)]">{score.cluster_key}</span>
         <span className="text-[12px] text-[var(--text-muted)]">
-          {score.current_label} · top {formatFloat(score.top_score, 3)} · {score.cluster_size} imgs
+          domain {domainForCandidate(score)} · top {formatFloat(score.top_score, 3)} · {score.cluster_size} imgs
         </span>
+        {(score.score_bands || (score.score_band ? [score.score_band] : [])).map((band) => (
+          <span key={band} className={cn('rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase', SCORE_BAND_META[band]?.className || 'bg-gray-600 text-white')}>
+            {SCORE_BAND_META[band]?.label || band} score
+          </span>
+        ))}
         {/* 8.1: review_bucket badge */}
         {score.review_bucket && (
           <span className={cn(
@@ -239,6 +331,7 @@ function CandidateGalleryRow({ score, assignments, loadingRow, picked, excluded,
               priority={thumbPriority}
               state={thumbInfo.state}
               otherLabel={thumbInfo.otherLabel}
+              scoreBand={row.score_band}
               onClick={() => {
                 // 8.4: Thumbnail click behavior
                 if (picked) {
@@ -341,17 +434,19 @@ export default function NewPrototypeSelector({ paths, parentReviewRunId, onBack,
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
-  const [sort, setSort] = useState('top_score');
+  const [sort, setSort] = useState('domain_score_triplet');
   const [filters, setFilters] = useState(defaultFilters);
   const [pickedAt, setPickedAt] = useState({ clusters: {}, images: {} });
   const [showLoaderStats, setShowLoaderStats] = useState(false);
   const [loaderStats, setLoaderStats] = useState(() => imageLoaderPool.stats());
   const [jobSessionId, setJobSessionId] = useState(null);
   const [jobLog, setJobLog] = useState('');
+  const [focusedClusterKey, setFocusedClusterKey] = useState(null);
+  const searchInputRef = useRef(null);
 
   useEffect(() => {
     setFilters(defaultFilters());
-    setSort('top_score');
+    setSort('domain_score_triplet');
     setSelections({
       crack: emptyBucket(),
       spall: emptyBucket(),
@@ -359,17 +454,8 @@ export default function NewPrototypeSelector({ paths, parentReviewRunId, onBack,
       excluded: emptyBucket(),
     });
     setPickedAt({ clusters: {}, images: {} });
+    setFocusedClusterKey(null);
   }, [parentReviewRunId]);
-
-  useEffect(() => {
-    const onKeyDown = (event) => {
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'i') {
-        setShowLoaderStats((value) => !value);
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
 
   useEffect(() => {
     if (!showLoaderStats) return undefined;
@@ -596,6 +682,10 @@ export default function NewPrototypeSelector({ paths, parentReviewRunId, onBack,
       return true;
     });
 
+    if (sort === 'domain_score_triplet') {
+      return buildDomainScoreTriplets(out);
+    }
+
     return [...out].sort((a, b) => {
       if (sort === 'cluster_key') return String(a.cluster_key).localeCompare(String(b.cluster_key));
       if (sort === 'recently_picked') {
@@ -606,6 +696,76 @@ export default function NewPrototypeSelector({ paths, parentReviewRunId, onBack,
       return Number(b[sort] || 0) - Number(a[sort] || 0);
     });
   }, [activeLabel, candidateResultIds, candidates, filters, isPickedAny, isPickedFor, matchesSearch, pickedAt, sort]);
+
+  useEffect(() => {
+    if (filteredCandidates.length === 0) {
+      setFocusedClusterKey(null);
+      return;
+    }
+    if (!focusedClusterKey || !filteredCandidates.some((candidate) => candidate.cluster_key === focusedClusterKey)) {
+      setFocusedClusterKey(filteredCandidates[0].cluster_key);
+    }
+  }, [filteredCandidates, focusedClusterKey]);
+
+  const focusedCandidate = useMemo(
+    () => filteredCandidates.find((candidate) => candidate.cluster_key === focusedClusterKey) || filteredCandidates[0] || null,
+    [filteredCandidates, focusedClusterKey]
+  );
+
+  const moveFocus = useCallback((delta) => {
+    if (!filteredCandidates.length) return;
+    const currentIndex = Math.max(0, filteredCandidates.findIndex((candidate) => candidate.cluster_key === (focusedClusterKey || focusedCandidate?.cluster_key)));
+    const nextIndex = Math.max(0, Math.min(filteredCandidates.length - 1, currentIndex + delta));
+    setFocusedClusterKey(filteredCandidates[nextIndex].cluster_key);
+  }, [filteredCandidates, focusedCandidate, focusedClusterKey]);
+
+  const toggleFocusedCluster = useCallback((targetLabel = activeLabel) => {
+    if (!focusedCandidate) return;
+    const clusterKey = focusedCandidate.cluster_key;
+    if (selections[targetLabel].clusters.has(clusterKey)) unassignCluster(clusterKey);
+    else assignCluster(clusterKey, targetLabel);
+  }, [activeLabel, assignCluster, focusedCandidate, selections, unassignCluster]);
+
+  const acceptFocusedCandidateLabel = useCallback(() => {
+    if (!focusedCandidate) return;
+    const acceptedLabel = domainForCandidate(focusedCandidate);
+    if (!LABELS.includes(acceptedLabel)) return;
+    assignCluster(focusedCandidate.cluster_key, acceptedLabel);
+    setActiveLabel(acceptedLabel);
+  }, [assignCluster, focusedCandidate]);
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'i') {
+        setShowLoaderStats((value) => !value);
+        event.preventDefault();
+        return;
+      }
+      if (isTextEditingTarget(event.target)) {
+        if (event.key === 'Escape') {
+          event.target?.blur?.();
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+      const key = event.key.toLowerCase();
+      if (key === '1') { setActiveLabel('crack'); event.preventDefault(); return; }
+      if (key === '2') { setActiveLabel('spall'); event.preventDefault(); return; }
+      if (key === '3') { setActiveLabel('mold'); event.preventDefault(); return; }
+      if (key === '4') { setActiveLabel('excluded'); event.preventDefault(); return; }
+      if (key === 'arrowdown' || key === 'j') { moveFocus(1); event.preventDefault(); return; }
+      if (key === 'arrowup' || key === 'k') { moveFocus(-1); event.preventDefault(); return; }
+      if (key === 'enter') { acceptFocusedCandidateLabel(); event.preventDefault(); return; }
+      if (key === ' ') { toggleFocusedCluster(activeLabel); event.preventDefault(); return; }
+      if (key === 'x') { if (focusedCandidate) assignCluster(focusedCandidate.cluster_key, 'excluded'); event.preventDefault(); return; }
+      if (key === 'backspace' || key === 'delete') { if (focusedCandidate) unassignCluster(focusedCandidate.cluster_key); event.preventDefault(); return; }
+      if (key === '/') { searchInputRef.current?.focus(); event.preventDefault(); }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
+  }, [acceptFocusedCandidateLabel, activeLabel, assignCluster, focusedCandidate, moveFocus, toggleFocusedCluster, unassignCluster]);
 
   return (
     <div className="rv-enter flex h-full flex-col bg-[var(--bg)] rv-font">
@@ -648,7 +808,20 @@ export default function NewPrototypeSelector({ paths, parentReviewRunId, onBack,
         onFiltersChange={updateFilters}
         onSortChange={setSort}
         onClear={clearFilters}
+        searchInputRef={searchInputRef}
       />
+
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border-muted)] px-6 py-2 text-[11px] text-[var(--text-muted)]">
+        <span className="font-medium text-[var(--text)]">Shortcuts</span>
+        <kbd className="rounded border border-[var(--border)] bg-[var(--surface-2)] px-1">1/2/3/4</kbd><span>tabs</span>
+        <kbd className="rounded border border-[var(--border)] bg-[var(--surface-2)] px-1">↑/↓</kbd><span>row</span>
+        <kbd className="rounded border border-[var(--border)] bg-[var(--surface-2)] px-1">Enter</kbd><span>accept row label</span>
+        <kbd className="rounded border border-[var(--border)] bg-[var(--surface-2)] px-1">Space</kbd><span>pick active tab</span>
+        <kbd className="rounded border border-[var(--border)] bg-[var(--surface-2)] px-1">X</kbd><span>exclude</span>
+        <kbd className="rounded border border-[var(--border)] bg-[var(--surface-2)] px-1">Del</kbd><span>unpick</span>
+        <kbd className="rounded border border-[var(--border)] bg-[var(--surface-2)] px-1">/</kbd><span>search</span>
+        <span className="ml-auto">Domain score triplet shows 3 candidates per domain: lowest, middle, highest score.</span>
+      </div>
 
       {showLoaderStats && (
         <div className="border-b border-[var(--border-muted)] bg-[var(--surface-2)] px-6 py-1 text-[11px] text-[var(--text-muted)]">
@@ -679,6 +852,7 @@ export default function NewPrototypeSelector({ paths, parentReviewRunId, onBack,
             loadingRow={loadingKeys.has(c.cluster_key)}
             picked={selections[activeLabel].clusters.has(c.cluster_key)}
             excluded={selections.excluded.clusters.has(c.cluster_key)}
+            focused={focusedClusterKey === c.cluster_key}
             activeLabel={activeLabel}
             selections={selections}
             onAssignCluster={assignCluster}
@@ -686,6 +860,7 @@ export default function NewPrototypeSelector({ paths, parentReviewRunId, onBack,
             onAssignImage={assignImage}
             onUnassignImage={unassignImage}
             onRequestAssignments={requestAssignments}
+            onFocusRow={() => setFocusedClusterKey(c.cluster_key)}
           />
         ))}
       </main>

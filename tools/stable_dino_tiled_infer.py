@@ -170,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint-dir", required=True, help="Training output dir with config.yaml + model_best.pth")
     parser.add_argument("--source", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--names", nargs="+", default=["crack", "spall", "mold"])
+    parser.add_argument("--names", nargs="+", default=["crack", "mold", "spall"])
     parser.add_argument("--tile-size", type=int, default=512)
     parser.add_argument("--overlap", type=int, default=64)
     parser.add_argument("--conf", type=float, default=0.05)

@@ -4,7 +4,7 @@ import threading
 import uuid
 from collections import defaultdict
 
-from object_detection.dino import get_dino_service
+from object_detection.dino import close_dino_service, get_dino_service
 from inference_api.contracts import InferenceRequest, JobEvent, JobSnapshot
 from inference_api.workflows import WorkflowContext, run_workflow
 from segmentation.sam.no_finetune import get_sam_service
@@ -25,6 +25,12 @@ class InferenceApi:
             "sam": get_sam_service,
             "sam_finetune": get_sam_finetune_service,
             "unet": get_unet_service,
+        }
+        self._service_closers = {
+            "dino": close_dino_service,
+            "sam": lambda: get_sam_service().close(),
+            "sam_finetune": lambda: get_sam_finetune_service().close(),
+            "unet": lambda: get_unet_service().close(),
         }
 
     def submit(self, request: InferenceRequest) -> str:
@@ -49,11 +55,11 @@ class InferenceApi:
                 self._cancelled.add(job_id)
                 service_names = list(self._active_services.get(job_id, set()))
         for service_name in service_names:
-            getter = self._service_getters.get(service_name)
-            if getter is None:
+            closer = self._service_closers.get(service_name)
+            if closer is None:
                 continue
             try:
-                getter().close()
+                closer()
             except Exception:
                 pass
 
@@ -68,9 +74,9 @@ class InferenceApi:
             return events
 
     def shutdown(self) -> None:
-        for getter in (get_dino_service, get_sam_service, get_sam_finetune_service, get_unet_service):
+        for closer in (close_dino_service, lambda: get_sam_service().close(), lambda: get_sam_finetune_service().close(), lambda: get_unet_service().close()):
             try:
-                getter().close()
+                closer()
             except Exception:
                 pass
 

@@ -632,7 +632,8 @@ def _segment_boxes_with_predictor(
             2,
         )
         input_box = np.array([[x1, y1, x2, y2]], dtype=np.float32)
-        masks, scores, _ = predictor.predict(box=input_box, multimask_output=True)
+        multimask_output = str(model_name).strip().lower() != "samfinetune"
+        masks, scores, _ = predictor.predict(box=input_box, multimask_output=multimask_output)
         if masks is None or len(masks) == 0:
             continue
         prefer_crack = str(params.task_group or "crack_only").strip().lower() != "more_damage" and ("crack" in label.lower())
@@ -657,6 +658,8 @@ def _segment_boxes_with_predictor(
                 "box": [float(x1), float(y1), float(x2), float(y2)],
                 "mask_b64": mask_b64,
                 "model_name": model_name,
+                "det_idx": entry.get("det_idx"),
+                "detector_name": entry.get("detector_name"),
             }
         )
 
