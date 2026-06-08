@@ -44,12 +44,12 @@ def main(argv: list[str] | None = None) -> int:
         default_sam_checkpoint,
         ensure_dirs,
     )
-    from pineline.house_cutout.step1_sam_house_crop.prompts import (
+    from pineline.lib.step_gdino.prompts import (
         DEFAULT_NEGATIVE_QUERIES,
         DEFAULT_POSITIVE_QUERIES,
         normalize_queries,
     )
-    from pineline.house_cutout.step1_sam_house_crop.runner import run_step1
+    from pineline.lib.step_gdino.runner import run_step1
     from pineline.house_cutout.step2_gdino_detect.prompts import parse_prompt_groups
     from pineline.house_cutout.step2_gdino_detect.runner import run_step1 as run_step2
 

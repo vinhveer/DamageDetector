@@ -15,7 +15,10 @@ LogFn = Callable[[str], None]
 
 TRAINED_DETECTOR_TILE_SIZE = 768
 TRAINED_DETECTOR_TILE_OVERLAP = 128
+TRAINED_DETECTOR_TILE_SIZES = (768, 1536, 2304)
 TRAINED_DETECTOR_NMS_IOU = 0.50
+TRAINED_DETECTOR_MAX_BLACK_RATIO = 0.35
+TRAINED_DETECTOR_BLACK_PIXEL_THRESHOLD = 12
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,17 @@ def _tile_boxes(width: int, height: int, *, tile_size: int = TRAINED_DETECTOR_TI
         for x1 in starts(width):
             boxes.append((x1, y1, min(width, x1 + tile_size), min(height, y1 + tile_size)))
     return boxes
+
+
+def _tile_has_too_much_black(image, box: tuple[int, int, int, int], *, max_ratio: float = TRAINED_DETECTOR_MAX_BLACK_RATIO) -> bool:
+    import numpy as np
+
+    x1, y1, x2, y2 = box
+    tile = np.asarray(image.crop((x1, y1, x2, y2)).convert("RGB"))
+    if tile.size == 0:
+        return True
+    black = np.max(tile, axis=2) <= TRAINED_DETECTOR_BLACK_PIXEL_THRESHOLD
+    return float(black.mean()) > float(max_ratio)
 
 
 def _box_iou(a: list[float], b: list[float]) -> float:
@@ -485,10 +499,29 @@ class MultiDetector:
             with Image.open(image_path) as image:
                 image = image.convert("RGB")
                 width, height = image.size
-                tiles = _tile_boxes(width, height) if max(width, height) > int(self.config.tiled_threshold) else [(0, 0, width, height)]
+                if max(width, height) > int(self.config.tiled_threshold):
+                    all_tiles: list[tuple[int, int, int, int]] = []
+                    for tile_size in TRAINED_DETECTOR_TILE_SIZES:
+                        overlap = min(TRAINED_DETECTOR_TILE_OVERLAP, max(0, tile_size // 6))
+                        all_tiles.extend(_tile_boxes(width, height, tile_size=tile_size, overlap=overlap))
+                    seen_tiles: set[tuple[int, int, int, int]] = set()
+                    tiles = []
+                    skipped_black = 0
+                    for tile in all_tiles:
+                        if tile in seen_tiles:
+                            continue
+                        seen_tiles.add(tile)
+                        if _tile_has_too_much_black(image, tile):
+                            skipped_black += 1
+                            continue
+                        tiles.append(tile)
+                else:
+                    tiles = [(0, 0, width, height)]
+                    skipped_black = 0
                 self.log(
                     f"  StableDINO patches[{image_path.name}]: {len(tiles)} "
-                    f"({TRAINED_DETECTOR_TILE_SIZE}px overlap={TRAINED_DETECTOR_TILE_OVERLAP})"
+                    f"(scales={','.join(str(s) for s in TRAINED_DETECTOR_TILE_SIZES)} "
+                    f"overlap={TRAINED_DETECTOR_TILE_OVERLAP} skipped_black={skipped_black})"
                 )
                 for tile_index, (x1, y1, x2, y2) in enumerate(tiles, start=1):
                     tile_path = tile_root / f"img{image_index:05d}_tile{tile_index:05d}_{x1}_{y1}.png"

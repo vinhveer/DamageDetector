@@ -78,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gdino-service-device-ids", type=str, default="",
                         help="Optional comma-separated CUDA ids for DINO workers, e.g. 0,1.")
     parser.add_argument("--max-box-area-ratio", type=float, default=0.50)
+    parser.add_argument("--no-box-quality-filter", dest="box_quality_filter", action="store_false",
+                        help="Disable semi-labeling-style geometry cleanup for nested/broad/composite boxes.")
+    parser.set_defaults(box_quality_filter=True)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--source-run-id", type=str, default="")
     parser.add_argument("--skip-existing", action="store_true")
@@ -130,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         gdino_service_batch_size=args.gdino_service_batch_size,
         gdino_service_device_ids=args.gdino_service_device_ids or None,
         max_box_area_ratio=args.max_box_area_ratio,
+        box_quality_filter=args.box_quality_filter,
         limit=args.limit,
         source_run_id=(args.source_run_id or None),
         skip_existing=args.skip_existing,
