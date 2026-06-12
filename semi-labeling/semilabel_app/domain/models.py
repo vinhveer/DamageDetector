@@ -22,14 +22,6 @@ class QueueItem:
     box: BBox
     decided_action: str
     decided_label: str
-    pred_label: str | None
-    pred_prob: float
-    pred_margin: float
-    second_label: str
-    second_prob: float | None
-    disagrees_with_policy: bool
-    policy_label: str
-    defer_reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -45,7 +37,6 @@ class CleanedItem:
     crop_uri: str
     image_uri: str
     reasons: tuple[str, ...] = ()
-    self_training_run_id: str = ""
     decision_policy_run_id: str = ""
 
 
@@ -64,6 +55,28 @@ class Candidate:
     centroid_similarity: float | None
     model_agreement: float = 0.0
     image_rel_path: str = ""
+
+
+@dataclass(frozen=True)
+class Group:
+    """A DINOv2 visual domain / core cluster produced in the prepare step.
+
+    Each group bundles near-duplicate crops of one label.  ``rep_*`` describes
+    the representative member (highest centroid similarity) used as the group
+    thumbnail.
+    """
+
+    core_cluster_id: str
+    label: str
+    size: int
+    member_count: int
+    domain_index: int
+    status: str
+    rep_result_id: int | None
+    rep_similarity: float
+    rep_image_rel_path: str
+    rep_box: BBox
+    rep_image_uri: str
 
 
 @dataclass(frozen=True)

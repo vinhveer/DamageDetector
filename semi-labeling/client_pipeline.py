@@ -4,7 +4,7 @@
 This CLI hides the internal step01/02/... names and exposes a simple workflow:
 
     detect   input images -> GDINO candidate boxes
-    filter   OpenCLIP semantic check + initial clean/review queues
+    filter   seed labels from GDINO detections + initial clean/review queues
     prepare  crops + DINOv2 embeddings + core clusters for review
     clean    optional seed/reliability/policy refresh after prototype/review
     export   cleaned labels -> YOLO/COCO dataset
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -29,10 +30,39 @@ from shared.runtime import bootstrap
 
 bootstrap.ensure_repo_root_on_path()
 
+from shared.db.schema import connect_output  # noqa: E402
+
 
 DEFAULT_GDINO_CHECKPOINT = "IDEA-Research/grounding-dino-base"
-DEFAULT_OPENCLIP_MODEL = "ViT-H-14"
-DEFAULT_OPENCLIP_PRETRAINED = "laion2b_s32b_b79k"
+
+# Step registry for the `status` command. The client path runs these via the
+# detect/filter/prepare/clean commands; this list only drives status reporting.
+STATUS_STEPS: list[dict] = [
+    {"name": "step01", "label": "Semantic Init", "optional": False,
+     "check_sql": "SELECT COUNT(*) FROM semantic_decisions WHERE run_id = ?",
+     "check_label": "semantic_decisions", "depends_on": []},
+    {"name": "step02", "label": "Crop Generation", "optional": False,
+     "check_sql": "SELECT COUNT(*) FROM crop_views WHERE run_id = ? AND status = 'ok' AND source != 'step2_sematic'",
+     "check_label": "crop_views(ok)", "depends_on": ["step01"]},
+    {"name": "step03", "label": "DINOv2 Embedding", "optional": False,
+     "check_sql": "SELECT COUNT(*) FROM embedding_runs WHERE run_id = ?",
+     "check_label": "embedding_runs", "depends_on": ["step02"]},
+    {"name": "step04", "label": "Core Cluster Mining", "optional": True,
+     "check_sql": "SELECT COUNT(*) FROM core_mining_runs WHERE run_id = ?",
+     "check_label": "core_mining_runs", "depends_on": ["step03"]},
+    {"name": "step05", "label": "Prototype Bank", "optional": True,
+     "check_sql": "SELECT COUNT(*) FROM prototype_scoring_runs WHERE run_id = ?",
+     "check_label": "prototype_scoring_runs", "depends_on": ["step03"]},
+    {"name": "seed", "label": "Detector+DINOv2 Seed Vote", "optional": True,
+     "check_sql": "SELECT COUNT(*) FROM semantic_decisions WHERE run_id = ? AND score_components_json LIKE '%seed_label_source%'",
+     "check_label": "seed_relabels", "depends_on": ["step04", "step05"]},
+    {"name": "step06", "label": "Reliability Scoring", "optional": True,
+     "check_sql": "SELECT COUNT(*) FROM reliability_scoring_runs WHERE run_id = ?",
+     "check_label": "reliability_scoring_runs", "depends_on": ["seed"]},
+    {"name": "step07", "label": "Decision Policy", "optional": True,
+     "check_sql": "SELECT COUNT(*) FROM decision_policy_runs WHERE run_id = ?",
+     "check_label": "decision_policy_runs", "depends_on": ["step06"]},
+]
 DEFAULT_DINOV2_MODEL = "facebook/dinov2-giant"
 
 
@@ -81,8 +111,6 @@ def cmd_detect(args: argparse.Namespace) -> int:
         "--final-max-dets-per-class", str(args.final_max_dets_per_class),
         "--adaptive-duplicate-filter" if bool(args.adaptive_duplicate_filter) else "--no-adaptive-duplicate-filter",
         "--duplicate-iou-threshold", str(args.duplicate_iou_threshold),
-        "--duplicate-containment-threshold", str(args.duplicate_containment_threshold),
-        "--duplicate-min-area-ratio", str(args.duplicate_min_area_ratio),
         "--image-workers", str(args.image_workers),
         "--service-workers", str(args.service_workers),
         "--service-queue-size", str(args.service_queue_size or max(16, int(args.image_workers) * 4)),
@@ -109,29 +137,15 @@ def cmd_filter(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     db = _db_path(args)
 
-    rc = _run_module(
-        "steps.openclip_semantic.main",
-        [
-            "--db", str(db),
-            "--image-root", str(input_dir),
-            "--source-run-id", str(args.source_run_id),
-            "--stage", str(args.stage),
-            "--model-name", str(args.openclip_model),
-            "--pretrained", str(args.openclip_pretrained),
-            "--device", str(args.device),
-            "--batch-size", str(args.openclip_batch_size),
-            "--num-workers", str(args.openclip_workers),
-        ] + (["--limit", str(args.limit)] if int(args.limit) > 0 else []),
-    )
-    if rc != 0:
-        return rc
-
+    # OpenCLIP has been removed from the pipeline.  Step 01 now reads the
+    # GroundingDINO detections directly from the same SQLite DB and seeds labels
+    # from the detector prompt; --source-run-id selects the damage_scan run.
     return _run_module(
         "steps.step01_semantic.main",
         [
             "--source-db", str(db),
             "--output-db", str(db),
-            "--semantic-run-id", str(args.semantic_run_id),
+            "--semantic-run-id", str(args.source_run_id),
             "--run-id", run_id,
             "--image-root", str(input_dir),
         ] + (["--limit", str(args.limit)] if int(args.limit) > 0 else []),
@@ -231,9 +245,64 @@ def cmd_export(args: argparse.Namespace) -> int:
     return _run_module("tools.export_dataset", argv)
 
 
+def _step_count(conn: sqlite3.Connection, step: dict, run_id: str) -> int:
+    try:
+        return int(conn.execute(step["check_sql"], (run_id,)).fetchone()[0])
+    except sqlite3.OperationalError:
+        return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     run_id = _require_run_id(args)
-    return _run_module("run_pipeline", ["--db", str(_db_path(args)), "status", "--run-id", run_id])
+    db_path = _db_path(args)
+    if not db_path.is_file():
+        print(f"DB not found: {db_path}", file=sys.stderr)
+        return 1
+
+    conn = connect_output(db_path)
+    try:
+        run_row = conn.execute(
+            "SELECT run_id, created_at_utc, source_semantic_run_id, "
+            "total_detections, cleaned_count, suspect_count, reject_count "
+            "FROM resemi_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+
+        if run_row is None:
+            print(f"Run not found: '{run_id}'")
+            recent = conn.execute(
+                "SELECT run_id, created_at_utc FROM resemi_runs ORDER BY created_at_utc DESC LIMIT 5"
+            ).fetchall()
+            if recent:
+                print("\nRecent runs:")
+                for row in recent:
+                    print(f"  {row['run_id']}  ({row['created_at_utc']})")
+            return 1
+
+        print(f"run_id:   {run_row['run_id']}")
+        print(f"created:  {run_row['created_at_utc']}")
+        print(f"semantic: {run_row['source_semantic_run_id']}")
+        total = run_row["total_detections"]
+        if total:
+            print(
+                f"counts:   {total} total | "
+                f"{run_row['cleaned_count']} cleaned | "
+                f"{run_row['suspect_count']} suspect | "
+                f"{run_row['reject_count']} reject"
+            )
+        print()
+        print("Step status:")
+        for step in STATUS_STEPS:
+            count = _step_count(conn, step, run_id)
+            done = count > 0
+            marker = "OK " if done else ("-- " if step["optional"] else "XX ")
+            opt = " [opt]" if step["optional"] else "      "
+            dep = f"  <- {', '.join(step['depends_on'])}" if step["depends_on"] else ""
+            count_str = f"{step['check_label']}={count}" if done else f"not run{dep}"
+            print(f"  {marker} {step['name']:8s}  {step['label']:<25s}{opt}  {count_str}")
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_recommended(args: argparse.Namespace) -> int:
@@ -274,10 +343,6 @@ def add_detect_args(parser: argparse.ArgumentParser) -> None:
                         help="Adaptive same/cross-class duplicate suppression after GDINO. Default on.")
     parser.add_argument("--duplicate-iou-threshold", type=float, default=0.0,
                         help="0=auto from current image; >0 forces duplicate IoU threshold.")
-    parser.add_argument("--duplicate-containment-threshold", type=float, default=0.0,
-                        help="0=auto from current image; >0 forces duplicate containment threshold.")
-    parser.add_argument("--duplicate-min-area-ratio", type=float, default=0.0,
-                        help="0=auto from current image; >0 forces containment small/large area ratio.")
     parser.add_argument("--image-workers", type=int, default=2,
                         help="Images processed concurrently. 2 overlaps CPU/IO with the GPU worker without changing results.")
     parser.add_argument("--service-workers", type=int, default=0,
@@ -293,13 +358,9 @@ def add_detect_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_filter_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--source-run-id", default="latest")
+    parser.add_argument("--source-run-id", default="latest",
+                        help="damage_scan run id to import GDINO detections from. Default: latest.")
     parser.add_argument("--stage", default="final")
-    parser.add_argument("--semantic-run-id", default="latest")
-    parser.add_argument("--openclip-model", default=DEFAULT_OPENCLIP_MODEL)
-    parser.add_argument("--openclip-pretrained", default=DEFAULT_OPENCLIP_PRETRAINED)
-    parser.add_argument("--openclip-batch-size", type=int, default=512)
-    parser.add_argument("--openclip-workers", type=int, default=32)
 
 
 def add_prepare_args(parser: argparse.ArgumentParser) -> None:
@@ -325,7 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_detect_args(p)
     p.set_defaults(func=cmd_detect)
 
-    p = sub.add_parser("filter", help="Step 2: OpenCLIP auxiliary evidence + initial clean/review tables.")
+    p = sub.add_parser("filter", help="Step 2: seed labels from GDINO detections + initial clean/review tables.")
     add_common_io(p, input_required=True)
     add_filter_args(p)
     p.set_defaults(func=cmd_filter)

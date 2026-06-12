@@ -29,10 +29,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Infer per-image duplicate thresholds and suppress same/cross-class duplicate boxes. Default on.")
     parser.add_argument("--duplicate-iou-threshold", type=float, default=0.0,
                         help="Override adaptive duplicate IoU threshold. 0 = infer from current image.")
-    parser.add_argument("--duplicate-containment-threshold", type=float, default=0.0,
-                        help="Override adaptive containment threshold. 0 = infer from current image.")
-    parser.add_argument("--duplicate-min-area-ratio", type=float, default=0.0,
-                        help="Override min small/large area ratio for containment duplicate. 0 = infer from current image.")
     parser.add_argument("--image-workers", type=int, default=1, help="How many images to process concurrently.")
     parser.add_argument("--service-workers", type=int, default=0, help="How many DINO worker processes to keep. 0 = auto.")
     parser.add_argument("--service-queue-size", type=int, default=0, help="How many waiting DINO calls to buffer. 0 = auto.")
@@ -70,8 +66,6 @@ def main(argv: list[str] | None = None) -> int:
         box_threshold_override=float(args.box_threshold),
         adaptive_duplicate_filter=bool(args.adaptive_duplicate_filter),
         duplicate_iou_threshold=float(args.duplicate_iou_threshold),
-        duplicate_containment_threshold=float(args.duplicate_containment_threshold),
-        duplicate_min_area_ratio=float(args.duplicate_min_area_ratio),
         image_workers=int(args.image_workers),
         service_workers=int(args.service_workers),
         service_queue_size=int(args.service_queue_size),

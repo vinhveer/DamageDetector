@@ -41,8 +41,6 @@ class DamageScanConfig:
     max_box_fraction_of_image: float = 0.92
     adaptive_duplicate_filter: bool = True
     duplicate_iou_threshold: float = 0.0
-    duplicate_containment_threshold: float = 0.0
-    duplicate_min_area_ratio: float = 0.0
     save_overlays: bool = True
     include_full_raw_in_overlay: bool = False
     image_workers: int = 1
@@ -234,8 +232,6 @@ class DamageScanPipeline:
                 image_height=int(image.height),
                 config=AdaptiveDuplicateConfig(
                     iou_threshold=float(self.config.duplicate_iou_threshold),
-                    containment_threshold=float(self.config.duplicate_containment_threshold),
-                    min_area_ratio=float(self.config.duplicate_min_area_ratio),
                 ),
                 max_dets_per_class=int(self.config.final_max_dets_per_class),
             )

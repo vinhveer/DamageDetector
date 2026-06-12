@@ -123,10 +123,10 @@ def _read_rows(conn: sqlite3.Connection, *, run_id: str, semantic_run_id: str) -
         SELECT d.run_id, d.result_id, d.initial_label, d.suggested_label, d.final_label,
                d.decision_type, d.reliability_score, d.reason_codes_json, d.score_components_json,
                d.prototype_class, d.prototype_similarity, d.nearest_core_class, d.nearest_core_similarity,
-               r.detector_label, r.prompt_key, r.detector_score
+               r.label AS detector_label, r.prompt_key, r.score AS detector_score
         FROM semantic_decisions d
-        JOIN src.openclip_semantic_results r
-          ON r.result_id = d.result_id AND r.semantic_run_id = ?
+        JOIN src.detections r
+          ON r.detection_id = d.result_id AND r.run_id = ?
         WHERE d.run_id = ?
         ORDER BY d.result_id
         """,
@@ -286,7 +286,7 @@ def _persist(conn: sqlite3.Connection, *, run_id: str, updates: list[tuple]) -> 
         UPDATE semantic_decisions
         SET suggested_label = ?, final_label = ?, decision_type = ?,
             reason_codes_json = ?, score_components_json = ?, created_at_utc = ?,
-            matched_rule = NULL, self_training_run_id = NULL
+            matched_rule = NULL
         WHERE run_id = ? AND result_id = ?
         """,
         [(suggested, final, dtype, reasons, components, created_at, run_id, result_id) for suggested, final, dtype, reasons, components, created_at, result_id in updates],

@@ -114,6 +114,9 @@ class EditableBoxItem(QtWidgets.QGraphicsRectItem):
 
     # --- resize driven by handles ----------------------------------------
     def begin_resize(self, corner: int) -> None:
+        canvas = self._canvas()
+        if canvas is not None:
+            canvas.begin_edit()
         self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
 
     def resize_to(self, corner: int, scene_pos: QtCore.QPointF) -> None:
@@ -141,12 +144,20 @@ class EditableBoxItem(QtWidgets.QGraphicsRectItem):
     def end_resize(self) -> None:
         self.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self._notify_changed()
+        canvas = self._canvas()
+        if canvas is not None:
+            canvas.end_edit()
 
     def _notify_changed(self) -> None:
         scene = self.scene()
         view = scene.views()[0] if scene and scene.views() else None
         if isinstance(view, ImageCanvas):
             view.boxesChanged.emit()
+
+    def _canvas(self) -> "ImageCanvas | None":
+        scene = self.scene()
+        view = scene.views()[0] if scene and scene.views() else None
+        return view if isinstance(view, ImageCanvas) else None
 
     # --- styling / painting ----------------------------------------------
     def _apply_style(self, selected: bool) -> None:
@@ -166,6 +177,19 @@ class EditableBoxItem(QtWidgets.QGraphicsRectItem):
         elif change == QtWidgets.QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self._notify_changed()
         return super().itemChange(change, value)
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            canvas = self._canvas()
+            if canvas is not None:
+                canvas.begin_edit()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        super().mouseReleaseEvent(event)
+        canvas = self._canvas()
+        if canvas is not None:
+            canvas.end_edit()
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: ANN001
         super().paint(painter, option, widget)
@@ -192,6 +216,8 @@ class EditableBoxItem(QtWidgets.QGraphicsRectItem):
 
 class ImageCanvas(QtWidgets.QGraphicsView):
     boxesChanged = QtCore.Signal()
+    editStarted = QtCore.Signal()
+    editEnded = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -205,7 +231,14 @@ class ImageCanvas(QtWidgets.QGraphicsView):
         self._draw_mode = False
         self._drag_start: QtCore.QPointF | None = None
         self._rubber: QtWidgets.QGraphicsRectItem | None = None
+        self._border: QtWidgets.QGraphicsRectItem | None = None
         self._new_label = DEFAULT_LABELS[0]
+
+    def begin_edit(self) -> None:
+        self.editStarted.emit()
+
+    def end_edit(self) -> None:
+        self.editEnded.emit()
 
     # --- mode / loading ---------------------------------------------------
     def set_draw_mode(self, enabled: bool) -> None:
@@ -222,9 +255,15 @@ class ImageCanvas(QtWidgets.QGraphicsView):
         if pixmap.isNull():
             raise RuntimeError(f"Cannot load image: {image_path}")
         self._scene.clear()
+        self._border = None
         self._pixmap_item = self._scene.addPixmap(pixmap)
         self._pixmap_item.setZValue(0)
         self._scene.setSceneRect(QtCore.QRectF(pixmap.rect()))
+        # Image border so the edges stay visible when zoomed in.
+        border_pen = QtGui.QPen(QtGui.QColor(60, 60, 60), 1)
+        border_pen.setCosmetic(True)
+        self._border = self._scene.addRect(QtCore.QRectF(pixmap.rect()), border_pen)
+        self._border.setZValue(1)
         for data in boxes:
             self._scene.addItem(EditableBoxItem(data))
         self.fitInView(self._scene.sceneRect(), QtCore.Qt.AspectRatioMode.KeepAspectRatio)
@@ -241,7 +280,8 @@ class ImageCanvas(QtWidgets.QGraphicsView):
 
     # --- box access -------------------------------------------------------
     def box_items(self) -> list[EditableBoxItem]:
-        return [it for it in self._scene.items() if isinstance(it, EditableBoxItem)]
+        items = [it for it in self._scene.items() if isinstance(it, EditableBoxItem)]
+        return sorted(items, key=lambda it: (it.scene_rect().left(), it.scene_rect().top()))
 
     def boxes(self) -> list[BoxData]:
         bounds = self.image_rect()
@@ -263,21 +303,35 @@ class ImageCanvas(QtWidgets.QGraphicsView):
         rect = scene_rect.normalized().intersected(self.image_rect())
         if rect.width() < MIN_BOX or rect.height() < MIN_BOX:
             return
+        self.begin_edit()
         item = EditableBoxItem(BoxData(box=[rect.left(), rect.top(), rect.right(), rect.bottom()],
                                        label=self._new_label, score=1.0))
         self._scene.addItem(item)
         self._scene.clearSelection()
         item.setSelected(True)
         self.boxesChanged.emit()
+        self.end_edit()
+
+    def set_boxes(self, boxes: list[BoxData]) -> None:
+        for it in self.box_items():
+            self._scene.removeItem(it)
+        for data in boxes:
+            self._scene.addItem(EditableBoxItem(data))
+        self._hide_all_handles()
+        self.boxesChanged.emit()
 
     def delete_selected(self) -> int:
+        selected = [it for it in self.box_items() if it.isSelected()]
+        if not selected:
+            return 0
+        self.begin_edit()
         removed = 0
-        for it in self.box_items():
-            if it.isSelected():
-                self._scene.removeItem(it)
-                removed += 1
+        for it in selected:
+            self._scene.removeItem(it)
+            removed += 1
         if removed:
             self.boxesChanged.emit()
+        self.end_edit()
         return removed
 
     def selected_items(self) -> list[EditableBoxItem]:
@@ -291,12 +345,17 @@ class ImageCanvas(QtWidgets.QGraphicsView):
             self.centerOn(items[index])
 
     def set_label_for_selected(self, label: str) -> None:
+        selected = self.selected_items()
+        if not selected:
+            return
+        self.begin_edit()
         changed = False
-        for it in self.selected_items():
+        for it in selected:
             it.set_label(label)
             changed = True
         if changed:
             self.boxesChanged.emit()
+        self.end_edit()
 
     def fit_image(self) -> None:
         if self._pixmap_item is not None:
@@ -406,6 +465,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._entries: list[ImageEntry] = []
         self._current: int = -1
         self._dirty = False
+        self._undo_stack: list[list[BoxData]] = []
+        self._restoring_undo = False
         self._build_ui()
         self._build_actions()
         self._refresh_box_list()
@@ -415,6 +476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._canvas = ImageCanvas(self)
         self.setCentralWidget(self._canvas)
         self._canvas.boxesChanged.connect(self._on_boxes_changed)
+        self._canvas.editStarted.connect(self._push_undo_snapshot)
         self._canvas._scene.selectionChanged.connect(self._on_scene_selection)
 
         self._toolbar = QtWidgets.QToolBar("Main", self)
@@ -482,9 +544,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_next.setShortcut("]")
         self._act_next.triggered.connect(lambda: self._step(1))
 
-        self._act_draw = QtGui.QAction("Draw box", self)
+        self._act_draw = QtGui.QAction("New box", self)
         self._act_draw.setCheckable(True)
-        self._act_draw.setShortcut("D")
+        self._act_draw.setShortcut("N")
         self._act_draw.toggled.connect(self._canvas.set_draw_mode)
 
         self._act_fit = QtGui.QAction("Fit", self)
@@ -494,6 +556,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._act_save = QtGui.QAction(style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogSaveButton), "Save", self)
         self._act_save.setShortcut(QtGui.QKeySequence.StandardKey.Save)
         self._act_save.triggered.connect(self._save)
+
+        self._act_undo = QtGui.QAction("Undo", self)
+        self._act_undo.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
+        self._act_undo.triggered.connect(self._undo)
+        self.addAction(self._act_undo)
 
         for act in (self._act_open, self._act_prev, self._act_next):
             self._toolbar.addAction(act)
@@ -562,9 +629,48 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._current = row
         self._dirty = False
+        self._undo_stack.clear()
         src = "edited" if entry.saved else "original"
         self.statusBar().showMessage(f"Loaded {entry.image.name} ({len(boxes)} boxes, {src})")
         self._refresh_box_list()
+
+    # --- undo --------------------------------------------------------------
+    def _snapshot_boxes(self) -> list[BoxData]:
+        return [BoxData(box=list(b.box), label=b.label, score=b.score) for b in self._canvas.boxes()]
+
+    def _push_undo_snapshot(self) -> None:
+        if self._restoring_undo or not (0 <= self._current < len(self._entries)):
+            return
+        snapshot = self._snapshot_boxes()
+        if self._undo_stack and self._same_boxes(self._undo_stack[-1], snapshot):
+            return
+        self._undo_stack.append(snapshot)
+        if len(self._undo_stack) > 100:
+            self._undo_stack.pop(0)
+
+    def _undo(self) -> None:
+        if not self._undo_stack:
+            return
+        snapshot = self._undo_stack.pop()
+        self._restoring_undo = True
+        try:
+            self._canvas.set_boxes(snapshot)
+        finally:
+            self._restoring_undo = False
+        self._dirty = True
+        self._refresh_box_list()
+        self.statusBar().showMessage("Undo")
+
+    @staticmethod
+    def _same_boxes(a: list[BoxData], b: list[BoxData]) -> bool:
+        if len(a) != len(b):
+            return False
+        for left, right in zip(a, b):
+            if left.label != right.label or abs(left.score - right.score) > 1e-9:
+                return False
+            if any(abs(x - y) > 1e-6 for x, y in zip(left.box, right.box)):
+                return False
+        return True
 
     # --- box list sync ----------------------------------------------------
     def _on_boxes_changed(self) -> None:

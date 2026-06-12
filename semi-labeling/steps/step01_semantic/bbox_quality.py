@@ -365,33 +365,10 @@ def _decide_cleanup(
         elif quality.background_context_penalty > 0.0:
             decisions[geometry.result_id] = _make_decision(geometry, quality, "suspect_broad_box", False, None, ["parent_too_broad"])
 
-    containment_edges = [edge for edge in edges if edge.containment_small_in_large >= config.containment_threshold and edge.label_agreement]
-    for edge in sorted(containment_edges, key=lambda item: item.area_ratio, reverse=True):
-        parent = geometry_by_id.get(edge.parent_result_id)
-        child = geometry_by_id.get(edge.child_result_id)
-        if parent is None or child is None:
-            continue
-        parent_quality = quality_by_id[parent.result_id]
-        child_quality = quality_by_id[child.result_id]
-        parent_decision = decisions[parent.result_id]
-        if parent_decision.decision_type in {"suspect_composite_box", "suspect_broad_box", "manual_box_review"}:
-            continue
-        if parent_decision.decision_type == "keep_long_crack_parent":
-            decisions[child.result_id] = _make_decision(child, child_quality, "drop_nested_duplicate", False, parent.result_id, ["high_containment_same_label", "contained_by_long_crack_parent"])
-            continue
-        quality_delta = parent_quality.box_quality_score - child_quality.box_quality_score
-        if abs(quality_delta) < config.quality_tie_margin:
-            keep_parent = False
-            reason = ["high_containment_same_label", "quality_margin_small"]
-        else:
-            keep_parent = quality_delta > 0.0
-            reason = ["high_containment_same_label"]
-        if keep_parent:
-            decisions[parent.result_id] = _make_decision(parent, parent_quality, "keep_representative", True, parent.result_id, reason)
-            decisions[child.result_id] = _make_decision(child, child_quality, "drop_nested_duplicate", False, parent.result_id, reason)
-        else:
-            decisions[child.result_id] = _make_decision(child, child_quality, "keep_representative", True, child.result_id, reason)
-            decisions[parent.result_id] = _make_decision(parent, parent_quality, "drop_nested_duplicate", False, child.result_id, reason)
+    # Nested-containment suppression is intentionally disabled: a small box fully
+    # inside a larger box is NOT dropped. We accept that the image may end up
+    # densely filled with boxes; only true overlapping duplicates are removed
+    # upstream by IoU in the detect step.
 
     for geometry in geometries:
         if geometry.result_id not in parent_by_child and geometry.result_id not in children_by_parent:

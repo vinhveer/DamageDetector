@@ -8,7 +8,7 @@ from typing import Any, Callable
 from urllib.parse import quote
 from urllib.request import pathname2url
 
-from ..domain.models import Candidate, ClassDist, CleanedItem, QueueItem
+from ..domain.models import Candidate, ClassDist, CleanedItem, Group, QueueItem
 from .sampling import decode_vec, select_diverse_sample
 
 try:  # Tests for this service intentionally run without Qt.
@@ -210,24 +210,8 @@ def list_queue(
 ) -> dict[str, Any]:
     conn = connect_ro(db_path)
     try:
-        latest_clf = conn.execute(
-            """
-            SELECT classifier_run_id FROM classifier_runs
-            WHERE run_id = ? ORDER BY created_at_utc DESC, classifier_run_id DESC LIMIT 1
-            """,
-            (run_id,),
-        ).fetchone()
-        latest_st = conn.execute(
-            """
-            SELECT self_training_run_id FROM self_training_runs
-            WHERE run_id = ? ORDER BY created_at_utc DESC, self_training_run_id DESC LIMIT 1
-            """,
-            (run_id,),
-        ).fetchone()
-        latest_clf_id = str(latest_clf["classifier_run_id"]) if latest_clf else ""
-        latest_st_id = str(latest_st["self_training_run_id"]) if latest_st else ""
         type_clause = "AND q.queue_type = ?" if queue_type and queue_type != "all" else ""
-        params: list[Any] = [run_id, latest_clf_id, latest_st_id, run_id]
+        params: list[Any] = [run_id]
         if type_clause:
             params.append(queue_type)
         safe_limit = max(0, int(limit or 0))
@@ -239,23 +223,15 @@ def list_queue(
             SELECT q.result_id, q.image_rel_path, q.crop_path, q.initial_label, q.suggested_label,
                    q.queue_type, q.reliability_score, q.reason_codes_json,
                    cv.x1, cv.y1, cv.x2, cv.y2,
-                   rd.action AS decided_action, rd.new_label AS decided_label,
-                   cps.predicted_label, cps.predicted_probability, cps.margin,
-                   cps.second_label, cps.second_probability,
-                   cps.disagrees_with_policy, cps.policy_label,
-                   stp.reason_codes_json AS defer_reason_codes_json
+                   rd.action AS decided_action, rd.new_label AS decided_label
             FROM review_queue q
             LEFT JOIN crop_views cv ON cv.run_id = q.run_id AND cv.result_id = q.result_id AND cv.view_name = 'tight'
             LEFT JOIN review_decisions rd ON rd.result_id = q.result_id
               AND rd.review_session_id IN (SELECT review_session_id FROM review_sessions WHERE run_id = ?)
-            LEFT JOIN classifier_prediction_summary cps
-              ON cps.classifier_run_id = ? AND cps.result_id = q.result_id
-            LEFT JOIN self_training_promotions stp
-              ON stp.self_training_run_id = ? AND stp.result_id = q.result_id AND stp.action = 'defer_review'
             WHERE q.run_id = ? {type_clause}
             ORDER BY q.reliability_score ASC, q.result_id ASC{limit_sql}{offset_sql}
             """,
-            params,
+            [run_id] + params,
         ).fetchall()
 
         count_params: list[Any] = [run_id]
@@ -304,7 +280,6 @@ def list_queue(
         all_items = []
         for row in rows:
             crop_path = _resolve_crop_path(row["crop_path"])
-            pred_label = str(row["predicted_label"]) if row["predicted_label"] is not None else None
             all_items.append(
                 QueueItem(
                     result_id=int(row["result_id"]),
@@ -320,16 +295,6 @@ def list_queue(
                     box=_box(row),
                     decided_action=str(row["decided_action"] or ""),
                     decided_label=str(row["decided_label"] or ""),
-                    pred_label=pred_label,
-                    pred_prob=float(row["predicted_probability"] or 0),
-                    pred_margin=float(row["margin"] or 0),
-                    second_label=str(row["second_label"] or ""),
-                    second_prob=(
-                        None if row["second_probability"] is None else float(row["second_probability"])
-                    ),
-                    disagrees_with_policy=bool(int(row["disagrees_with_policy"] or 0)),
-                    policy_label=str(row["policy_label"] or ""),
-                    defer_reasons=_json_array(row["defer_reason_codes_json"]),
                 )
             )
         items = (
@@ -380,7 +345,7 @@ def list_cleaned(
             f"""
             SELECT result_id, image_rel_path, crop_path, final_label, export_label,
                    decision_type, reliability_score, reason_codes_json,
-                   x1, y1, x2, y2, self_training_run_id, decision_policy_run_id
+                   x1, y1, x2, y2, decision_policy_run_id
             FROM cleaned_labels
             WHERE {' AND '.join(clauses)}
             ORDER BY result_id ASC{limit_sql}{offset_sql}
@@ -403,7 +368,6 @@ def list_cleaned(
                     crop_uri=_file_uri(crop_path) if crop_path else "",
                     image_uri=_file_uri(_resolve_image_path(image_root, row["image_rel_path"])),
                     reasons=_json_array(row["reason_codes_json"]),
-                    self_training_run_id=str(row["self_training_run_id"] or ""),
                     decision_policy_run_id=str(row["decision_policy_run_id"] or ""),
                 )
             )
@@ -598,9 +562,6 @@ def get_run_resources(db_path: str | Path, run_id: str) -> dict[str, Any]:
         core = one(
             "SELECT core_mining_run_id FROM core_mining_runs WHERE run_id = ? ORDER BY created_at_utc DESC LIMIT 1"
         )
-        clf = one(
-            "SELECT classifier_run_id, created_at_utc FROM classifier_runs WHERE run_id = ? ORDER BY created_at_utc DESC LIMIT 1"
-        )
         counts = {
             "reviewQueue": int(
                 conn.execute("SELECT COUNT(*) n FROM review_queue WHERE run_id = ?", (run_id,)).fetchone()[
@@ -627,7 +588,6 @@ def get_run_resources(db_path: str | Path, run_id: str) -> dict[str, Any]:
             "embeddingRunId": str(emb["embedding_run_id"]) if emb else "",
             "prototypeVersionId": str(proto["prototype_version_id"]) if proto else "",
             "coreMiningRunId": str(core["core_mining_run_id"]) if core else "",
-            "classifierRunId": str(clf["classifier_run_id"]) if clf else "",
             "counts": counts,
         }
     finally:
@@ -746,6 +706,127 @@ def list_prototype_candidates(
         conn.close()
 
 
+GROUPS_SQL = """
+WITH ranked AS (
+  SELECT cm.core_cluster_id, cm.result_id, cm.similarity,
+         ROW_NUMBER() OVER (
+           PARTITION BY cm.core_cluster_id
+           ORDER BY cm.similarity DESC, cm.result_id ASC
+         ) AS rn
+  FROM core_cluster_members cm
+  WHERE cm.run_id = ? AND cm.is_core_member = 1
+)
+SELECT cc.core_cluster_id, cc.label, cc.size, cc.member_count, cc.status,
+       r.result_id AS rep_result_id, r.similarity AS rep_similarity,
+       cv.crop_path, cv.image_rel_path, cv.x1, cv.y1, cv.x2, cv.y2
+FROM core_clusters cc
+LEFT JOIN ranked r ON r.core_cluster_id = cc.core_cluster_id AND r.rn = 1
+LEFT JOIN crop_views cv
+  ON cv.run_id = cc.run_id AND cv.result_id = r.result_id AND cv.view_name = 'tight'
+WHERE cc.run_id = ?
+ORDER BY cc.label ASC, cc.size DESC, cc.core_cluster_id ASC
+"""
+
+
+def list_groups(
+    db_path: str | Path,
+    run_id: str,
+    image_root: str,
+    label: str = "",
+) -> dict[str, Any]:
+    """Visual domains / core clusters mined in the prepare step.
+
+    Each row is one group with its label, size and a representative crop (the
+    highest-similarity core member) used as the group thumbnail.  ``domain_index``
+    is assigned per label by descending size so it matches the prototype page.
+    """
+    conn = connect_ro(db_path)
+    try:
+        rows = conn.execute(GROUPS_SQL, (run_id, run_id)).fetchall()
+        domain_counter: dict[str, int] = {}
+        groups: list[Group] = []
+        counts: dict[str, int] = {}
+        for row in rows:
+            group_label = str(row["label"] or "")
+            if label and label != "all" and group_label != label:
+                continue
+            domain_index = domain_counter.get(group_label, 0)
+            domain_counter[group_label] = domain_index + 1
+            counts[group_label] = counts.get(group_label, 0) + 1
+            rep_rid = row["rep_result_id"]
+            groups.append(
+                Group(
+                    core_cluster_id=str(row["core_cluster_id"] or ""),
+                    label=group_label,
+                    size=int(row["size"] or 0),
+                    member_count=int(row["member_count"] or 0),
+                    domain_index=domain_index,
+                    status=str(row["status"] or ""),
+                    rep_result_id=None if rep_rid is None else int(rep_rid),
+                    rep_similarity=float(row["rep_similarity"] or 0),
+                    rep_image_rel_path=str(row["image_rel_path"] or ""),
+                    rep_box=_box(row),
+                    rep_image_uri=_file_uri(_resolve_image_path(image_root, row["image_rel_path"])),
+                )
+            )
+        return {"items": groups, "total": len(groups), "counts": counts}
+    finally:
+        conn.close()
+
+
+def list_group_members(
+    db_path: str | Path,
+    run_id: str,
+    image_root: str,
+    core_cluster_id: str,
+    limit: int = 0,
+) -> dict[str, Any]:
+    """All core members of one group, ordered by centroid similarity."""
+    cid = str(core_cluster_id or "").strip()
+    if not cid:
+        return {"items": [], "total": 0}
+    conn = connect_ro(db_path)
+    try:
+        safe_limit = max(0, int(limit or 0))
+        limit_sql = f" LIMIT {safe_limit}" if safe_limit > 0 else ""
+        rows = conn.execute(
+            f"""
+            SELECT cm.result_id, cm.similarity, cc.label,
+                   cv.crop_path, cv.image_rel_path, cv.x1, cv.y1, cv.x2, cv.y2
+            FROM core_cluster_members cm
+            JOIN core_clusters cc
+              ON cc.run_id = cm.run_id AND cc.core_cluster_id = cm.core_cluster_id
+            LEFT JOIN crop_views cv
+              ON cv.run_id = cm.run_id AND cv.result_id = cm.result_id AND cv.view_name = 'tight'
+            WHERE cm.run_id = ? AND cm.core_cluster_id = ? AND cm.is_core_member = 1
+            ORDER BY cm.similarity DESC, cm.result_id ASC{limit_sql}
+            """,
+            (run_id, cid),
+        ).fetchall()
+        items: list[Candidate] = []
+        for row in rows:
+            crop_path = _resolve_crop_path(row["crop_path"])
+            items.append(
+                Candidate(
+                    result_id=int(row["result_id"]),
+                    label=str(row["label"] or ""),
+                    predicted_label=str(row["label"] or ""),
+                    reliability_score=float(row["similarity"] or 0),
+                    crop_uri=_file_uri(crop_path) if crop_path else "",
+                    image_uri=_file_uri(_resolve_image_path(image_root, row["image_rel_path"])),
+                    box=_box(row),
+                    cluster_id=cid,
+                    domain_index=None,
+                    cluster_size=len(rows),
+                    centroid_similarity=float(row["similarity"] or 0),
+                    image_rel_path=str(row["image_rel_path"] or ""),
+                )
+            )
+        return {"items": items, "total": len(items)}
+    finally:
+        conn.close()
+
+
 def latest_prototype(db_path: str | Path, run_id: str) -> dict[str, Any]:
     conn = connect_ro(db_path)
     try:
@@ -759,62 +840,6 @@ def latest_prototype(db_path: str | Path, run_id: str) -> dict[str, Any]:
             (run_id,),
         ).fetchone()
         return {"prototype": dict(row) if row else None}
-    finally:
-        conn.close()
-
-
-def get_selftrain_promotions(
-    db_path: str | Path,
-    run_id: str,
-    image_root: str,
-    self_training_run_id: str = "",
-    action: str = "",
-) -> dict[str, Any]:
-    conn = connect_ro(db_path)
-    try:
-        st_id = str(self_training_run_id or "").strip()
-        if not st_id:
-            row = conn.execute(
-                """
-                SELECT self_training_run_id FROM self_training_runs
-                WHERE run_id = ? ORDER BY created_at_utc DESC, self_training_run_id DESC LIMIT 1
-                """,
-                (run_id,),
-            ).fetchone()
-            st_id = str(row["self_training_run_id"]) if row else ""
-        if not st_id:
-            return {"promotions": []}
-        action_clause = "AND p.action = ?" if action and action != "all" else ""
-        params: list[Any] = [run_id, st_id]
-        if action_clause:
-            params.append(action)
-        rows = conn.execute(
-            f"""
-            SELECT p.result_id, p.action, p.predicted_label, p.classifier_confidence, p.classifier_margin,
-                   cv.image_rel_path, cv.crop_path, cv.x1, cv.y1, cv.x2, cv.y2
-            FROM self_training_promotions p
-            LEFT JOIN crop_views cv ON cv.run_id = ? AND cv.result_id = p.result_id AND cv.view_name = 'tight'
-            WHERE p.self_training_run_id = ? {action_clause}
-            ORDER BY p.result_id ASC
-            """,
-            params,
-        ).fetchall()
-        promotions = []
-        for row in rows:
-            crop_path = _resolve_crop_path(row["crop_path"])
-            promotions.append(
-                {
-                    "resultId": int(row["result_id"]),
-                    "action": str(row["action"] or ""),
-                    "predictedLabel": str(row["predicted_label"] or ""),
-                    "classifierConfidence": float(row["classifier_confidence"] or 0),
-                    "classifierMargin": float(row["classifier_margin"] or 0),
-                    "imageUri": _file_uri(_resolve_image_path(image_root, row["image_rel_path"])),
-                    "cropUri": _file_uri(crop_path) if crop_path else "",
-                    "box": _box(row),
-                }
-            )
-        return {"promotions": promotions}
     finally:
         conn.close()
 

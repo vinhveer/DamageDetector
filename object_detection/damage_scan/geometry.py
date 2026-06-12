@@ -172,20 +172,18 @@ def adaptive_duplicate_filter(
         duplicate_reason = ""
         for existing in kept:
             iou_value = box_iou(det.box, existing.box)
-            contain_value = box_containment(det.box, existing.box)
-            ratio_value = box_area_ratio(det.box, existing.box)
             same_label = str(det.label) == str(existing.label)
-            if same_label and (iou_value >= iou_threshold or (contain_value >= containment_threshold and ratio_value >= min_area_ratio)):
+            # Only suppress true overlapping duplicates (high IoU). Boxes that are
+            # merely contained inside a larger box are kept on purpose, so fine
+            # damage nested inside broader regions stays in the output even if it
+            # fills the image with many boxes.
+            if same_label and iou_value >= iou_threshold:
                 duplicate_of = existing
                 duplicate_reason = "same_label_overlap"
                 break
             if not same_label and iou_value >= max(0.42, iou_threshold):
                 duplicate_of = existing
                 duplicate_reason = "cross_label_iou"
-                break
-            if not same_label and contain_value >= containment_threshold and ratio_value >= max(0.45, min_area_ratio):
-                duplicate_of = existing
-                duplicate_reason = "cross_label_containment"
                 break
         if duplicate_of is not None:
             continue

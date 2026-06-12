@@ -481,97 +481,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY(review_session_id) REFERENCES review_sessions(review_session_id)
         );
 
-        CREATE TABLE IF NOT EXISTS classifier_runs (
-            classifier_run_id  TEXT PRIMARY KEY,
-            run_id             TEXT NOT NULL,
-            created_at_utc     TEXT NOT NULL,
-            model_json         TEXT NOT NULL,
-            options_json       TEXT NOT NULL,
-            FOREIGN KEY(run_id) REFERENCES resemi_runs(run_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS classifier_predictions (
-            classifier_run_id  TEXT NOT NULL,
-            result_id          INTEGER NOT NULL,
-            label              TEXT NOT NULL,
-            probability        REAL NOT NULL,
-            PRIMARY KEY (classifier_run_id, result_id, label),
-            FOREIGN KEY(classifier_run_id) REFERENCES classifier_runs(classifier_run_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS classifier_training_items (
-            classifier_run_id  TEXT NOT NULL,
-            result_id          INTEGER NOT NULL,
-            label              TEXT NOT NULL,
-            source_type        TEXT NOT NULL,
-            source_ref         TEXT NOT NULL,
-            reliability_score  REAL,
-            reason_codes_json  TEXT NOT NULL,
-            PRIMARY KEY (classifier_run_id, result_id),
-            FOREIGN KEY(classifier_run_id) REFERENCES classifier_runs(classifier_run_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS classifier_prediction_summary (
-            classifier_run_id    TEXT NOT NULL,
-            result_id            INTEGER NOT NULL,
-            predicted_label      TEXT NOT NULL,
-            predicted_probability REAL NOT NULL,
-            second_label         TEXT,
-            second_probability   REAL,
-            margin               REAL NOT NULL,
-            disagrees_with_policy INTEGER NOT NULL,
-            policy_label         TEXT,
-            reason_codes_json    TEXT NOT NULL,
-            PRIMARY KEY (classifier_run_id, result_id),
-            FOREIGN KEY(classifier_run_id) REFERENCES classifier_runs(classifier_run_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS classifier_oof_predictions (
-            classifier_run_id  TEXT NOT NULL,
-            result_id          INTEGER NOT NULL,
-            true_label         TEXT NOT NULL,
-            predicted_label    TEXT NOT NULL,
-            probability        REAL NOT NULL,
-            is_disagreement    INTEGER NOT NULL,
-            PRIMARY KEY (classifier_run_id, result_id),
-            FOREIGN KEY(classifier_run_id) REFERENCES classifier_runs(classifier_run_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS self_training_runs (
-            self_training_run_id TEXT PRIMARY KEY,
-            run_id               TEXT NOT NULL,
-            classifier_run_id    TEXT NOT NULL,
-            created_at_utc       TEXT NOT NULL,
-            round_index          INTEGER NOT NULL,
-            options_json         TEXT NOT NULL,
-            candidate_count      INTEGER NOT NULL,
-            promoted_count       INTEGER NOT NULL,
-            rejected_count       INTEGER NOT NULL,
-            deferred_count       INTEGER NOT NULL,
-            FOREIGN KEY(run_id) REFERENCES resemi_runs(run_id),
-            FOREIGN KEY(classifier_run_id) REFERENCES classifier_runs(classifier_run_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS self_training_promotions (
-            self_training_run_id TEXT NOT NULL,
-            result_id            INTEGER NOT NULL,
-            previous_label       TEXT NOT NULL,
-            predicted_label      TEXT NOT NULL,
-            action               TEXT NOT NULL,
-            classifier_confidence REAL NOT NULL,
-            classifier_margin    REAL NOT NULL,
-            prototype_class      TEXT,
-            prototype_similarity REAL,
-            nearest_core_class   TEXT,
-            nearest_core_similarity REAL,
-            geometry_decision    TEXT,
-            consistency_score    REAL,
-            reason_codes_json    TEXT NOT NULL,
-            evidence_json        TEXT NOT NULL,
-            PRIMARY KEY (self_training_run_id, result_id),
-            FOREIGN KEY(self_training_run_id) REFERENCES self_training_runs(self_training_run_id)
-        );
-
         CREATE TABLE IF NOT EXISTS cleaned_labels (
             run_id             TEXT NOT NULL,
             result_id          INTEGER NOT NULL,
@@ -669,16 +578,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "semantic_decisions", "matched_rule", "TEXT")
     _ensure_column(conn, "cleaned_labels", "decision_policy_run_id", "TEXT")
     _ensure_column(conn, "review_queue", "decision_policy_run_id", "TEXT")
-    _ensure_column(conn, "classifier_runs", "embedding_run_id", "TEXT")
-    _ensure_column(conn, "classifier_runs", "model_type", "TEXT NOT NULL DEFAULT ''")
-    _ensure_column(conn, "classifier_runs", "feature_set_json", "TEXT NOT NULL DEFAULT '{}'")
-    _ensure_column(conn, "classifier_runs", "label_set_json", "TEXT NOT NULL DEFAULT '[]'")
-    _ensure_column(conn, "classifier_runs", "train_count", "INTEGER NOT NULL DEFAULT 0")
-    _ensure_column(conn, "classifier_runs", "prediction_count", "INTEGER NOT NULL DEFAULT 0")
-    _ensure_column(conn, "classifier_runs", "evaluation_json", "TEXT NOT NULL DEFAULT '{}'")
-    _ensure_column(conn, "classifier_runs", "model_blob", "BLOB")
-    _ensure_column(conn, "semantic_decisions", "self_training_run_id", "TEXT")
-    _ensure_column(conn, "cleaned_labels", "self_training_run_id", "TEXT")
     _write_schema_metadata(conn)
     conn.commit()
 

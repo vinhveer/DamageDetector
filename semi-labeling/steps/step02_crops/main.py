@@ -25,7 +25,7 @@ from shared.crop.crop_generation import DEFAULT_VIEW_SPECS, default_crop_workers
 from shared.runtime.paths import default_image_root, default_resemi_db  # noqa: E402
 from steps.step01_semantic.pipeline import ResemiPipeline  # noqa: E402
 from shared.db.schema import connect_output  # noqa: E402
-from shared.db.source_store import connect_readonly, read_source_detections  # noqa: E402
+from shared.db.source_store import connect_readonly, read_gdino_detections  # noqa: E402
 
 
 def _read_run_row(conn, run_id: str) -> dict:
@@ -35,8 +35,8 @@ def _read_run_row(conn, run_id: str) -> dict:
     ).fetchone()
     if row is None:
         raise RuntimeError(
-            f"Resemi run not found: '{run_id}'. Run step01 first.\n"
-            "  python -m run_pipeline run step01 --run-id <id>"
+            f"Resemi run not found: '{run_id}'. Run the filter step first.\n"
+            "  python -m client_pipeline filter --input-dir <imgs> --output-dir <out> --run-id <id>"
         )
     return {
         "source_db_path": str(row["source_db_path"]),
@@ -124,9 +124,9 @@ def main(argv: list[str] | None = None) -> int:
 
         source_conn = connect_readonly(source_db)
         try:
-            detections = read_source_detections(
+            detections = read_gdino_detections(
                 source_conn,
-                semantic_run_id=run_meta["source_semantic_run_id"],
+                source_run_id=run_meta["source_semantic_run_id"],
                 limit=int(args.limit),
             )
         finally:

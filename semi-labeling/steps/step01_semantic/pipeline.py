@@ -18,11 +18,11 @@ from shared.db.source_store import (
     SemanticRunMetadata,
     SourceDetection,
     connect_readonly,
+    read_gdino_detections,
     read_kept_result_ids,
-    read_semantic_run_metadata,
-    read_source_detections,
+    read_source_run_metadata,
     resolve_dedup_run_id,
-    resolve_semantic_run_id,
+    resolve_source_run_id,
 )
 
 
@@ -88,8 +88,8 @@ class ResemiPipeline:
         dedup_conn: sqlite3.Connection | None = None
         output_conn = connect_output(output_db)
         try:
-            semantic_run_id = resolve_semantic_run_id(source_conn, self.config.semantic_run_id)
-            semantic_metadata = read_semantic_run_metadata(source_conn, semantic_run_id)
+            semantic_run_id = resolve_source_run_id(source_conn, self.config.semantic_run_id)
+            semantic_metadata = read_source_run_metadata(source_conn, semantic_run_id)
             dedup_run_id: str | None = None
             kept_result_ids: set[int] | None = None
             if self.config.dedup_db is not None:
@@ -97,9 +97,9 @@ class ResemiPipeline:
                 dedup_run_id = resolve_dedup_run_id(dedup_conn, self.config.dedup_run_id)
                 kept_result_ids = read_kept_result_ids(dedup_conn, dedup_run_id=dedup_run_id)
 
-            detections = read_source_detections(
+            detections = read_gdino_detections(
                 source_conn,
-                semantic_run_id=semantic_run_id,
+                source_run_id=semantic_run_id,
                 labels=self.config.labels,
                 kept_result_ids=kept_result_ids,
                 limit=self.config.limit,
@@ -179,27 +179,7 @@ class ResemiPipeline:
         dedup_run_id: str | None,
     ) -> None:
         conn.execute(
-            "DELETE FROM self_training_promotions WHERE self_training_run_id IN (SELECT self_training_run_id FROM self_training_runs WHERE run_id = ?)",
-            (run_id,),
-        )
-        conn.execute(
-            "DELETE FROM classifier_prediction_summary WHERE classifier_run_id IN (SELECT classifier_run_id FROM classifier_runs WHERE run_id = ?)",
-            (run_id,),
-        )
-        conn.execute(
-            "DELETE FROM classifier_oof_predictions WHERE classifier_run_id IN (SELECT classifier_run_id FROM classifier_runs WHERE run_id = ?)",
-            (run_id,),
-        )
-        conn.execute(
-            "DELETE FROM classifier_training_items WHERE classifier_run_id IN (SELECT classifier_run_id FROM classifier_runs WHERE run_id = ?)",
-            (run_id,),
-        )
-        conn.execute(
             "DELETE FROM review_decisions WHERE review_session_id IN (SELECT review_session_id FROM review_sessions WHERE run_id = ?)",
-            (run_id,),
-        )
-        conn.execute(
-            "DELETE FROM classifier_predictions WHERE classifier_run_id IN (SELECT classifier_run_id FROM classifier_runs WHERE run_id = ?)",
             (run_id,),
         )
         conn.execute(
@@ -243,8 +223,6 @@ class ResemiPipeline:
             (run_id,),
         )
         for table in (
-            "self_training_runs",
-            "classifier_runs",
             "decision_policy_runs",
             "reliability_scoring_runs",
             "reliability_scores",
@@ -253,7 +231,6 @@ class ResemiPipeline:
             "core_cluster_members",
             "core_clusters",
             "core_mining_runs",
-            "classifier_runs",
             "review_sessions",
             "embedding_runs",
             "box_graph_runs",
@@ -296,16 +273,16 @@ class ResemiPipeline:
         model_versions = {
             "semantic_models": [
                 {
-                    "name": "openclip",
+                    "name": "groundingdino",
                     "model_name": semantic_metadata.model_name,
                     "pretrained": semantic_metadata.pretrained,
                     "device": semantic_metadata.device,
-                    "source_semantic_run_id": semantic_metadata.semantic_run_id,
+                    "source_run_id": semantic_metadata.semantic_run_id,
                     "source_created_at_utc": semantic_metadata.created_at_utc,
                     "source_stage": semantic_metadata.source_stage,
                 }
             ],
-            "semantic_vote_sources": ["openclip_step2", "groundingdino_prompt"],
+            "semantic_vote_sources": ["groundingdino_prompt"],
             "decision_policy": "resemi_baseline_v0",
             "embedding_models": [],
             "prototype_versions": [self.config.prototype_version_id] if self.config.prototype_version_id else [],

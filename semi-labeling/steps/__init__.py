@@ -1,11 +1,11 @@
-"""steps — the 9 pipeline steps, one file per step.
+"""steps — the pipeline steps, one file per step.
 
 Each module exposes ``build_parser()`` and ``main(argv)`` and is the single
-CLI entry point for that step. Run them via the orchestrator:
+CLI entry point for that step. The supported client path drives them via:
 
-    python -m run_pipeline run step04 --run-id <id>
+    python -m client_pipeline recommended --input-dir <imgs> --output-dir <out> --run-id <id>
 
-or directly:
+or run a step directly:
 
     python -m steps.step04_core --run-id <id>
 """

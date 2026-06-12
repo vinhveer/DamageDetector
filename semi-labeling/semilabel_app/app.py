@@ -3,79 +3,30 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from .config.defaults import DEFAULT_SETTINGS, migrate_settings
 from .services.settings_service import SettingsService
 from .ui.main_window import ConnectDialog, MainWindow
 
 
-_APP_STYLE = """
-QMainWindow, QWidget {
-    font-size: 12px;
-}
-QFrame#ConnectionBar {
-    background: #f2f4f6;
-    border-bottom: 1px solid #d8dde3;
-}
-QFrame#Toolbar {
-    background: transparent;
-}
-QLabel#ToolbarLabel, QLabel#InfoKey {
-    color: #68717a;
-    font-weight: 600;
-}
-QLabel#Chip {
-    background: #eef2f5;
-    border: 1px solid #d6dde5;
-    border-radius: 8px;
-    padding: 3px 8px;
-    color: #2d3842;
-}
-QFrame#Card {
-    background: #ffffff;
-    border: 1px solid #dce1e6;
-    border-radius: 8px;
-}
-QLabel#CardTitle {
-    color: #2d3842;
-    font-weight: 700;
-}
-QLabel#InfoVal {
-    color: #20262d;
-}
-QFrame#DecisionBar {
-    background: #f8f9fa;
-    border: 1px solid #dce1e6;
-    border-radius: 8px;
-}
-QLabel#DecisionCaption {
-    color: #68717a;
-}
-QPushButton {
-    min-height: 28px;
-    padding: 5px 10px;
-}
-QPushButton[variant="primary"] {
-    background: #2563eb;
-    border: 1px solid #1d4ed8;
-    color: white;
-    border-radius: 6px;
-    font-weight: 600;
-}
-QPushButton[variant="danger"] {
-    background: #fee2e2;
-    border: 1px solid #ef4444;
-    color: #991b1b;
-    border-radius: 6px;
-    font-weight: 600;
-}
-QListView, QListWidget {
-    background: #ffffff;
-    border: 1px solid #dce1e6;
-    border-radius: 8px;
-}
+# Keep the look native (Fusion).  The only custom rules are the coloured
+# decision buttons, which carry an accent via the ``accent`` dynamic property;
+# everything else inherits the platform palette so the UI stays calm and
+# uncluttered.
+_ACCENT_STYLE = """
+QPushButton[accent="crack"]  { background: #4a90d9; color: white; font-weight: 600; }
+QPushButton[accent="mold"]   { background: #27ae60; color: white; font-weight: 600; }
+QPushButton[accent="spall"]  { background: #f39c12; color: white; font-weight: 600; }
+QPushButton[accent="reject"] { background: #e74c3c; color: white; font-weight: 600; }
+QPushButton[accent="primary"]{ background: #2563eb; color: white; font-weight: 600; }
+QPushButton:checked          { border: 2px solid #1f2937; }
 """
+
+
+def _apply_palette(app: QtWidgets.QApplication) -> None:
+    app.setStyle("Fusion")
+    app.setStyleSheet(_ACCENT_STYLE)
 
 
 def _load_settings(settings_service: SettingsService) -> dict:
@@ -100,7 +51,7 @@ def build_window(*, interactive_connect: bool = True) -> MainWindow | None:
 def run() -> None:
     QtCore.QLoggingCategory.setFilterRules("qt.accessibility.table.warning=false")
     app = QtWidgets.QApplication(sys.argv)
-    app.setStyleSheet(_APP_STYLE)
+    _apply_palette(app)
     QtCore.QThreadPool.globalInstance().setMaxThreadCount(6)
     app.setApplicationName("semilabel_app")
     app.setOrganizationName("DamageDetector")

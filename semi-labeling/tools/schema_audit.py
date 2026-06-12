@@ -47,13 +47,6 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "decision_policy_audit",
     "review_sessions",
     "review_decisions",
-    "classifier_runs",
-    "classifier_training_items",
-    "classifier_predictions",
-    "classifier_prediction_summary",
-    "classifier_oof_predictions",
-    "self_training_runs",
-    "self_training_promotions",
     "cleaned_labels",
     "review_queue",
 )
@@ -70,8 +63,6 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
     "decision_policy_audit": ("decision_policy_run_id", "result_id", "matched_rule", "thresholds_json", "score_components_json", "reason_codes_json"),
     "review_sessions": ("review_session_id", "run_id", "reviewer", "status", "created_at_utc", "committed_at_utc"),
     "review_decisions": ("review_session_id", "target_type", "target_id", "action", "affected_result_ids_json", "created_at_utc"),
-    "classifier_runs": ("classifier_run_id", "run_id", "embedding_run_id", "model_type", "evaluation_json", "model_blob"),
-    "self_training_runs": ("self_training_run_id", "run_id", "classifier_run_id", "round_index", "options_json"),
     "cleaned_labels": ("run_id", "result_id", "image_rel_path", "final_label", "export_label", "decision_type", "reliability_score"),
     "review_queue": ("run_id", "result_id", "image_rel_path", "initial_label", "suggested_label", "queue_type", "reason_codes_json"),
 }
