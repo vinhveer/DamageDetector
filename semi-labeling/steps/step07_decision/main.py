@@ -29,12 +29,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reliability-run-id", default="latest", help="Reliability run id, latest, or none.")
     parser.add_argument("--view-name", default="tight")
     parser.add_argument("--accept-threshold", type=float, default=0.75)
+    parser.add_argument("--accept-threshold-class", action="append", default=[], metavar="LABEL=VALUE",
+                        help="Per-class auto-accept reliability threshold, e.g. --accept-threshold-class crack=0.75. Repeatable; overrides --accept-threshold for that label.")
     parser.add_argument("--suspect-threshold", type=float, default=0.50)
+    parser.add_argument("--suspect-threshold-class", action="append", default=[], metavar="LABEL=VALUE",
+                        help="Per-class reliability floor below which a box becomes suspect, e.g. --suspect-threshold-class spall=0.3. Repeatable; overrides --suspect-threshold for that label.")
     parser.add_argument("--prototype-min-sim", type=float, default=0.70)
+    parser.add_argument("--prototype-min-sim-class", action="append", default=[], metavar="LABEL=VALUE",
+                        help="Per-class prototype/core similarity threshold, e.g. --prototype-min-sim-class spall=0.5. Repeatable; overrides --prototype-min-sim for that label.")
     parser.add_argument("--relabel-margin", type=float, default=0.05)
     parser.add_argument("--ambiguous-margin", type=float, default=0.03)
     parser.add_argument("--allow-low-priority-cleaned", action=argparse.BooleanOptionalAction, default=False,
                         help="Export uncertain low-priority items as cleaned. Default is off: uncertain items stay in review_queue.")
+    parser.add_argument("--allow-low-priority-class", action="append", default=[], metavar="LABEL=VALUE",
+                        help="Per-class low-priority-cleaned switch, e.g. --allow-low-priority-class spall=1 mold=0. Repeatable; overrides --allow-low-priority-cleaned for that label.")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -64,6 +72,36 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"Resemi DB not found: {db_path}")
     conn = connect_output(db_path)
     try:
+        def _parse_by_class(items: list[str], flag: str) -> dict[str, float]:
+            out: dict[str, float] = {}
+            for item in items:
+                label, _, value = str(item).partition("=")
+                label = label.strip()
+                if not label or not value.strip():
+                    raise SystemExit(f"{flag} expects LABEL=VALUE, got: {item!r}")
+                out[label] = float(value)
+            return out
+
+        def _parse_bool_by_class(items: list[str], flag: str) -> dict[str, bool]:
+            out: dict[str, bool] = {}
+            for item in items:
+                label, _, value = str(item).partition("=")
+                label = label.strip()
+                value = value.strip().lower()
+                if not label or not value:
+                    raise SystemExit(f"{flag} expects LABEL=VALUE, got: {item!r}")
+                if value in {"1", "true", "yes", "on"}:
+                    out[label] = True
+                elif value in {"0", "false", "no", "off"}:
+                    out[label] = False
+                else:
+                    raise SystemExit(f"{flag} value must be 1/0/true/false, got: {item!r}")
+            return out
+
+        min_sim_by_class = _parse_by_class(args.prototype_min_sim_class, "--prototype-min-sim-class")
+        suspect_by_class = _parse_by_class(args.suspect_threshold_class, "--suspect-threshold-class")
+        accept_by_class = _parse_by_class(args.accept_threshold_class, "--accept-threshold-class")
+        low_priority_by_class = _parse_bool_by_class(args.allow_low_priority_class, "--allow-low-priority-class")
         config = DecisionPolicyConfig(
             accept_threshold=float(args.accept_threshold),
             suspect_threshold=float(args.suspect_threshold),
@@ -72,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
             ambiguous_margin=float(args.ambiguous_margin),
             view_name=str(args.view_name),
             allow_low_priority_cleaned=bool(args.allow_low_priority_cleaned),
+            prototype_min_sim_by_class=min_sim_by_class or None,
+            suspect_threshold_by_class=suspect_by_class or None,
+            accept_threshold_by_class=accept_by_class or None,
+            allow_low_priority_by_class=low_priority_by_class or None,
         )
         result = apply_decision_policy(conn, run_id=str(args.run_id), config=config, reliability_run_id=str(args.reliability_run_id or "none"))
         if not bool(args.dry_run):

@@ -745,8 +745,11 @@ class DINO(nn.Module):
         # box_cls.shape: 1, 300, 80
         # box_pred.shape: 1, 300, 4
         prob = box_cls.sigmoid()
+        select_box_nums = min(
+            self.select_box_nums_for_evaluation, prob.view(box_cls.shape[0], -1).shape[1]
+        )
         topk_values, topk_indexes = torch.topk(
-            prob.view(box_cls.shape[0], -1), self.select_box_nums_for_evaluation, dim=1
+            prob.view(box_cls.shape[0], -1), select_box_nums, dim=1
         )
         scores = topk_values
         topk_boxes = torch.div(topk_indexes, box_cls.shape[2], rounding_mode="floor")

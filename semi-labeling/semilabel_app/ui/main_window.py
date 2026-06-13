@@ -16,7 +16,7 @@ from ..services.image_service import ImageService
 from ..services.settings_service import SettingsService
 from .connect_dialog import ConnectDialog
 from .options_dialog import OptionsDialog
-from .pages import ImageOverviewPage, PrototypePage, ReviewPage
+from .pages import ImageOverviewPage, PrototypePage
 
 __all__ = ["ConnectDialog", "MainWindow"]
 
@@ -39,7 +39,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs = QtWidgets.QTabWidget(self)
         self.tabs.setDocumentMode(True)
         self.before_page = ImageOverviewPage(self)
-        self.review_page = ReviewPage(self, cleaned=False)
+        self.review_page = ImageOverviewPage(self, default_source="cleaned", title_text="Review")
         self.prototype_page = PrototypePage(self)
         self.tabs.addTab(self.before_page, "Before")
         self.tabs.addTab(self.review_page, "Review")

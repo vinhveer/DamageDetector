@@ -16,17 +16,45 @@ class DecisionPolicyConfig:
     ambiguous_margin: float = 0.03
     view_name: str = "tight"
     allow_low_priority_cleaned: bool = False
+    prototype_min_sim_by_class: dict[str, float] | None = None
+    suspect_threshold_by_class: dict[str, float] | None = None
+    accept_threshold_by_class: dict[str, float] | None = None
+    allow_low_priority_by_class: dict[str, bool] | None = None
+
+    def min_sim_for(self, label: object) -> float:
+        """Per-class prototype/core similarity threshold; falls back to the global value."""
+        by_class = self.prototype_min_sim_by_class or {}
+        return float(by_class.get(str(label or ""), self.prototype_min_sim))
+
+    def suspect_threshold_for(self, label: object) -> float:
+        """Per-class reliability floor below which a box becomes suspect; falls back to the global value."""
+        by_class = self.suspect_threshold_by_class or {}
+        return float(by_class.get(str(label or ""), self.suspect_threshold))
+
+    def accept_threshold_for(self, label: object) -> float:
+        """Per-class auto-accept reliability threshold; falls back to the global value."""
+        by_class = self.accept_threshold_by_class or {}
+        return float(by_class.get(str(label or ""), self.accept_threshold))
+
+    def allow_low_priority_for(self, label: object) -> bool:
+        """Per-class low-priority-cleaned switch; falls back to the global value."""
+        by_class = self.allow_low_priority_by_class or {}
+        return bool(by_class.get(str(label or ""), self.allow_low_priority_cleaned))
 
     @property
     def thresholds(self) -> dict[str, float | bool | str]:
         return {
             "accept_threshold": self.accept_threshold,
+            "accept_threshold_by_class": dict(self.accept_threshold_by_class or {}),
             "suspect_threshold": self.suspect_threshold,
+            "suspect_threshold_by_class": dict(self.suspect_threshold_by_class or {}),
             "prototype_min_sim": self.prototype_min_sim,
+            "prototype_min_sim_by_class": dict(self.prototype_min_sim_by_class or {}),
             "relabel_margin": self.relabel_margin,
             "ambiguous_margin": self.ambiguous_margin,
             "view_name": self.view_name,
             "allow_low_priority_cleaned": self.allow_low_priority_cleaned,
+            "allow_low_priority_by_class": dict(self.allow_low_priority_by_class or {}),
         }
 
 
@@ -273,7 +301,7 @@ def _decide_row(row: sqlite3.Row, *, config: DecisionPolicyConfig) -> PolicyDeci
         decision_type = "reject"
         final_label = "reject"
         matched_rule = "reject_near_reject_prototype_low_damage_similarity"
-    elif reliability >= config.accept_threshold and "high_consensus" in reasons and not has_conflict:
+    elif reliability >= config.accept_threshold_for(final_label) and "high_consensus" in reasons and not has_conflict:
         decision_type = "auto_accept"
         matched_rule = "auto_accept_high_consensus"
     elif _can_relabel_from_core(initial_label, nearest_core_class, nearest_core_similarity, prototype_class, prototype_similarity, prototype_margin, config=config):
@@ -281,12 +309,13 @@ def _decide_row(row: sqlite3.Row, *, config: DecisionPolicyConfig) -> PolicyDeci
         final_label = str(nearest_core_class)
         reasons.add("core_relabel_candidate")
         matched_rule = "relabel_candidate_core_margin"
-    elif reliability < config.suspect_threshold or has_conflict:
+    elif reliability < config.suspect_threshold_for(final_label) or has_conflict:
         decision_type = "suspect"
         matched_rule = "suspect_low_reliability_or_conflict"
     else:
-        decision_type = "auto_accept_low_priority" if config.allow_low_priority_cleaned else "suspect"
-        matched_rule = "auto_accept_low_priority" if config.allow_low_priority_cleaned else "suspect_low_priority_disabled"
+        allow_low_priority = config.allow_low_priority_for(final_label)
+        decision_type = "auto_accept_low_priority" if allow_low_priority else "suspect"
+        matched_rule = "auto_accept_low_priority" if allow_low_priority else "suspect_low_priority_disabled"
         if decision_type == "auto_accept_low_priority":
             reasons.add("low_priority_accept")
     components["decision_policy_v1"] = {
@@ -379,8 +408,9 @@ def _low_damage_similarity(row: sqlite3.Row, *, config: DecisionPolicyConfig) ->
     prototype_class = str(row["prototype_class"] or "")
     prototype_similarity = row["prototype_similarity"]
     nearest_core_similarity = row["nearest_core_similarity"]
-    prototype_low = prototype_class not in damage_labels or prototype_similarity is None or float(prototype_similarity) < config.prototype_min_sim
-    core_low = nearest_core_similarity is None or float(nearest_core_similarity) < config.prototype_min_sim
+    min_sim = config.min_sim_for(row["final_label"])
+    prototype_low = prototype_class not in damage_labels or prototype_similarity is None or float(prototype_similarity) < min_sim
+    core_low = nearest_core_similarity is None or float(nearest_core_similarity) < min_sim
     return prototype_low and core_low
 
 
@@ -400,11 +430,12 @@ def _can_relabel_from_core(
     if not core_label or core_label == initial_label or core_label == "reject":
         return False
     core_sim = float(nearest_core_similarity)
-    if core_sim < config.prototype_min_sim:
+    min_sim = config.min_sim_for(core_label)
+    if core_sim < min_sim:
         return False
     if prototype_class is not None and str(prototype_class) == initial_label and prototype_similarity is not None:
         return (core_sim - float(prototype_similarity)) >= config.relabel_margin
-    return prototype_margin >= config.relabel_margin or core_sim >= (config.prototype_min_sim + config.relabel_margin)
+    return prototype_margin >= config.relabel_margin or core_sim >= (min_sim + config.relabel_margin)
 
 
 def _update_counts(conn: sqlite3.Connection, *, run_id: str) -> None:

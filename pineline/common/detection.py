@@ -44,6 +44,7 @@ class DetectionConfig:
     gdino_service_batch_size: int = 0
     gdino_service_device_ids: str = ""
     stabledino_output_dir: str = ""
+    disable_tiled_nms: bool = False
 
 
 def parse_model_names(raw: str | Iterable[str] | None) -> tuple[str, ...]:
@@ -239,6 +240,7 @@ def default_detection_config(
     gdino_service_batch_size: int = 0,
     gdino_service_device_ids: str | None = None,
     stabledino_output_dir: str | Path | None = None,
+    disable_tiled_nms: bool = False,
 ) -> DetectionConfig:
     parsed_models = parse_model_names(models)
     return DetectionConfig(
@@ -263,6 +265,7 @@ def default_detection_config(
         gdino_service_batch_size=int(gdino_service_batch_size or 0),
         gdino_service_device_ids=str(gdino_service_device_ids or "").strip(),
         stabledino_output_dir=str(stabledino_output_dir or ""),
+        disable_tiled_nms=bool(disable_tiled_nms),
     )
 
 
@@ -445,6 +448,8 @@ class MultiDetector:
                 bx1, by1, bx2, by2 = [float(v) for v in det["box"]]
                 det["box"] = [bx1 + x1, by1 + y1, bx2 + x1, by2 + y1]
                 all_dets.append(det)
+        if self.config.disable_tiled_nms:
+            return all_dets[:int(self.config.max_dets)] if int(self.config.max_dets) > 0 else all_dets
         return _nms_detections(all_dets, iou_threshold=float(self.config.yolo_iou), max_dets=int(self.config.max_dets))
 
     def _parse_yolo_results(self, results) -> list[dict[str, Any]]:
@@ -547,6 +552,12 @@ class MultiDetector:
                 shifted = dict(det)
                 shifted["box"] = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
                 merged.setdefault(original_resolved, []).append(shifted)
+        if self.config.disable_tiled_nms:
+            max_dets = int(self.config.max_dets)
+            return {
+                resolved: (dets[:max_dets] if max_dets > 0 else dets)
+                for resolved, dets in merged.items()
+            }
         return {
             resolved: _nms_detections(dets, iou_threshold=TRAINED_DETECTOR_NMS_IOU, max_dets=int(self.config.max_dets))
             for resolved, dets in merged.items()

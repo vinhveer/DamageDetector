@@ -17,10 +17,11 @@ from .base_page import BasePage
 class ImageOverviewPage(BasePage):
     title_text = "Before"
 
-    def __init__(self, window: "Any") -> None:
+    def __init__(self, window: "Any", *, default_source: str = "all", title_text: str = "Before") -> None:
         super().__init__(window)
+        self.title_text = title_text
         self.items: list[dict[str, Any]] = []
-        self._source_value = "all"
+        self._source_value = default_source
         self._limit_value = 1000
         self._build_ui()
         self._wire()

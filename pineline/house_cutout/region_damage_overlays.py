@@ -89,6 +89,83 @@ def nms(dets, thr=0.35):
             kept.append(d)
     return kept
 
+
+def merge_same_class(dets, *, gap_ratio=0.15, min_gap=8, max_span_ratio=0.45):
+    """Merge same-class boxes that overlap or are very close into one box.
+
+    A long crack tiled at 768px comes back as many small boxes following the crack.
+    Expand each box by a small margin and union touching boxes per class, so adjacent
+    fragments of one streak join into a single box, without bridging unrelated areas
+    across the whole facade. Clusters whose union would exceed max_span_ratio of the
+    image are left unmerged to avoid mega-boxes that make segmentation flood.
+    """
+    by_group = {}
+    for d in dets:
+        by_group.setdefault(d["group"], []).append(d)
+
+    all_boxes = [d["box"] for d in dets]
+    image_w = max((b[2] for b in all_boxes), default=0) - min((b[0] for b in all_boxes), default=0)
+    image_h = max((b[3] for b in all_boxes), default=0) - min((b[1] for b in all_boxes), default=0)
+
+    def expanded(b):
+        bw = b[2] - b[0]; bh = b[3] - b[1]
+        gx = max(min_gap, bw * gap_ratio)
+        gy = max(min_gap, bh * gap_ratio)
+        return [b[0] - gx, b[1] - gy, b[2] + gx, b[3] + gy]
+
+    merged_all = []
+    for group, items in by_group.items():
+        n = len(items)
+        parent = list(range(n))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(i, j):
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[ri] = rj
+
+        exp = [expanded(it["box"]) for it in items]
+        for i in range(n):
+            for j in range(i + 1, n):
+                if iou(exp[i], exp[j]) > 0 or _boxes_touch(exp[i], items[j]["box"]) or _boxes_touch(exp[j], items[i]["box"]):
+                    union(i, j)
+        clusters = {}
+        for i in range(n):
+            clusters.setdefault(find(i), []).append(i)
+        for members in clusters.values():
+            xs1 = min(items[m]["box"][0] for m in members)
+            ys1 = min(items[m]["box"][1] for m in members)
+            xs2 = max(items[m]["box"][2] for m in members)
+            ys2 = max(items[m]["box"][3] for m in members)
+
+            span_w = xs2 - xs1
+            span_h = ys2 - ys1
+            if len(members) > 1 and (
+                (image_w > 0 and span_w > image_w * max_span_ratio)
+                or (image_h > 0 and span_h > image_h * max_span_ratio)
+            ):
+                merged_all.extend(items[m] for m in members)
+                continue
+
+            best = max(members, key=lambda m: items[m]["score"])
+            merged_all.append({
+                "box": [xs1, ys1, xs2, ys2],
+                "score": float(items[best]["score"]),
+                "group": group,
+                "label": group,
+                "members": len(members),
+            })
+    return merged_all
+
+
+def _boxes_touch(a, b):
+    return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+
 def square_tiles(w, h, tile=768, overlap=192):
     """Square tiles with overlap. Keeps aspect ratio ~1 so GDINO is not distorted."""
     stride = max(1, tile - overlap)
@@ -176,6 +253,145 @@ def detect_cracks_and_damage(region_bgr, *, edge_pad=10, score_min=0.22,
     kept = nms(boxes, thr=0.35)
     return kept, {"tiles": len(tiles), "raw_inside": len(boxes), "dropped_edge": dropped_edge,
                   "dropped_large": dropped_large, "kept": len(kept)}
+
+TRAINED_CLASSES = ["crack", "mold", "spall"]
+
+
+def detect_damage_trained(full_bgr, image_path, *, detector, conf=0.1,
+                          edge_pad=2, max_area_ratio=0.20, device="auto",
+                          no_filter=False, max_dets=300, nms_thr=0.45, merge=False,
+                          scale_to_original=1.0, offset_to_original=(0.0, 0.0),
+                          classes=None):
+    """Detect damage with a trained detector (yolo or stabledino) instead of GDINO.
+
+    The detector runs on the full image; MultiDetector handles 768px tiling for
+    large images. Labels are the trained classes crack/mold/spall, so group == label.
+
+    no_filter=True keeps every detection above conf: no NMS, no area cap, no edge
+    drop, and a very high max_dets, to maximise coverage like a raw detector dump.
+    """
+    from pineline.common.detection import MultiDetector, default_detection_config
+    from pineline.common.model_defaults import default_stabledino_checkpoint, default_yolo_model
+
+    detect_classes = list(classes or TRAINED_CLASSES)
+    if no_filter:
+        edge_pad = 0
+        max_area_ratio = 1.01
+        max_dets = max(max_dets, 5000)
+
+    h, w = full_bgr.shape[:2]
+    det_scale = float(scale_to_original or 1.0)
+    off_x, off_y = [float(v) for v in offset_to_original]
+    cfg = default_detection_config(
+        models=detector,
+        gdino_checkpoint=None,
+        yolo_model=str(default_yolo_model()),
+        stabledino_checkpoint=str(default_stabledino_checkpoint()),
+        yolo_conf=conf,
+        stabledino_conf=conf,
+        max_dets=int(max_dets),
+        device=device,
+        tiled_threshold=400,
+        stabledino_output_dir=str(Path("/tmp") / f"_stabledino_{detector}"),
+        disable_tiled_nms=no_filter,
+    )
+    detector_obj = MultiDetector(cfg)
+    boxes = []
+    dropped_edge = 0
+    dropped_large = 0
+    try:
+        dets = detector_obj.detect(Path(image_path), width=w, height=h,
+                                   queries=detect_classes, names=detect_classes)
+    finally:
+        detector_obj.close()
+    for det in dets:
+        score = float(det.get("score") or 0.0)
+        if score < conf:
+            continue
+        b = det.get("box")
+        if not isinstance(b, (list, tuple)) or len(b) != 4:
+            continue
+        bx1, by1, bx2, by2 = [((float(b[0]) - off_x) * det_scale),
+                              ((float(b[1]) - off_y) * det_scale),
+                              ((float(b[2]) - off_x) * det_scale),
+                              ((float(b[3]) - off_y) * det_scale)]
+        if bx2 <= bx1 or by2 <= by1:
+            continue
+        group = str(det.get("label") or "").strip().lower()
+        if group not in detect_classes:
+            continue
+        if not no_filter:
+            if bx1 <= edge_pad or by1 <= edge_pad or bx2 >= w - edge_pad or by2 >= h - edge_pad:
+                dropped_edge += 1
+                continue
+            if ((bx2 - bx1) * (by2 - by1)) / (w * h) > max_area_ratio:
+                dropped_large += 1
+                continue
+        boxes.append({"box": [bx1, by1, bx2, by2], "score": score,
+                      "group": group, "label": group})
+    kept = boxes if no_filter else nms(boxes, thr=nms_thr)
+    merged_count = None
+    if merge:
+        kept = merge_same_class(kept)
+        merged_count = len(kept)
+    return kept, {"detector": detector, "raw": len(dets), "kept_pre_nms": len(boxes),
+                  "dropped_edge": dropped_edge, "dropped_large": dropped_large,
+                  "no_filter": no_filter, "merged": merged_count, "kept": len(kept)}
+
+
+def render_text_x3(out_dir, full_bgr, seg_results, crop_box, *, extra_box=None):
+    """Render a single report overlay (box+label+segment) with ~3x larger text."""
+    canvas = full_bgr.copy()
+    h, w = canvas.shape[:2]
+    labels = sorted({r["group"] for r in seg_results})
+    for r in seg_results:
+        if r.get("segmenter") == "box_only":
+            continue
+        rx1, ry1, rx2, ry2 = r["roi"]
+        mp = out_dir / "masks" / f"det_{r['idx']:04d}_{r['group']}.png"
+        m = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
+        if m is None:
+            continue
+        if m.shape[:2] != (ry2 - ry1, rx2 - rx1):
+            m = cv2.resize(m, (rx2 - rx1, ry2 - ry1), interpolation=cv2.INTER_NEAREST)
+        mb = m > 127
+        c = np.array(color_for(r["group"]), dtype=np.uint8)
+        roi = canvas[ry1:ry2, rx1:rx2]
+        ci = np.zeros_like(roi); ci[:] = c
+        canvas[ry1:ry2, rx1:rx2] = np.where(mb[..., None], (roi * 0.5 + ci * 0.5).astype(np.uint8), roi)
+    if extra_box is not None:
+        ex1, ey1, ex2, ey2, etext = extra_box
+        cv2.rectangle(canvas, (ex1, ey1), (ex2, ey2), color_for("column"), 12)
+        _draw_label_big(canvas, (ex1, ey1), etext, color_for("column"))
+    for r in seg_results:
+        c = color_for(r["group"])
+        bx1, by1, bx2, by2 = [int(round(v)) for v in r["box"]]
+        cv2.rectangle(canvas, (bx1, by1), (bx2, by2), c, 10)
+        _draw_label_big(canvas, (bx1, by1), f"{r['group']} {r['score']:.2f}", c)
+    if crop_box is not None:
+        cx1, cy1, cx2, cy2 = [int(round(v)) for v in crop_box]
+        canvas = canvas[cy1:cy2, cx1:cx2]
+    _legend_big(canvas, labels, with_column=extra_box is not None)
+    cv2.imwrite(str(out_dir / "5_box_label_segment_text_x3.png"), canvas)
+
+
+def _draw_label_big(img, p1, text, c, font=2.7, thick=6):
+    (tw, th), bl = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font, thick)
+    ty = max(th + bl + 20, p1[1])
+    cv2.rectangle(img, (p1[0], ty - th - bl - 20), (p1[0] + tw + 30, ty + 14), c, -1)
+    cv2.putText(img, text, (p1[0] + 14, ty - 10), cv2.FONT_HERSHEY_SIMPLEX, font, (0, 0, 0), thick, cv2.LINE_AA)
+
+
+def _legend_big(img, labels, *, with_column=False):
+    y = 130
+    items = list(labels) + (["column"] if with_column else [])
+    for g in items:
+        c = color_for(g)
+        cv2.rectangle(img, (40, y - 70), (130, y + 20), c, -1)
+        cv2.putText(img, g, (155, y), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (255, 255, 255), 11, cv2.LINE_AA)
+        cv2.putText(img, g, (155, y), cv2.FONT_HERSHEY_SIMPLEX, 3.0, (0, 0, 0), 5, cv2.LINE_AA)
+        y += 130
+
 
 def pad_box(box, w, h, pad=0.25, minpad=32):
     x1, y1, x2, y2 = box
@@ -287,11 +503,12 @@ def legend(canvas, labels):
         y += 30
 
 
-def build_overlays(full_bgr, region_offset, region_bgr, seg_results, out_dir, crop_box=None):
+def build_overlays(full_bgr, region_offset, region_bgr, seg_results, out_dir, crop_box=None, extra_box=None):
     """Render 4 overlays on the full image. region_offset=(ox,oy) maps region->full.
 
     If crop_box=(x1,y1,x2,y2) is given, the saved overlays are cropped to that box
     so the output shows only the cut-out region (e.g. the house / the column).
+    extra_box=(x1,y1,x2,y2,text) draws an extra labelled box (e.g. the column).
     """
     ox, oy = region_offset
     rh, rw = region_bgr.shape[:2]
@@ -333,6 +550,14 @@ def build_overlays(full_bgr, region_offset, region_bgr, seg_results, out_dir, cr
         text = f"{r['group']} {r['score']:.2f}"
         draw_label(box_label, p1, text, c)
         draw_label(box_seg, p1, text, c)
+
+    if extra_box is not None:
+        ex1, ey1, ex2, ey2, etext = extra_box
+        ec = color_for("column")
+        for canvas in (box_label, box_only, seg_only, box_seg):
+            cv2.rectangle(canvas, (ex1, ey1), (ex2, ey2), ec, 5)
+        draw_label(box_label, (ex1, ey1), etext, ec)
+        draw_label(box_seg, (ex1, ey1), etext, ec)
 
     canvases = {
         "1_box_label.png": box_label,
@@ -462,12 +687,24 @@ def run_cutout_from_csv(*, image_path, csv_path, out_dir):
     return {"out_dir": str(out_dir), "detections": len(seg_results)}
 
 
+def box_only_results(kept):
+    return [{
+        "idx": i,
+        "group": d["group"],
+        "score": float(d["score"]),
+        "label": d.get("label") or d["group"],
+        "box": d["box"],
+        "roi": [int(round(v)) for v in d["box"]],
+        "segmenter": "box_only",
+        "mask_area_px": 0,
+    } for i, d in enumerate(kept)]
+
+
 def run_one(*, image_path, region_box, out_dir, sam_vit_h_ckpt, lora_model_dir,
             edge_pad_lr=10, edge_pad_tb=10):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    with Image.open(image_path) as im:
-        full = cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
+    full = image_to_bgr_respecting_alpha(image_path, background=(0, 0, 0))
     oh, ow = full.shape[:2]
     rx1, ry1, rx2, ry2 = [int(round(v)) for v in region_box]
     rx1 = max(0, min(ow, rx1)); rx2 = max(0, min(ow, rx2))
@@ -497,6 +734,102 @@ def run_one(*, image_path, region_box, out_dir, sam_vit_h_ckpt, lora_model_dir,
     summary_csv = export_data(out_dir, image_path, (0, 0, ow, oh), stats, seg_results)
     print(f"done -> {out_dir} (detections={len(seg_results)}, summary={summary_csv})", flush=True)
     return {"out_dir": str(out_dir), "detections": len(seg_results), "stats": stats}
+
+def run_one_trained(*, image_path, region_box, out_dir, sam_vit_h_ckpt, lora_model_dir,
+                    detector, conf=0.1, edge_pad_lr=10, edge_pad_tb=10,
+                    crop_to_region=True, render_bg=None, extra_column=False, region_offset_box=None,
+                    no_filter=False, box_only=False, merge=False, detector_bg="black",
+                    detector_max_side=0, detector_canvas_size=0, detect_classes=None):
+    """Like run_one() but detect damage with a trained detector (yolo/stabledino).
+
+    no_filter=True keeps every detection above conf and does not drop boxes outside
+    the region box, for maximum coverage.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    full = image_to_bgr_respecting_alpha(image_path, background=(0, 0, 0))
+    oh, ow = full.shape[:2]
+    rx1, ry1, rx2, ry2 = [int(round(v)) for v in region_box]
+    rx1 = max(0, min(ow, rx1)); rx2 = max(0, min(ow, rx2))
+    ry1 = max(0, min(oh, ry1)); ry2 = max(0, min(oh, ry2))
+    cv2.imwrite(str(out_dir / "region_crop.png"), full[ry1:ry2, rx1:rx2])
+    print(f"[{detector}] region [{rx1},{ry1},{rx2},{ry2}] on full {ow}x{oh} no_filter={no_filter}", flush=True)
+
+    bg_color = (255, 255, 255) if detector_bg == "white" else (0, 0, 0)
+    detector_bgr = image_to_bgr_respecting_alpha(image_path, background=bg_color)
+    det_h, det_w = detector_bgr.shape[:2]
+    detector_scale = 1.0
+    detector_offset = (0.0, 0.0)
+    if int(detector_max_side or 0) > 0 and max(det_w, det_h) > int(detector_max_side):
+        detector_scale = max(det_w, det_h) / float(detector_max_side)
+        new_w = max(1, int(round(det_w / detector_scale)))
+        new_h = max(1, int(round(det_h / detector_scale)))
+        detector_bgr = cv2.resize(detector_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    if int(detector_canvas_size or 0) > 0:
+        canvas_size = int(detector_canvas_size)
+        dh, dw = detector_bgr.shape[:2]
+        if dw > canvas_size or dh > canvas_size:
+            raise ValueError(f"Detector input {dw}x{dh} is larger than canvas {canvas_size}.")
+        canvas = np.full((canvas_size, canvas_size, 3), bg_color, dtype=np.uint8)
+        pad_x = (canvas_size - dw) // 2
+        pad_y = (canvas_size - dh) // 2
+        canvas[pad_y:pad_y + dh, pad_x:pad_x + dw] = detector_bgr
+        detector_bgr = canvas
+        detector_offset = (float(pad_x), float(pad_y))
+    detector_input = out_dir / f"detector_input_{detector_bg}.png"
+    cv2.imwrite(str(detector_input), detector_bgr)
+    kept_all, stats = detect_damage_trained(full, detector_input, detector=detector, conf=conf,
+                                             no_filter=no_filter, merge=merge,
+                                             scale_to_original=detector_scale,
+                                             offset_to_original=detector_offset,
+                                             classes=detect_classes)
+    stats["detector_input_background"] = detector_bg
+    stats["detector_input_size"] = [int(detector_bgr.shape[1]), int(detector_bgr.shape[0])]
+    stats["detector_scale_to_original"] = detector_scale
+    stats["detector_offset_to_content"] = [detector_offset[0], detector_offset[1]]
+    stats["detect_classes"] = list(detect_classes or TRAINED_CLASSES)
+
+    if no_filter:
+        # Keep everything; do not restrict to the region box.
+        kept = kept_all
+    else:
+        ix1, iy1 = rx1 + edge_pad_lr, ry1 + edge_pad_tb
+        ix2, iy2 = rx2 - edge_pad_lr, ry2 - edge_pad_tb
+        kept = [d for d in kept_all
+                if d["box"][0] >= ix1 and d["box"][1] >= iy1 and d["box"][2] <= ix2 and d["box"][3] <= iy2]
+    stats["kept_in_region"] = len(kept)
+    print(f"[{detector}] detect stats: {stats}", flush=True)
+
+    render_full = full
+    crop_box = (rx1, ry1, rx2, ry2) if crop_to_region else None
+    extra_box = None
+    if extra_column:
+        extra_box = (rx1, ry1, rx2, ry2, "column")
+
+    if box_only:
+        seg_results = box_only_results(kept)
+        build_overlays(render_full, (0, 0), render_full, seg_results, out_dir,
+                       crop_box=crop_box, extra_box=extra_box)
+        render_text_x3(out_dir, render_full, seg_results, crop_box, extra_box=extra_box)
+        summary_csv = export_data(out_dir, image_path, (0, 0, ow, oh), stats, seg_results)
+        preview = cv2.imread(str(out_dir / "1_box_label.png"), cv2.IMREAD_COLOR)
+        if preview is not None:
+            preview_w = min(1800, preview.shape[1])
+            preview_h = max(1, int(round(preview.shape[0] * preview_w / preview.shape[1])))
+            preview = cv2.resize(preview, (preview_w, preview_h), interpolation=cv2.INTER_AREA)
+            cv2.imwrite(str(out_dir / "1_box_label_preview.jpg"), preview,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        print(f"[{detector}] done -> {out_dir} (detections={len(seg_results)}, summary={summary_csv})", flush=True)
+        return {"out_dir": str(out_dir), "detections": len(seg_results), "stats": stats}
+
+    seg_results = segment_region(full, kept, out_dir,
+                                 sam_vit_h_ckpt=sam_vit_h_ckpt, lora_model_dir=lora_model_dir)
+    build_overlays(render_full, (0, 0), render_full, seg_results, out_dir, crop_box=crop_box, extra_box=extra_box)
+    render_text_x3(out_dir, render_full, seg_results, crop_box, extra_box=extra_box)
+    summary_csv = export_data(out_dir, image_path, (0, 0, ow, oh), stats, seg_results)
+    print(f"[{detector}] done -> {out_dir} (detections={len(seg_results)})", flush=True)
+    return {"out_dir": str(out_dir), "detections": len(seg_results), "stats": stats}
+
 
 def region_from_column_db(db_path):
     conn = sqlite3.connect(str(db_path))
@@ -550,8 +883,34 @@ def main():
     lora_dir = lab / "model_with_inference" / "crack_segmentation" / "sam_lora_hq_coarse_refine" / "model"
 
     p = argparse.ArgumentParser()
-    p.add_argument("--target", choices=["g8", "ntt", "cau_tran_phu", "both", "all"], default="both")
+    p.add_argument("--target", choices=["g8", "ntt", "cau_tran_phu", "both", "all",
+                                        "g8_trained", "ntt_trained", "cau_tran_phu_trained",
+                                        "trained"], default="both")
+    p.add_argument("--detector", choices=["yolo", "stabledino", "both"], default="both",
+                   help="Trained detector(s) to use for *_trained targets.")
+    p.add_argument("--conf", type=float, default=0.1)
+    p.add_argument("--no-filter", dest="no_filter", action="store_true",
+                   help="Keep every detection above conf: no NMS, no area cap, no edge/region drop.")
+    p.add_argument("--merge", dest="merge", action="store_true",
+                   help="Merge same-class boxes that overlap/are near into one big box (cover whole streaks).")
+    p.add_argument("--detector-bg", choices=["black", "white"], default="black",
+                   help="Background used when converting alpha/cutout inputs to detector PNG.")
+    p.add_argument("--box-only", dest="box_only", action="store_true",
+                   help="Render detector boxes only; skip SAM segmentation for quick inspection.")
+    p.add_argument("--detector-max-side", type=int, default=0,
+                   help="Resize detector input so its largest side equals this value, then scale boxes back.")
+    p.add_argument("--detector-canvas-size", type=int, default=0,
+                   help="Center resized detector input on a square canvas of this size before detection.")
+    p.add_argument("--classes", default="",
+                   help="Comma-separated trained classes to detect, e.g. spall or crack,mold.")
     args = p.parse_args()
+
+    detectors = ["yolo", "stabledino"] if args.detector == "both" else [args.detector]
+    detect_classes = [c.strip().lower() for c in args.classes.split(",") if c.strip()] or None
+    if detect_classes:
+        bad = [c for c in detect_classes if c not in TRAINED_CLASSES]
+        if bad:
+            raise ValueError(f"Unsupported trained classes: {bad}. Valid: {TRAINED_CLASSES}")
 
     if args.target in ("g8", "both", "all"):
         run_one(
@@ -570,6 +929,91 @@ def main():
             sam_vit_h_ckpt=sam_vit_h, lora_model_dir=lora_dir,
             edge_pad_lr=10, edge_pad_tb=10,
         )
+    if args.target in ("g8_trained", "trained"):
+        g8_region = region_from_column_db(results_root / "g8" / "step_gdino_column_top1" / "detections.sqlite3")
+        for det in detectors:
+            suffix = "_white_bg" if args.detector_bg == "white" else ""
+            if args.detector_max_side > 0:
+                suffix += f"_max{args.detector_max_side}"
+            if args.detector_canvas_size > 0:
+                suffix += f"_canvas{args.detector_canvas_size}"
+            if detect_classes:
+                suffix += "_" + "_".join(detect_classes)
+            run_one_trained(
+                image_path=lab / "data" / "HinhAnhThucTe" / "1.JPG",
+                region_box=g8_region,
+                out_dir=results_root / "g8" / f"damage_segmentation_{det}{suffix}",
+                sam_vit_h_ckpt=sam_vit_h, lora_model_dir=lora_dir,
+                detector=det, conf=args.conf,
+                edge_pad_lr=10, edge_pad_tb=0,
+                crop_to_region=False, extra_column=True,
+                no_filter=args.no_filter,
+                merge=args.merge,
+                detector_bg=args.detector_bg,
+                box_only=args.box_only,
+                detector_max_side=args.detector_max_side,
+                detector_canvas_size=args.detector_canvas_size,
+                detect_classes=detect_classes,
+            )
+    if args.target in ("ntt_trained", "trained"):
+        # NTT detects directly on the already-cut clean house image (no re-crop).
+        ntt_clean = (results_root / "nha_truyen_thong" / "damage_segmentation_clean_overlays"
+                     / "clean_house_bg.png")
+        with Image.open(ntt_clean) as _im:
+            cw, ch = _im.size
+        for det in detectors:
+            suffix = "_white_bg" if args.detector_bg == "white" else ""
+            if args.detector_max_side > 0:
+                suffix += f"_max{args.detector_max_side}"
+            if args.detector_canvas_size > 0:
+                suffix += f"_canvas{args.detector_canvas_size}"
+            if detect_classes:
+                suffix += "_" + "_".join(detect_classes)
+            run_one_trained(
+                image_path=ntt_clean,
+                region_box=[0, 0, cw, ch],
+                out_dir=results_root / "nha_truyen_thong" / f"damage_segmentation_{det}{suffix}",
+                sam_vit_h_ckpt=sam_vit_h, lora_model_dir=lora_dir,
+                detector=det, conf=args.conf,
+                edge_pad_lr=0, edge_pad_tb=0,
+                crop_to_region=False,
+                no_filter=args.no_filter,
+                merge=args.merge,
+                detector_bg=args.detector_bg,
+                box_only=args.box_only,
+                detector_max_side=args.detector_max_side,
+                detector_canvas_size=args.detector_canvas_size,
+                detect_classes=detect_classes,
+            )
+    if args.target in ("cau_tran_phu_trained", "trained"):
+        ctp_dir = results_root / "cau_tran_phu"
+        ctp_img = ctp_dir / "DJI_0093_point_sam_cutout.png"
+        with Image.open(ctp_img) as im:
+            ctp_region = (0, 0, im.width, im.height)
+        for det in detectors:
+            suffix = "_white_bg" if args.detector_bg == "white" else ""
+            if args.detector_max_side > 0:
+                suffix += f"_max{args.detector_max_side}"
+            if args.detector_canvas_size > 0:
+                suffix += f"_canvas{args.detector_canvas_size}"
+            if detect_classes:
+                suffix += "_" + "_".join(detect_classes)
+            run_one_trained(
+                image_path=ctp_img,
+                region_box=ctp_region,
+                out_dir=ctp_dir / f"damage_segmentation_{det}{suffix}",
+                sam_vit_h_ckpt=sam_vit_h, lora_model_dir=lora_dir,
+                detector=det, conf=args.conf,
+                edge_pad_lr=0, edge_pad_tb=0,
+                crop_to_region=True,
+                no_filter=args.no_filter,
+                merge=args.merge,
+                box_only=True,
+                detector_bg=args.detector_bg,
+                detector_max_side=args.detector_max_side,
+                detector_canvas_size=args.detector_canvas_size,
+                detect_classes=detect_classes,
+            )
     if args.target in ("cau_tran_phu", "all"):
         ctp_dir = results_root / "cau_tran_phu"
         run_cutout_from_csv(

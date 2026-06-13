@@ -556,7 +556,10 @@ class DINOTransformer(nn.Module):
             self.decoder.bbox_embed[self.decoder.num_layers](output_memory) + output_proposals
         )  # unsigmoided.
 
-        topk = self.two_stage_num_proposals
+        # Clamp topk to the number of encoder tokens: extremely thin eval images
+        # (resized by ResizeShortestEdge) can yield fewer tokens than
+        # two_stage_num_proposals, which makes torch.topk raise "k out of range".
+        topk = min(self.two_stage_num_proposals, enc_outputs_class.shape[1])
         topk_proposals = torch.topk(enc_outputs_class.max(-1)[0], topk, dim=1)[1]
 
         # extract region proposal boxes
@@ -574,7 +577,9 @@ class DINOTransformer(nn.Module):
         )
         if self.learnt_init_query:
             # the default pipeline in DINO
-            target = self.tgt_embed.weight[None].repeat(bs, 1, 1)
+            # Slice to topk so the query count stays aligned with reference_points
+            # when topk was clamped below two_stage_num_proposals (thin eval images).
+            target = self.tgt_embed.weight[:topk][None].repeat(bs, 1, 1)
             if dn_content_query is not None:
                 # cat with dn features
                 target = torch.cat([dn_content_query, target], 1)
