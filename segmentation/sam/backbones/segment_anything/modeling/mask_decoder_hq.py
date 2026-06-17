@@ -148,7 +148,7 @@ class MaskDecoderHQ(nn.Module):
             hq_features=hq_features,
         )
 
-        if multimask_output and masks.shape[1] > 1:
+        if multimask_output and self.num_mask_tokens > 2:
             mask_slice = slice(1, self.num_mask_tokens - 1)
             iou_pred = iou_pred[:, mask_slice]
             iou_pred, max_iou_idx = torch.max(iou_pred, dim=1)

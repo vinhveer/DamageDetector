@@ -2,6 +2,8 @@
 
 Each group is a near-duplicate cluster of crack/mold/spall crops.  The grid
 shows representative thumbnails; double-clicking a group lists its members.
+Filters: label, status, min size, min members, min representative similarity,
+substring search on cluster id / image path, sort key.
 """
 from __future__ import annotations
 
@@ -16,6 +18,16 @@ from ..widgets.ui_kit import Card, Chip, InfoPanel, Toolbar, primary_button
 from .base_page import BasePage
 
 
+_GROUP_SORT_KEYS: dict[str, str] = {
+    "Size ↓": "size_desc",
+    "Size ↑": "size_asc",
+    "Members ↓": "members_desc",
+    "Domain ↑": "domain_asc",
+    "Rep sim ↓": "similarity_desc",
+    "Label / Domain": "label_domain",
+}
+
+
 class GroupsPage(BasePage):
     list_attr = "grid"
 
@@ -23,6 +35,8 @@ class GroupsPage(BasePage):
         super().__init__(window)
         self.groups: list[Any] = []
         self.members: list[Any] = []
+        self.visible_groups: list[Any] = []
+        self.visible_members: list[Any] = []
         self._mode = "groups"  # "groups" | "members"
         self._active_group: Any | None = None
         self._thumb_size = 132
@@ -32,25 +46,82 @@ class GroupsPage(BasePage):
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
+        # ---------------- Row 1: label / search / status ---------------------
         top = Toolbar(self)
         self.label_filter = QtWidgets.QComboBox(self)
         self.label_filter.addItems(["all", "crack", "mold", "spall"])
+
+        self.status_filter = QtWidgets.QComboBox(self)
+        self.status_filter.addItem("Status: all", "")
+        for status in ("active", "approved", "rejected", "review", "merged"):
+            self.status_filter.addItem(f"Status: {status}", status)
+
+        self.search_edit = QtWidgets.QLineEdit(self)
+        self.search_edit.setPlaceholderText("Search cluster id / image path…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setFixedWidth(220)
+
         self.back_btn = primary_button("< Back to groups")
         self.back_btn.setVisible(False)
         self.busy = Chip("Loading…", self)
         self.busy.setObjectName("BusyChip")
         self.busy.setVisible(False)
         self.summary = Chip("Groups: 0", self)
-        top.add_label("Show")
+
+        top.add_label("Label")
         top.add(self.label_filter)
+        top.add(self.status_filter)
+        top.add_label("Search")
+        top.add(self.search_edit)
         top.add(self.back_btn)
         top.add_stretch()
         top.add(self.busy)
         top.add(self.summary)
         root.addWidget(top)
 
+        # ---------------- Row 2: numeric thresholds + sort -------------------
+        row2 = Toolbar(self)
+        self.min_size = QtWidgets.QSpinBox(self)
+        self.min_size.setRange(0, 100000)
+        self.min_size.setSingleStep(5)
+        self.min_size.setValue(0)
+        self.min_size.setSuffix(" crops")
+
+        self.min_members = QtWidgets.QSpinBox(self)
+        self.min_members.setRange(0, 100000)
+        self.min_members.setSingleStep(5)
+        self.min_members.setValue(0)
+        self.min_members.setSuffix(" mem")
+
+        self.min_sim = QtWidgets.QDoubleSpinBox(self)
+        self.min_sim.setRange(0.0, 1.0)
+        self.min_sim.setSingleStep(0.05)
+        self.min_sim.setDecimals(2)
+        self.min_sim.setValue(0.0)
+
+        self.sort_combo = QtWidgets.QComboBox(self)
+        for label in _GROUP_SORT_KEYS:
+            self.sort_combo.addItem(label, _GROUP_SORT_KEYS[label])
+        self.sort_combo.setCurrentText("Size ↓")
+
+        self.reset_btn = QtWidgets.QPushButton("Reset", self)
+
+        row2.add_label("Min size ≥")
+        row2.add(self.min_size)
+        row2.add_label("Min members ≥")
+        row2.add(self.min_members)
+        row2.add_label("Min rep sim ≥")
+        row2.add(self.min_sim)
+        row2.add_separator()
+        row2.add_label("Sort")
+        row2.add(self.sort_combo)
+        row2.add_stretch()
+        row2.add(self.reset_btn)
+        root.addWidget(row2)
+
+        # ---------------- Body ----------------------------------------------
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
         self.grid = PayloadGrid(split)
 
@@ -79,7 +150,16 @@ class GroupsPage(BasePage):
         root.addWidget(split, 1)
 
     def _wire(self) -> None:
+        # Label change reloads (server filters labels for performance)
         self.label_filter.currentTextChanged.connect(lambda _v: self.load())
+        # Other filters apply client-side without reload
+        self.status_filter.currentIndexChanged.connect(self._refresh)
+        self.min_size.valueChanged.connect(self._refresh)
+        self.min_members.valueChanged.connect(self._refresh)
+        self.min_sim.valueChanged.connect(self._refresh)
+        self.sort_combo.currentIndexChanged.connect(self._refresh)
+        self.search_edit.textChanged.connect(self._refresh)
+        self.reset_btn.clicked.connect(self._reset_filters)
         self.back_btn.clicked.connect(self.show_groups)
         self.grid.currentPayloadChanged.connect(self.show_item)
         self.grid.visibleRowsChanged.connect(self.load_visible_thumbnails)
@@ -88,6 +168,14 @@ class GroupsPage(BasePage):
         self._image_service.imageFailed.connect(self.on_image_failed)
         self.db.subscribe("groups", self._on_groups_loaded, self.window.error)
         self.db.subscribe("members", self._on_members_loaded, self.window.error)
+
+    def _reset_filters(self) -> None:
+        self.status_filter.setCurrentIndex(0)
+        self.min_size.setValue(0)
+        self.min_members.setValue(0)
+        self.min_sim.setValue(0.0)
+        self.search_edit.clear()
+        self.sort_combo.setCurrentText("Size ↓")
 
     @QtCore.Slot()
     def load(self) -> None:
@@ -112,9 +200,87 @@ class GroupsPage(BasePage):
         self._mode = "groups"
         self._active_group = None
         self.back_btn.setVisible(False)
-        self.grid.set_payloads(self.groups, self.group_title, self.group_thumb_key)
-        self.summary.setText(f"Groups: {len(self.groups)}")
+        self._refresh()
+
+    def _refresh(self) -> None:
+        if self._mode == "groups":
+            self.visible_groups = self._apply_filters_groups(self.groups)
+            self.grid.set_payloads(self.visible_groups, self.group_title, self.group_thumb_key)
+            self.summary.setText(f"Groups: {len(self.visible_groups)} / {len(self.groups)}")
+        else:
+            self.visible_members = self._apply_filters_members(self.members)
+            self.grid.set_payloads(self.visible_members, self.member_title, self.member_thumb_key)
+            group = self._active_group
+            if group is not None:
+                self.summary.setText(
+                    f"{group.label}  D{int(getattr(group, 'domain_index', 0))}  "
+                    f"members: {len(self.visible_members)} / {len(self.members)}"
+                )
         self.load_visible_thumbnails(self.grid.visible_rows())
+
+    # -- Group filters -----------------------------------------------------
+    def _apply_filters_groups(self, groups: list[Any]) -> list[Any]:
+        status = self.status_filter.currentData() or ""
+        min_size = int(self.min_size.value())
+        min_members = int(self.min_members.value())
+        min_sim = float(self.min_sim.value())
+        needle = self.search_edit.text().strip().lower()
+        out: list[Any] = []
+        for g in groups:
+            if status and str(getattr(g, "status", "") or "") != status:
+                continue
+            if min_size and int(getattr(g, "size", 0) or 0) < min_size:
+                continue
+            if min_members and int(getattr(g, "member_count", 0) or 0) < min_members:
+                continue
+            if min_sim and float(getattr(g, "rep_similarity", 0) or 0) < min_sim:
+                continue
+            if needle:
+                hay = " ".join((
+                    str(getattr(g, "core_cluster_id", "") or ""),
+                    str(getattr(g, "rep_image_rel_path", "") or ""),
+                    str(getattr(g, "label", "") or ""),
+                )).lower()
+                if needle not in hay:
+                    continue
+            out.append(g)
+        return self._sort_groups(out)
+
+    def _sort_groups(self, groups: list[Any]) -> list[Any]:
+        key = self.sort_combo.currentData() or "size_desc"
+        if key == "size_desc":
+            return sorted(groups, key=lambda g: (-int(getattr(g, "size", 0) or 0), str(getattr(g, "label", "") or "")))
+        if key == "size_asc":
+            return sorted(groups, key=lambda g: (int(getattr(g, "size", 0) or 0), str(getattr(g, "label", "") or "")))
+        if key == "members_desc":
+            return sorted(groups, key=lambda g: -int(getattr(g, "member_count", 0) or 0))
+        if key == "domain_asc":
+            return sorted(groups, key=lambda g: (str(getattr(g, "label", "") or ""), int(getattr(g, "domain_index", 0) or 0)))
+        if key == "similarity_desc":
+            return sorted(groups, key=lambda g: -float(getattr(g, "rep_similarity", 0) or 0))
+        if key == "label_domain":
+            return sorted(groups, key=lambda g: (str(getattr(g, "label", "") or ""), int(getattr(g, "domain_index", 0) or 0)))
+        return groups
+
+    # -- Member filters ----------------------------------------------------
+    def _apply_filters_members(self, members: list[Any]) -> list[Any]:
+        min_sim = float(self.min_sim.value())
+        needle = self.search_edit.text().strip().lower()
+        out = []
+        for m in members:
+            if min_sim and float(getattr(m, "centroid_similarity", 0) or 0) < min_sim:
+                continue
+            if needle:
+                hay = " ".join((
+                    str(int(getattr(m, "result_id", 0) or 0)),
+                    str(getattr(m, "image_rel_path", "") or ""),
+                )).lower()
+                if needle not in hay:
+                    continue
+            out.append(m)
+        # Default: high similarity first
+        out.sort(key=lambda m: -float(getattr(m, "centroid_similarity", 0) or 0))
+        return out
 
     def open_group(self, group: Any) -> None:
         cid = str(getattr(group, "core_cluster_id", "") or "")
@@ -134,11 +300,7 @@ class GroupsPage(BasePage):
             return
         self._mode = "members"
         self.back_btn.setVisible(True)
-        self.grid.set_payloads(self.members, self.member_title, self.member_thumb_key)
-        self.summary.setText(
-            f"{group.label}  D{int(getattr(group, 'domain_index', 0))}  members: {len(self.members)}"
-        )
-        self.load_visible_thumbnails(self.grid.visible_rows())
+        self._refresh()
 
     @QtCore.Slot(QtCore.QModelIndex)
     def _on_double_clicked(self, index: QtCore.QModelIndex) -> None:
@@ -174,7 +336,7 @@ class GroupsPage(BasePage):
 
     @QtCore.Slot(object)
     def load_visible_thumbnails(self, rows: object) -> None:
-        payloads = self.groups if self._mode == "groups" else self.members
+        payloads = self.visible_groups if self._mode == "groups" else self.visible_members
         for row in list(rows or []):
             if not isinstance(row, int) or not (0 <= row < len(payloads)):
                 continue

@@ -3,7 +3,7 @@
 The pipeline proposes representative candidates per visual domain.  The reviewer
 assigns the final prototype label using four actions: crack, mold, spall,
 reject.  DB access runs through ``self.db`` (off the GUI thread); the diverse
-ordering is cached per filter label and only recomputed when data reloads.
+ordering is cached per filter signature and only recomputed when filters change.
 """
 from __future__ import annotations
 
@@ -18,8 +18,20 @@ from ...services.handoff_service import write_handoff_json
 from ..options_dialog import Option
 from ..widgets.box_image import BoxImage
 from ..widgets.payload_list import PayloadList
-from ..widgets.ui_kit import Card, DecisionBar, InfoPanel, LABEL_BUTTON_STYLE
+from ..widgets.ui_kit import Card, Chip, DecisionBar, InfoPanel, LABEL_BUTTON_STYLE, Toolbar, primary_button
 from .base_page import BasePage
+
+
+_BANDS = ("all", "low", "mid", "high", "extra", "anchor")
+_REVIEW_STATES = ("all", "unreviewed", "reviewed", "accepted", "relabeled", "rejected")
+_SORT_MODES = (
+    ("diverse", "Diverse (default)"),
+    ("score_desc", "Score ↓"),
+    ("score_asc", "Score ↑"),
+    ("sim_desc", "Centroid sim ↓"),
+    ("domain_asc", "Domain ↑"),
+    ("id_asc", "ID ↑"),
+)
 
 
 class PrototypePage(BasePage):
@@ -31,8 +43,8 @@ class PrototypePage(BasePage):
         self.visible_items: list[Any] = []
         self.decisions: dict[int, dict[str, Any]] = {}
         self._thumb_size = 96
-        self._order_cache: dict[str, list[Any]] = {}
-        self._filter_value = "all"
+        self._order_cache: dict[tuple, list[Any]] = {}
+        self._filter_value = "all"  # legacy options_spec compat
         self._prototype_policy = {
             "damage_total_per_label": 200,
             "reject_total": 300,
@@ -45,19 +57,111 @@ class PrototypePage(BasePage):
         self._wire()
         self._install_shortcuts()
 
-    # -- options -----------------------------------------------------------
+    # -- options (legacy dialog compat) -----------------------------------
     def options_spec(self) -> list[Option]:
         return [Option("filter", "Show label", "choice", self._filter_value, choices=["all", *LABELS])]
 
     def apply_options(self, values: dict[str, Any]) -> None:
         self._filter_value = str(values.get("filter", self._filter_value))
+        if self._filter_value == "all":
+            for label in LABELS:
+                self._label_chips[label].setChecked(True)
+        else:
+            for label, chip in self._label_chips.items():
+                chip.setChecked(label == self._filter_value)
         self.refresh()
 
     def _build_ui(self) -> None:
-        root = QtWidgets.QHBoxLayout(self)
+        root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(0)
+        root.setSpacing(8)
 
+        # ── Filter toolbar ──────────────────────────────────────────────
+        bar = Toolbar(self)
+        self.search_edit = QtWidgets.QLineEdit(self)
+        self.search_edit.setPlaceholderText("Search id / image path / cluster…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setMinimumWidth(220)
+
+        self._label_chips: dict[str, QtWidgets.QCheckBox] = {}
+        chip_box = QtWidgets.QWidget(self)
+        chip_layout = QtWidgets.QHBoxLayout(chip_box)
+        chip_layout.setContentsMargins(0, 0, 0, 0)
+        chip_layout.setSpacing(4)
+        for label in LABELS:
+            cb = QtWidgets.QCheckBox(label.title(), self)
+            cb.setChecked(True)
+            self._label_chips[label] = cb
+            chip_layout.addWidget(cb)
+
+        self.band_combo = QtWidgets.QComboBox(self)
+        self.band_combo.addItems(list(_BANDS))
+
+        self.review_combo = QtWidgets.QComboBox(self)
+        self.review_combo.addItems(list(_REVIEW_STATES))
+
+        self.domain_combo = QtWidgets.QComboBox(self)
+        self.domain_combo.addItem("All domains", -1)
+
+        self.score_min = QtWidgets.QDoubleSpinBox(self)
+        self.score_min.setRange(0.0, 1.0)
+        self.score_min.setSingleStep(0.05)
+        self.score_min.setDecimals(2)
+        self.score_min.setValue(0.0)
+        self.score_min.setPrefix("≥ ")
+
+        self.score_max = QtWidgets.QDoubleSpinBox(self)
+        self.score_max.setRange(0.0, 1.0)
+        self.score_max.setSingleStep(0.05)
+        self.score_max.setDecimals(2)
+        self.score_max.setValue(1.0)
+        self.score_max.setPrefix("≤ ")
+
+        self.sim_min = QtWidgets.QDoubleSpinBox(self)
+        self.sim_min.setRange(0.0, 1.0)
+        self.sim_min.setSingleStep(0.05)
+        self.sim_min.setDecimals(2)
+        self.sim_min.setValue(0.0)
+        self.sim_min.setPrefix("sim ≥ ")
+
+        self.cluster_min = QtWidgets.QSpinBox(self)
+        self.cluster_min.setRange(0, 100000)
+        self.cluster_min.setSingleStep(1)
+        self.cluster_min.setValue(0)
+        self.cluster_min.setPrefix("cluster ≥ ")
+
+        self.sort_combo = QtWidgets.QComboBox(self)
+        for key, txt in _SORT_MODES:
+            self.sort_combo.addItem(txt, key)
+
+        self.reset_btn = primary_button("Reset")
+        self.summary = Chip("Items: 0 / 0", self)
+
+        bar.add_label("Search")
+        bar.add(self.search_edit)
+        bar.add_separator()
+        bar.add(chip_box)
+        bar.add_separator()
+        bar.add_label("Band")
+        bar.add(self.band_combo)
+        bar.add_label("Review")
+        bar.add(self.review_combo)
+        bar.add_label("Domain")
+        bar.add(self.domain_combo)
+        bar.add_separator()
+        bar.add(self.score_min)
+        bar.add(self.score_max)
+        bar.add(self.sim_min)
+        bar.add(self.cluster_min)
+        bar.add_separator()
+        bar.add_label("Sort")
+        bar.add(self.sort_combo)
+        bar.add_stretch()
+        bar.add(self.reset_btn)
+        bar.add(self.summary)
+        root.addWidget(bar)
+
+        # ── Main 3-pane split ────────────────────────────────────────────
         split = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
         self.list = PayloadList(split)
 
@@ -116,6 +220,49 @@ class PrototypePage(BasePage):
         self._image_service.imageFailed.connect(self.on_image_failed)
         self.db.subscribe("candidates", self._on_candidates_loaded, self.window.error)
 
+        # Filter wiring — debounce search, immediate for everything else
+        self._search_timer = QtCore.QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(180)
+        self._search_timer.timeout.connect(self.refresh)
+        self.search_edit.textChanged.connect(lambda _t: self._search_timer.start())
+
+        for chip in self._label_chips.values():
+            chip.toggled.connect(lambda _v: self.refresh())
+        self.band_combo.currentTextChanged.connect(lambda _v: self.refresh())
+        self.review_combo.currentTextChanged.connect(lambda _v: self.refresh())
+        self.domain_combo.currentIndexChanged.connect(lambda _i: self.refresh())
+        self.score_min.valueChanged.connect(lambda _v: self._on_score_min_changed())
+        self.score_max.valueChanged.connect(lambda _v: self._on_score_max_changed())
+        self.sim_min.valueChanged.connect(lambda _v: self.refresh())
+        self.cluster_min.valueChanged.connect(lambda _v: self.refresh())
+        self.sort_combo.currentIndexChanged.connect(lambda _i: self.refresh())
+        self.reset_btn.clicked.connect(self._reset_filters)
+
+    def _on_score_min_changed(self) -> None:
+        if self.score_min.value() > self.score_max.value():
+            self.score_max.setValue(self.score_min.value())
+        self.refresh()
+
+    def _on_score_max_changed(self) -> None:
+        if self.score_max.value() < self.score_min.value():
+            self.score_min.setValue(self.score_max.value())
+        self.refresh()
+
+    def _reset_filters(self) -> None:
+        self.search_edit.clear()
+        for chip in self._label_chips.values():
+            chip.setChecked(True)
+        self.band_combo.setCurrentIndex(0)
+        self.review_combo.setCurrentIndex(0)
+        self.domain_combo.setCurrentIndex(0)
+        self.score_min.setValue(0.0)
+        self.score_max.setValue(1.0)
+        self.sim_min.setValue(0.0)
+        self.cluster_min.setValue(0)
+        self.sort_combo.setCurrentIndex(0)
+        self.refresh()
+
     @QtCore.Slot()
     def load(self) -> None:
         self.db.submit(
@@ -130,20 +277,118 @@ class PrototypePage(BasePage):
         selected = self._representatives_by_policy(candidates)
         self.items = [item for label in ("crack", "mold", "spall", "reject") for item in selected.get(label, [])]
         self._order_cache.clear()
+        self._populate_domain_combo()
         self._loaded_once = True
         self.refresh()
         self.window.status(
             f"Loaded {len(self.items)} prototype representatives from {len(candidates)} candidates"
         )
 
+    def _populate_domain_combo(self) -> None:
+        prev = self.domain_combo.currentData()
+        domains = sorted({
+            int(getattr(i, "domain_index", -1) or -1)
+            for i in self.items
+            if getattr(i, "domain_index", None) is not None
+        })
+        self.domain_combo.blockSignals(True)
+        self.domain_combo.clear()
+        self.domain_combo.addItem("All domains", -1)
+        for d in domains:
+            self.domain_combo.addItem(f"D{d}", d)
+        idx = self.domain_combo.findData(prev)
+        if idx >= 0:
+            self.domain_combo.setCurrentIndex(idx)
+        self.domain_combo.blockSignals(False)
+
+    # -- filter pipeline ---------------------------------------------------
+    def _filter_signature(self) -> tuple:
+        labels = tuple(sorted(l for l, c in self._label_chips.items() if c.isChecked()))
+        return (
+            self.search_edit.text().strip().lower(),
+            labels,
+            self.band_combo.currentText(),
+            self.review_combo.currentText(),
+            int(self.domain_combo.currentData() or -1),
+            round(self.score_min.value(), 3),
+            round(self.score_max.value(), 3),
+            round(self.sim_min.value(), 3),
+            int(self.cluster_min.value()),
+            str(self.sort_combo.currentData() or "diverse"),
+        )
+
+    def _apply_filters(self, items: list[Any]) -> list[Any]:
+        sig = self._filter_signature()
+        query, labels, band, review, domain, smin, smax, sim_min, csz_min, _sort = sig
+        out: list[Any] = []
+        for item in items:
+            label = str(getattr(item, "label", "") or "")
+            if labels and label not in labels:
+                continue
+            if band != "all":
+                item_band = self._score_band(item)
+                bands = item_band.split("+") if item_band else []
+                if band not in bands:
+                    continue
+            if domain >= 0 and int(getattr(item, "domain_index", -1) or -1) != domain:
+                continue
+            score = float(getattr(item, "reliability_score", 0) or 0)
+            if score < smin or score > smax:
+                continue
+            sim = getattr(item, "centroid_similarity", None)
+            if sim_min > 0 and (sim is None or float(sim) < sim_min):
+                continue
+            if int(getattr(item, "cluster_size", 0) or 0) < csz_min:
+                continue
+            rid = int(getattr(item, "result_id", 0) or 0)
+            decision = self.decisions.get(rid)
+            if review != "all":
+                if review == "unreviewed" and decision is not None:
+                    continue
+                if review == "reviewed" and decision is None:
+                    continue
+                if review in ("accepted", "relabeled", "rejected"):
+                    if decision is None:
+                        continue
+                    action = str(decision.get("action") or "")
+                    suffix = action.split("prototype_", 1)[-1] if "prototype_" in action else ""
+                    if suffix != review:
+                        continue
+            if query:
+                hay = " ".join(str(x) for x in (
+                    rid,
+                    getattr(item, "image_rel_path", ""),
+                    getattr(item, "cluster_id", ""),
+                    label,
+                )).lower()
+                if query not in hay:
+                    continue
+            out.append(item)
+        return out
+
+    def _sort_items(self, items: list[Any], mode: str) -> list[Any]:
+        if mode == "score_desc":
+            return sorted(items, key=lambda i: (-self._score_key(i), int(getattr(i, "result_id", 0) or 0)))
+        if mode == "score_asc":
+            return sorted(items, key=lambda i: (self._score_key(i), int(getattr(i, "result_id", 0) or 0)))
+        if mode == "sim_desc":
+            return sorted(items, key=lambda i: (-(float(getattr(i, "centroid_similarity", 0) or 0)), int(getattr(i, "result_id", 0) or 0)))
+        if mode == "domain_asc":
+            return sorted(items, key=lambda i: (int(getattr(i, "domain_index", 0) or 0), int(getattr(i, "result_id", 0) or 0)))
+        if mode == "id_asc":
+            return sorted(items, key=lambda i: int(getattr(i, "result_id", 0) or 0))
+        return self._diverse_order(list(items))
+
     @QtCore.Slot()
     def refresh(self, keep_result_id: int | None = None) -> None:
-        label = self._filter_value
-        if label not in self._order_cache:
-            rows = self.items if label == "all" else [i for i in self.items if str(getattr(i, "label", "")) == label]
-            self._order_cache[label] = self._diverse_order(list(rows))
-        self.visible_items = self._order_cache[label]
+        sig = self._filter_signature()
+        if sig not in self._order_cache:
+            filtered = self._apply_filters(self.items)
+            mode = str(self.sort_combo.currentData() or "diverse")
+            self._order_cache[sig] = self._sort_items(filtered, mode)
+        self.visible_items = self._order_cache[sig]
         self.list.set_payloads(self.visible_items, self.title, self.thumb_key)
+        self.summary.setText(f"Items: {len(self.visible_items)} / {len(self.items)}")
         if keep_result_id is not None:
             for row, item in enumerate(self.visible_items):
                 if int(getattr(item, "result_id", 0) or 0) == int(keep_result_id):
@@ -420,6 +665,8 @@ class PrototypePage(BasePage):
         payload["action"] = "prototype_reject" if label == "reject" else ("prototype_accept" if label == original else "prototype_relabel")
         self.decisions[rid] = payload
         self.window.status(f"Prototype #{rid}: {original} -> {label}. Reviewed {len(self.decisions)}/{len(self.items)}")
+        # Decisions affect "review" filter results, so invalidate cache
+        self._order_cache.clear()
         current_row = self.list.currentRow()
         self.render_summary(refresh_list=True, keep_row=current_row)
         if current_row + 1 < self.list.count():
@@ -433,9 +680,9 @@ class PrototypePage(BasePage):
         by_label: dict[str, int] = defaultdict(int)
         for decision in self.decisions.values():
             by_label[str(decision.get("label") or "")] += 1
-        counts = "  ".join(f"{label}:{by_label.get(label, 0)}" for label in LABELS)
         self.progress.set_rows([
             ("Reviewed", f"{reviewed} / {total}"),
+            ("Visible", str(len(self.visible_items))),
             ("crack", str(by_label.get("crack", 0))),
             ("mold", str(by_label.get("mold", 0))),
             ("spall", str(by_label.get("spall", 0))),

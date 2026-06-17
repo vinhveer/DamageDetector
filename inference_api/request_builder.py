@@ -281,6 +281,7 @@ def _build_sam_lora_params(
     task_group: str,
 ) -> dict[str, Any]:
     params = _build_sam_common(settings, output_dir=output_dir, roi_box=roi_box, task_group=task_group)
+    predict_mode = str(settings.get("sam_lora_predict_mode") or "tile_full_box").strip().lower() or "tile_full_box"
     params.update(
         {
             "delta_type": "lora",
@@ -288,8 +289,20 @@ def _build_sam_lora_params(
             "middle_dim": _int_value(settings, "sam_lora_middle_dim", 32),
             "scaling_factor": _float_value(settings, "sam_lora_scaling_factor", 0.2),
             "rank": _int_value(settings, "sam_lora_rank", 4),
+            "predict_mode": predict_mode,
         }
     )
+    if predict_mode == "coarse_refine":
+        refine_ckpt = str(settings.get("sam_lora_refine_checkpoint") or "").strip()
+        if not refine_ckpt:
+            raise ValueError("coarse_refine mode requires a refine delta checkpoint.")
+        params.update(
+            {
+                "refine_delta_type": str(settings.get("sam_lora_refine_delta_type") or "lora").strip().lower(),
+                "refine_delta_checkpoint": refine_ckpt,
+                "refine_rank": _int_value(settings, "sam_lora_refine_rank", params["rank"]),
+            }
+        )
     return params
 
 

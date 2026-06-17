@@ -649,14 +649,22 @@ def _segment_boxes_with_predictor(
         merged = np.maximum(merged, chosen)
         color = rng.integers(0, 255, (3,), dtype=np.uint8)
         disp = overlay_mask(disp, chosen, color=color, alpha=float(params.overlay_alpha))
-        success, png_bytes = cv2.imencode(".png", chosen * 255)
+        crop_mask = chosen[y1i:y2i, x1i:x2i].astype(np.uint8) * 255
+        det_mask_path = os.path.join(
+            params.output_dir,
+            f"{safe_basename(image_path)}_{model_name.lower()}_box_{len(final_dets):03d}_mask.png",
+        )
+        cv2.imwrite(det_mask_path, crop_mask)
+        success, png_bytes = cv2.imencode(".png", crop_mask)
         mask_b64 = base64.b64encode(png_bytes.tobytes()).decode("ascii") if success else None
         final_dets.append(
             {
                 "label": label,
                 "score": score,
-                "box": [float(x1), float(y1), float(x2), float(y2)],
+                "box": [float(x1i), float(y1i), float(x2i), float(y2i)],
+                "mask_path": det_mask_path,
                 "mask_b64": mask_b64,
+                "mask_is_crop": True,
                 "model_name": model_name,
                 "det_idx": entry.get("det_idx"),
                 "detector_name": entry.get("detector_name"),

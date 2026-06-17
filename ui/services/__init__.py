@@ -1,0 +1,1 @@
+"""UI-facing service adapters."""

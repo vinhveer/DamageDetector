@@ -95,6 +95,7 @@ setup(
             "damage-sam-finetune-test=segmentation.sam.finetune.test:main",
             "damage-sam-finetune-pseudo-label=segmentation.sam.finetune.pseudo_label:main",
             "damage-editor=ui.editor_app:main",
+            "damage-editor-next=ui.app.application:run",
             "damage-semilabel=tools.semilabel_app_launcher:main",
             "damage-cropper=ui.create_data_tools.cropper_app.main:main",
             "damage-streamlit-demo=ui.streamlit_demo:main",

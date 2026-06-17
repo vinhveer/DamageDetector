@@ -821,13 +821,57 @@ def _run_unet_dino(ctx: WorkflowContext) -> InferenceResult:
     return ctx.completed(payload)
 
 
+def _normalize_box_prompts(raw_boxes: Any) -> list[dict[str, Any]]:
+    """Accept boxes as dicts ({box,label,score}) or bare 4-tuples; return dicts."""
+    boxes: list[dict[str, Any]] = []
+    for entry in raw_boxes or []:
+        if isinstance(entry, dict):
+            box = entry.get("box")
+            if isinstance(box, (list, tuple)) and len(box) == 4:
+                boxes.append(
+                    {
+                        "box": [float(v) for v in box],
+                        "label": str(entry.get("label") or "object"),
+                        "score": float(entry.get("score") or 0.0),
+                    }
+                )
+        elif isinstance(entry, (list, tuple)) and len(entry) == 4:
+            boxes.append({"box": [float(v) for v in entry], "label": "object", "score": 0.0})
+    return boxes
+
+
 def _run_sam_only(ctx: WorkflowContext) -> InferenceResult:
     params = dict(ctx.request.params.get("sam") or {})
+    boxes = _normalize_box_prompts(params.get("boxes"))
+    if boxes and ctx.request.image_path:
+        ctx.log(f"SAM segment on {len(boxes)} box(es)...")
+        ctx.call_service("sam", get_sam_service, "warmup", {"params": params})
+        payload = ctx.call_service(
+            "sam",
+            get_sam_service,
+            "segment_boxes",
+            {"image_path": str(ctx.request.image_path), "params": params, "boxes": boxes},
+        )
+        return ctx.completed(dict(payload or {}))
     return _run_single_or_batch(ctx=ctx, service_name="sam", service_getter=get_sam_service, params=params)
 
 
 def _run_sam_only_ft(ctx: WorkflowContext) -> InferenceResult:
     params = dict(ctx.request.params.get("sam") or {})
+    boxes = _normalize_box_prompts(params.get("boxes"))
+    if boxes and ctx.request.image_path:
+        predict_mode = str(params.get("predict_mode") or "").strip().lower()
+        if predict_mode == "coarse_refine":
+            ctx.log("Box-scoped segment: ignoring coarse_refine (whole-image only); using coarse predictor on boxes.")
+        ctx.log(f"SAM-LoRA segment on {len(boxes)} box(es)...")
+        ctx.call_service("sam_finetune", get_sam_finetune_service, "warmup", {"params": params})
+        payload = ctx.call_service(
+            "sam_finetune",
+            get_sam_finetune_service,
+            "segment_boxes",
+            {"image_path": str(ctx.request.image_path), "params": params, "boxes": boxes},
+        )
+        return ctx.completed(dict(payload or {}))
     return _run_single_or_batch(ctx=ctx, service_name="sam_finetune", service_getter=get_sam_finetune_service, params=params)
 
 
@@ -931,6 +975,73 @@ def _run_isolate(ctx: WorkflowContext) -> InferenceResult:
     return ctx.completed(dict(payload or {}))
 
 
+def _wrap_unet_payload_as_detection(payload: dict[str, Any], *, image_path: str) -> dict[str, Any]:
+    out = dict(payload or {})
+    if out.get("detections"):
+        return out
+    mask_path = str(out.get("mask_path") or "")
+    if not mask_path:
+        return out
+    box: list[float] | None = None
+    roi = out.get("roi_box")
+    if isinstance(roi, (list, tuple)) and len(roi) == 4:
+        box = [float(v) for v in roi]
+    if box is None:
+        try:
+            with Image.open(image_path) as img:
+                box = [0.0, 0.0, float(img.width), float(img.height)]
+        except Exception:
+            box = None
+    det = {
+        "label": "crack",
+        "score": 1.0,
+        "model_name": "Unet",
+        "mask_path": mask_path,
+    }
+    if box is not None:
+        det["box"] = box
+    if out.get("overlay_path"):
+        det["overlay_path"] = out["overlay_path"]
+    out["detections"] = [_with_b64_mask(det)]
+    return out
+
+
+def _run_unet_only(ctx: WorkflowContext) -> InferenceResult:
+    params = dict(ctx.request.params.get("unet") or {})
+    boxes = _normalize_box_prompts(params.get("boxes"))
+    if boxes and ctx.request.image_path:
+        ctx.log(f"UNet segment on {len(boxes)} box(es)...")
+        ctx.call_service("unet", get_unet_service, "warmup", {"params": params})
+        payload = _segment_boxes_with_unet_override(
+            ctx,
+            image_path=str(ctx.request.image_path),
+            unet_params=params,
+            boxes=boxes,
+        )
+        return ctx.completed(dict(payload or {}))
+    if ctx.request.image_paths:
+        payload = ctx.call_service(
+            "unet",
+            get_unet_service,
+            "predict_batch",
+            {"image_paths": list(ctx.request.image_paths), "params": params},
+        )
+        payload = dict(payload or {})
+        results = payload.get("results") or []
+        wrapped = []
+        for res in results:
+            if not isinstance(res, dict):
+                continue
+            wrapped.append(_wrap_unet_payload_as_detection(res, image_path=str(res.get("image_path") or "")))
+        if wrapped:
+            payload["results"] = wrapped
+        return ctx.completed(payload)
+    image_path = str(ctx.request.image_path or "")
+    payload = ctx.call_service("unet", get_unet_service, "predict", {"image_path": image_path, "params": params})
+    payload = _wrap_unet_payload_as_detection(dict(payload or {}), image_path=image_path)
+    return ctx.completed(payload)
+
+
 _WORKFLOW_HANDLERS: dict[str, Callable[[WorkflowContext], InferenceResult]] = {
     "sam_dino": lambda ctx: _run_sam_dino_workflow(ctx, sam_service_name="sam", sam_getter=get_sam_service),
     "sam_dino_ft": lambda ctx: _run_sam_dino_workflow(ctx, sam_service_name="sam_finetune", sam_getter=get_sam_finetune_service),
@@ -938,12 +1049,7 @@ _WORKFLOW_HANDLERS: dict[str, Callable[[WorkflowContext], InferenceResult]] = {
     "sam_only_ft": _run_sam_only_ft,
     "sam_tiled": _run_sam_tiled,
     "isolate": _run_isolate,
-    "unet_only": lambda ctx: _run_single_or_batch(
-        ctx=ctx,
-        service_name="unet",
-        service_getter=get_unet_service,
-        params=dict(ctx.request.params.get("unet") or {}),
-    ),
+    "unet_only": _run_unet_only,
     "unet_dino": _run_unet_dino,
 }
 
